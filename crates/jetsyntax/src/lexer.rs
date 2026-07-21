@@ -581,42 +581,40 @@ impl<'s> Lexer<'s> {
         if self.position == start && self.bytes.get(start) == Some(&b'#') {
             self.position += 1;
         }
-        let mut first = true;
-        while let Some(&byte) = self.bytes.get(self.position) {
-            if (first && is_ascii_identifier_start(byte))
-                || (!first && is_ascii_identifier_continue(byte))
-            {
+
+        let has_start = match self.bytes.get(self.position).copied() {
+            Some(byte) if is_ascii_identifier_start(byte) => {
                 self.position += 1;
-            } else if byte == b'\\' {
-                flags.insert(TokenFlags::ESCAPED);
-                if !self.identifier_escape(first) {
-                    break;
-                }
-            } else if byte >= 0x80 {
-                let Some(character) = self.current_char() else {
-                    break;
-                };
-                let valid = if first {
-                    unicode_id_start::is_id_start(character)
-                } else {
-                    unicode_id_start::is_id_continue(character)
-                };
-                if !valid && !is_identifier_joiner(character) {
-                    break;
-                }
-                self.position += character.len_utf8();
-            } else {
-                break;
+                true
             }
-            first = false;
-        }
-        if first {
+            Some(b'\\' | 0x80..=u8::MAX) => self.identifier_slow(true, &mut flags),
+            _ => false,
+        };
+        if !has_start {
             if self.position == start {
                 self.advance_char();
             }
             self.error(start, self.position, "invalid identifier start");
             return self.token(TokenKind::Invalid, start, flags);
         }
+
+        loop {
+            while self.position < self.bytes.len()
+                && is_ascii_identifier_continue(self.bytes[self.position])
+            {
+                self.position += 1;
+            }
+
+            match self.bytes.get(self.position).copied() {
+                Some(b'\\' | 0x80..=u8::MAX) => {
+                    if !self.identifier_slow(false, &mut flags) {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
         let text = &self.bytes[start..self.position];
         let kind = if flags.escaped() {
             TokenKind::Identifier
@@ -624,6 +622,32 @@ impl<'s> Lexer<'s> {
             keyword(text)
         };
         self.token(kind, start, flags)
+    }
+
+    #[cold]
+    fn identifier_slow(&mut self, first: bool, flags: &mut TokenFlags) -> bool {
+        match self.bytes.get(self.position).copied() {
+            Some(b'\\') => {
+                flags.insert(TokenFlags::ESCAPED);
+                self.identifier_escape(first)
+            }
+            Some(byte) if byte >= 0x80 => {
+                let Some(character) = self.current_char() else {
+                    return false;
+                };
+                let valid = if first {
+                    unicode_id_start::is_id_start(character)
+                } else {
+                    unicode_id_start::is_id_continue(character)
+                };
+                if !valid && !is_identifier_joiner(character) {
+                    return false;
+                }
+                self.position += character.len_utf8();
+                true
+            }
+            _ => false,
+        }
     }
 
     fn identifier_escape(&mut self, first: bool) -> bool {

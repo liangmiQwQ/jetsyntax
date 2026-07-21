@@ -409,6 +409,60 @@ fn lexer_should_recognize_unicode_identifiers_and_escapes() {
     assert_single_token("#field", TokenKind::PrivateIdentifier);
 }
 
+/// ASCII identifier scanning stops before punctuators without dropping or absorbing bytes.
+///
+/// Spec: `IdentifierPart` accepts ASCII letters, digits, `_`, and `$`, while each following
+/// punctuator begins a distinct token.
+#[test]
+fn lexer_should_stop_ascii_identifiers_before_punctuators() {
+    let source = "alpha9_$+beta.gamma#field";
+    let expected = [
+        (TokenKind::Identifier, "alpha9_$"),
+        (TokenKind::Plus, "+"),
+        (TokenKind::Identifier, "beta"),
+        (TokenKind::Dot, "."),
+        (TokenKind::Identifier, "gamma"),
+        (TokenKind::PrivateIdentifier, "#field"),
+    ];
+    let mut lexer = Lexer::new(source);
+
+    for (expected_kind, expected_text) in expected {
+        let token = lexer.next_token();
+        assert_eq!(token.kind, expected_kind);
+        assert_eq!(lexer.source_text(token), expected_text);
+    }
+
+    assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+    assert!(lexer.errors().is_empty(), "{:?}", lexer.errors());
+}
+
+/// Literal Unicode code points and their escape spellings occupy the same identifier positions.
+///
+/// Spec: an identifier escape is validated as the code point it represents while retaining its
+/// raw source span and escaped-token metadata.
+#[test]
+fn lexer_should_treat_unicode_and_escaped_identifier_parts_equivalently() {
+    for (unicode, escaped) in [
+        ("πvalue9", r"\u03c0value9"),
+        ("valueπ9", r"value\u03c09"),
+        ("value𐐀9", r"value\u{10400}9"),
+    ] {
+        for (source, expected_escaped) in [(unicode, false), (escaped, true)] {
+            let mut lexer = Lexer::new(source);
+            let token = lexer.next_token();
+            assert_eq!(token.kind, TokenKind::Identifier, "{source:?}");
+            assert_eq!(lexer.source_text(token), source, "{source:?}");
+            assert_eq!(token.flags.escaped(), expected_escaped, "{source:?}");
+            assert_eq!(lexer.next_token().kind, TokenKind::Eof, "{source:?}");
+            assert!(
+                lexer.errors().is_empty(),
+                "{source:?}: {:?}",
+                lexer.errors()
+            );
+        }
+    }
+}
+
 /// Private identifiers accept the same Unicode starts and escapes as ordinary identifiers.
 ///
 /// Spec: the code point after `#` is an `IdentifierStart` or Unicode escape, not an ASCII-only name.
