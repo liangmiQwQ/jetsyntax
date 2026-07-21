@@ -241,6 +241,26 @@ fn parser_should_accept_functions_classes_and_modules() {
     assert_clean_cases(&cases);
 }
 
+/// Parameter and `var` bindings belong to their nearest function and must not leak into siblings.
+#[test]
+fn parser_should_isolate_function_scopes() {
+    let cases = [GrammarCase::script(
+        "sibling function scopes",
+        "function first(value) { var local; }\
+         function second(value) { var local; }\
+         class Example { first(value) { var local; } second(value) { var local; } }\
+         const firstArrow = (value) => { var local; return value; };\
+         const secondArrow = async (value) => { var local; return value; };",
+        &[
+            NodeTag::FUNCTION_DECLARATION,
+            NodeTag::METHOD_DEFINITION,
+            NodeTag::ARROW_FUNCTION_EXPRESSION,
+        ],
+    )];
+
+    assert_clean_cases(&cases);
+}
+
 /// Binding and assignment positions must distinguish patterns from array/object expressions.
 #[test]
 fn parser_should_accept_binding_and_assignment_patterns() {

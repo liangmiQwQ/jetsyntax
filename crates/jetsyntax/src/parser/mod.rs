@@ -256,32 +256,37 @@ impl<'s> Parser<'s> {
         let start = self.expect(TokenKind::Function).start;
         let generator = self.eat(TokenKind::Star).is_some();
         let id = if Self::is_identifier_name(self.current.kind) {
-            self.parse_binding_identifier(BindingKind::Function)?
-                .value()
+            Some(if declaration {
+                self.parse_binding_identifier(BindingKind::Function)?
+            } else {
+                self.parse_identifier()?
+            })
         } else {
             if declaration {
                 self.error(self.current_span(), "function declaration requires a name");
             }
-            self.tape.push_null()?
+            None
         };
         self.expect(TokenKind::LeftParen);
+        let previous_grammar = self.enter_function_context(generator, asynchronous);
+        if !declaration && let Some(id) = id {
+            let name = self
+                .source
+                .get(id.span.start as usize..id.span.end as usize)
+                .unwrap_or_default();
+            let _ = self
+                .context
+                .declare_binding(name, BindingKind::Lexical, id.span);
+        }
         let params = self.parse_parameter_list()?;
         self.expect(TokenKind::RightParen);
-        self.function_depth = self.function_depth.saturating_add(1);
-        self.context.enter_scope(ScopeKind::Function);
-        let previous_grammar = self.context.grammar();
-        self.context.set_grammar(
-            previous_grammar
-                .with_function(true)
-                .with_generator(generator)
-                .with_async_function(asynchronous)
-                .with_allow_yield(generator)
-                .with_allow_await(asynchronous),
-        );
         let body = self.parse_block_statement()?;
-        self.context.set_grammar(previous_grammar);
-        let _ = self.context.leave_scope();
-        self.function_depth = self.function_depth.saturating_sub(1);
+        self.leave_function_context(previous_grammar);
+        let id = if let Some(id) = id {
+            id.value()
+        } else {
+            self.tape.push_null()?
+        };
         let generator = self.tape.push_bool(generator)?;
         let asynchronous = self.tape.push_bool(asynchronous)?;
         self.node(
@@ -310,6 +315,27 @@ impl<'s> Parser<'s> {
             }
         }
         Ok(self.tape.push_list(&params)?)
+    }
+
+    fn enter_function_context(&mut self, generator: bool, asynchronous: bool) -> GrammarContext {
+        self.function_depth = self.function_depth.saturating_add(1);
+        self.context.enter_scope(ScopeKind::Function);
+        let previous = self.context.grammar();
+        self.context.set_grammar(
+            previous
+                .with_function(true)
+                .with_generator(generator)
+                .with_async_function(asynchronous)
+                .with_allow_yield(generator)
+                .with_allow_await(asynchronous),
+        );
+        previous
+    }
+
+    fn leave_function_context(&mut self, previous: GrammarContext) {
+        self.context.set_grammar(previous);
+        let _ = self.context.leave_scope();
+        self.function_depth = self.function_depth.saturating_sub(1);
     }
 
     fn parse_class(&mut self, declaration: bool) -> Result<ParsedNode, ParseError> {
@@ -396,11 +422,11 @@ impl<'s> Parser<'s> {
         }
         if self.current.kind == TokenKind::LeftParen {
             self.bump();
+            let previous_grammar = self.enter_function_context(false, false);
             let params = self.parse_parameter_list()?;
             self.expect(TokenKind::RightParen);
-            self.function_depth = self.function_depth.saturating_add(1);
             let body = self.parse_block_statement()?;
-            self.function_depth = self.function_depth.saturating_sub(1);
+            self.leave_function_context(previous_grammar);
             let id = self.tape.push_null()?;
             let generator = self.tape.push_bool(false)?;
             let asynchronous = self.tape.push_bool(false)?;
@@ -1004,6 +1030,7 @@ impl<'s> Parser<'s> {
     fn parse_assignment_expression(&mut self, allow_in: bool) -> Result<ParsedNode, ParseError> {
         if self.current.kind == TokenKind::Async && self.looks_like_async_arrow() {
             let start = self.take().start;
+            let previous_grammar = self.enter_function_context(false, true);
             let mut parameters = Vec::new();
             if self.eat(TokenKind::LeftParen).is_some() {
                 while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
@@ -1024,13 +1051,12 @@ impl<'s> Parser<'s> {
             }
             self.expect(TokenKind::Arrow);
             let expression_body = self.current.kind != TokenKind::LeftBrace;
-            self.function_depth = self.function_depth.saturating_add(1);
             let body = if expression_body {
                 self.parse_assignment_expression(allow_in)?
             } else {
                 self.parse_block_statement()?
             };
-            self.function_depth = self.function_depth.saturating_sub(1);
+            self.leave_function_context(previous_grammar);
             let parameters = self.tape.push_list(&parameters)?;
             let asynchronous = self.tape.push_bool(true)?;
             let expression = self.tape.push_bool(expression_body)?;
@@ -1044,14 +1070,13 @@ impl<'s> Parser<'s> {
         if self.eat(TokenKind::Arrow).is_some() {
             let params = self.tape.push_list(&[left.value()])?;
             let expression_body = self.current.kind != TokenKind::LeftBrace;
+            let previous_grammar = self.enter_function_context(false, false);
             let body = if expression_body {
                 self.parse_assignment_expression(allow_in)?
             } else {
-                self.function_depth = self.function_depth.saturating_add(1);
-                let body = self.parse_block_statement()?;
-                self.function_depth = self.function_depth.saturating_sub(1);
-                body
+                self.parse_block_statement()?
             };
+            self.leave_function_context(previous_grammar);
             let asynchronous = self.tape.push_bool(false)?;
             let expression = self.tape.push_bool(expression_body)?;
             return self.node(
