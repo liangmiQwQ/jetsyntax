@@ -308,6 +308,9 @@ impl<'s> Parser<'s> {
             TokenKind::Switch => self.parse_switch_statement(),
             TokenKind::Try => self.parse_try_statement(),
             TokenKind::Class => self.parse_class(true),
+            TokenKind::Import if self.import_starts_expression() => {
+                self.parse_expression_or_labeled_statement()
+            }
             TokenKind::Import => self.parse_import_declaration(),
             TokenKind::Export => self.parse_export_declaration(),
             TokenKind::Break => self.parse_jump_statement(false),
@@ -4618,6 +4621,12 @@ impl<'s> Parser<'s> {
         lookahead.set_position(self.current.end as usize);
         let token = lookahead.next_token();
         token.kind == kind && !token.flags.line_break_before() && !token.flags.escaped()
+    }
+
+    fn import_starts_expression(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        lookahead.next_token().kind == TokenKind::LeftParen
     }
 
     fn import_equals_type_only(&self, first: Token) -> Option<bool> {

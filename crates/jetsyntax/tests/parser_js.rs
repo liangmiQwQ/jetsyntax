@@ -626,6 +626,41 @@ fn parser_should_restrict_import_call_new_callees() {
     );
 }
 
+/// Statement-leading import calls retain the same postfix grammar as nested expressions.
+#[test]
+fn parser_should_parse_statement_leading_dynamic_import_continuations() {
+    assert_clean_cases(&[
+        GrammarCase::script(
+            "dynamic import postfix continuations",
+            "import('bare');\
+             import('chain').then(handler).catch(handler);\
+             import('call')();\
+             import('tag')``;\
+             import\n('line-break').then(handler);",
+            &[
+                NodeTag::IMPORT_EXPRESSION,
+                NodeTag::MEMBER_EXPRESSION,
+                NodeTag::CALL_EXPRESSION,
+                NodeTag::TAGGED_TEMPLATE_EXPRESSION,
+            ],
+        ),
+        GrammarCase::module(
+            "static import declaration",
+            "import value from 'package';",
+            &[NodeTag::IMPORT_DECLARATION],
+        ),
+    ]);
+
+    assert_diagnostic_cases(
+        &[GrammarCase::script(
+            "empty dynamic import call",
+            "import();",
+            &[NodeTag::IMPORT_EXPRESSION],
+        )],
+        false,
+    );
+}
+
 /// Line terminators before `=>` stay invalid, and truncated bodies retain a recoverable tape.
 #[test]
 fn parser_should_recover_invalid_zero_parameter_arrow_functions() {

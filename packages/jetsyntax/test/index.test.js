@@ -188,6 +188,37 @@ describe("parse", () => {
     }
   });
 
+  it("keeps statement-leading dynamic imports on the expression postfix path", () => {
+    const result = parse(
+      [
+        "import('bare');",
+        "import('chain').then(handler).catch(handler);",
+        "import('call')();",
+        "import('tag')``;",
+        "import",
+        "('line-break').then(handler);",
+      ].join("\n"),
+      { sourceType: "script" },
+    );
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      { expression: { type: "ImportExpression" } },
+      { expression: { type: "CallExpression" } },
+      { expression: { type: "CallExpression", callee: { type: "ImportExpression" } } },
+      { expression: { type: "TaggedTemplateExpression", tag: { type: "ImportExpression" } } },
+      { expression: { type: "CallExpression" } },
+    ]);
+
+    const staticImport = parse("import value from 'package';", { sourceType: "module" });
+    expect(staticImport.diagnostics).toEqual([]);
+    expect(staticImport.program.body).toMatchObject([{ type: "ImportDeclaration" }]);
+
+    const malformed = parse("import();", { sourceType: "script" });
+    expect(malformed.diagnostics).not.toEqual([]);
+    expect(malformed.program.type).toBe("Program");
+  });
+
   it("diagnoses escaped reserved identifiers only in reference and binding positions", () => {
     for (
       const source of [
