@@ -253,6 +253,97 @@ fn parses_block_function_return_annotations() {
 }
 
 #[test]
+fn parses_optional_typed_value_parameters() {
+    let source = [
+        "function declaration(required: Input, optional?: Input, inferred?) {}",
+        "const expression = function (required: Input, optional?: Input) {};",
+        "class Service { method(required: Input, optional?: Input) {} }",
+        "const arrow = (required: Input, optional?: Input) => optional;",
+        "const asyncArrow = async (required: Input, optional?: Input) => optional;",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse optional value parameters");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid optional-parameter tape");
+
+    let identifiers = node_fields(&parsed, NodeTag::IDENTIFIER)
+        .filter(|fields| fields.len() == 3)
+        .collect::<Vec<_>>();
+    assert_eq!(identifiers.len(), 11);
+    assert_eq!(
+        identifiers
+            .iter()
+            .filter(|fields| {
+                matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(true)))
+            })
+            .count(),
+        6
+    );
+    assert_eq!(
+        identifiers
+            .iter()
+            .filter(|fields| {
+                matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(false)))
+            })
+            .count(),
+        5
+    );
+    assert_eq!(
+        identifiers
+            .iter()
+            .filter(|fields| matches!(parsed.tape.value_at(fields[1]), Ok(TapeValue::Null)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::ARROW_FUNCTION_EXPRESSION).count(),
+        2
+    );
+}
+
+#[test]
+fn keeps_optional_parameter_syntax_out_of_javascript() {
+    let parsed = parse(
+        "function invalid(value?: Input) {}",
+        ParseOptions {
+            language: Language::JavaScript,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("recover from optional JavaScript parameter");
+
+    assert!(!parsed.diagnostics.is_empty());
+    parsed
+        .tape
+        .validate()
+        .expect("valid recovered JavaScript tape");
+    assert!(
+        node_fields(&parsed, NodeTag::IDENTIFIER).all(|fields| fields.len() != 3),
+        "JavaScript identifiers must not gain TypeScript parameter fields"
+    );
+}
+
+#[test]
+fn does_not_apply_parameter_optionality_to_other_typescript_bindings() {
+    for source in [
+        "let value?: Input;",
+        "import { value? } from 'package';",
+        "type value? = Input;",
+        "function destructured({ value? }: Input) {}",
+        "function rest(...values?: Input[]) {}",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover invalid optional binding");
+
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid recovered tape");
+    }
+}
+
+#[test]
 fn limits_function_return_annotations_to_supported_typescript_bodies() {
     let cases = [
         (

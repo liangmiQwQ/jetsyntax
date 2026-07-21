@@ -480,6 +480,53 @@ describe("parse", () => {
     expect(plain).not.toHaveProperty("returnType");
   });
 
+  it("materializes optional TypeScript value parameters", () => {
+    const source = [
+      "function declared(required: Input, optional?: Output, inferred?) {}",
+      "class Service { method(required: Input, optional?: Output) {} }",
+      "const arrow = (required: Input, optional?: Output) => optional;",
+      "const asyncArrow = async (required: Input, optional?: Output) => optional;",
+    ].join("\n");
+    const result = parse(source, { lang: "ts" });
+
+    expect(result.diagnostics).toEqual([]);
+    const [declaration, service, arrowDeclaration, asyncArrowDeclaration] = result.program.body;
+    const parameterLists = [
+      declaration.params,
+      service.body.body[0].value.params,
+      arrowDeclaration.declarations[0].init.params,
+      asyncArrowDeclaration.declarations[0].init.params,
+    ];
+
+    for (const [required, optional] of parameterLists) {
+      expect(required).toMatchObject({
+        type: "Identifier",
+        name: "required",
+        optional: false,
+        typeAnnotation: { type: "TSTypeAnnotation" },
+      });
+      expect(optional).toMatchObject({
+        type: "Identifier",
+        name: "optional",
+        optional: true,
+        typeAnnotation: { type: "TSTypeAnnotation" },
+      });
+    }
+    expect(declaration.params[2]).toMatchObject({
+      type: "Identifier",
+      name: "inferred",
+      optional: true,
+      typeAnnotation: null,
+    });
+  });
+
+  it("keeps optional parameter syntax out of JavaScript", () => {
+    const result = parse("function invalid(value?: Input) {}", { lang: "js" });
+
+    expect(result.diagnostics).not.toEqual([]);
+    expect(result.program.type).toBe("Program");
+  });
+
   it("keeps unsupported function return forms diagnostic", () => {
     for (
       const [source, options] of [

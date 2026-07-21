@@ -158,6 +158,13 @@ struct ParsedParameterList {
     simple: bool,
 }
 
+struct ParsedParameters {
+    values: Vec<ValueRef>,
+    has_rest: bool,
+    has_trailing_comma: bool,
+    simple: bool,
+}
+
 #[derive(Clone, Copy)]
 struct AssignmentPatternCandidate {
     node: NodeRef,
@@ -569,7 +576,18 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_parameter_list(&mut self) -> Result<ParsedParameterList, ParseError> {
-        let mut params = Vec::new();
+        let params = self.parse_parameters()?;
+        Ok(ParsedParameterList {
+            count: params.values.len(),
+            value: self.tape.push_list(&params.values)?,
+            has_rest: params.has_rest,
+            has_trailing_comma: params.has_trailing_comma,
+            simple: params.simple,
+        })
+    }
+
+    fn parse_parameters(&mut self) -> Result<ParsedParameters, ParseError> {
+        let mut values = Vec::new();
         let mut has_rest = false;
         let mut has_trailing_comma = false;
         let mut simple = true;
@@ -580,27 +598,34 @@ impl<'s> Parser<'s> {
                 let argument = self.parse_binding_pattern(BindingKind::Parameter)?;
                 self.parse_binding_rest_element(argument)?
             } else {
-                let pattern = self.parse_binding_pattern(BindingKind::Parameter)?;
+                let pattern = self.parse_parameter_binding()?;
                 if self.current.kind == TokenKind::Eq {
                     simple = false;
                 }
                 simple &= self.last_node_tag == Some(NodeTag::IDENTIFIER);
                 self.parse_binding_default(pattern)?
             };
-            params.push(parameter.value());
+            values.push(parameter.value());
             if self.eat(TokenKind::Comma).is_none() {
                 break;
             }
             has_trailing_comma =
                 matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof);
         }
-        Ok(ParsedParameterList {
-            count: params.len(),
-            value: self.tape.push_list(&params)?,
+        Ok(ParsedParameters {
+            values,
             has_rest,
             has_trailing_comma,
             simple,
         })
+    }
+
+    fn parse_parameter_binding(&mut self) -> Result<ParsedNode, ParseError> {
+        if Self::is_identifier_name(self.current.kind) {
+            self.parse_binding_identifier_with_optional(BindingKind::Parameter)
+        } else {
+            self.parse_binding_pattern(BindingKind::Parameter)
+        }
     }
 
     fn enter_function_context(&mut self, generator: bool, asynchronous: bool) -> GrammarContext {
@@ -1827,6 +1852,15 @@ impl<'s> Parser<'s> {
             self.rollback_assignment_patterns(assignment_patterns);
             return arrow;
         }
+        if self.options.language.is_typescript()
+            && self.current.kind == TokenKind::LeftParen
+            && self.looks_like_parenthesized_arrow()
+        {
+            let start = self.take().start;
+            let arrow = self.parse_parenthesized_arrow_function(start, allow_in);
+            self.rollback_assignment_patterns(assignment_patterns);
+            return arrow;
+        }
         if self.current.kind == TokenKind::LeftParen && self.looks_like_empty_arrow() {
             let start = self.take().start;
             self.expect(TokenKind::RightParen);
@@ -1897,6 +1931,43 @@ impl<'s> Parser<'s> {
         assignment
     }
 
+    fn parse_parenthesized_arrow_function(
+        &mut self,
+        start: u32,
+        allow_in: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let previous_grammar = self.enter_function_context(false, false);
+        self.context
+            .set_grammar(self.context.grammar().with_parameters(true));
+        let parameters = self.parse_parameters()?;
+        self.expect(TokenKind::RightParen);
+        self.expect(TokenKind::Arrow);
+        self.context
+            .set_grammar(self.context.grammar().with_parameters(false));
+        if self.reports_ecmascript_early_errors()
+            && parameters.has_rest
+            && parameters.has_trailing_comma
+        {
+            self.error(
+                self.current_span(),
+                "rest parameter cannot have a trailing comma",
+            );
+        }
+        if self.reports_ecmascript_early_errors()
+            && !parameters.simple
+            && self.current.kind == TokenKind::LeftBrace
+            && has_use_strict_directive(self.source, self.current.end as usize)
+        {
+            self.error(
+                self.current_span(),
+                "an arrow function with non-simple parameters cannot contain a use strict directive",
+            );
+        }
+        let arrow = self.parse_arrow_function(start, &parameters.values, false, allow_in);
+        self.leave_function_context(previous_grammar);
+        arrow
+    }
+
     fn parse_async_arrow_function(
         &mut self,
         start: u32,
@@ -1909,7 +1980,7 @@ impl<'s> Parser<'s> {
         let mut simple_parameters = true;
         if self.eat(TokenKind::LeftParen).is_some() {
             while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
-                let pattern = self.parse_binding_pattern(BindingKind::Parameter)?;
+                let pattern = self.parse_parameter_binding()?;
                 if self.current.kind == TokenKind::Eq {
                     simple_parameters = false;
                 }
@@ -3205,6 +3276,21 @@ impl<'s> Parser<'s> {
         &mut self,
         binding_kind: BindingKind,
     ) -> Result<ParsedNode, ParseError> {
+        self.parse_binding_identifier_impl(binding_kind, false)
+    }
+
+    fn parse_binding_identifier_with_optional(
+        &mut self,
+        binding_kind: BindingKind,
+    ) -> Result<ParsedNode, ParseError> {
+        self.parse_binding_identifier_impl(binding_kind, true)
+    }
+
+    fn parse_binding_identifier_impl(
+        &mut self,
+        binding_kind: BindingKind,
+        allow_optional: bool,
+    ) -> Result<ParsedNode, ParseError> {
         let token = self.take();
         let span = Self::token_span(token);
         let escaped = token.flags.escaped();
@@ -3238,13 +3324,36 @@ impl<'s> Parser<'s> {
         }
         let _ = self.context.declare_binding(name_text, binding_kind, span);
         let name = self.tape.push_source_slice(span)?;
-        if self.options.language.is_typescript() && self.eat(TokenKind::Colon).is_some() {
-            let annotation = self.parse_type_annotation()?;
-            let optional = self.tape.push_bool(false)?;
+        let optional_marker = if self.options.language.is_typescript() && allow_optional {
+            self.eat(TokenKind::Question)
+        } else {
+            None
+        };
+        let annotation =
+            if self.options.language.is_typescript() && self.eat(TokenKind::Colon).is_some() {
+                Some(self.parse_type_annotation()?)
+            } else {
+                None
+            };
+        if optional_marker.is_some() || annotation.is_some() {
+            let end = annotation.as_ref().map_or_else(
+                || {
+                    optional_marker
+                        .as_ref()
+                        .map_or(token.end, |marker| marker.end)
+                },
+                |annotation| annotation.span.end,
+            );
+            let annotation = if let Some(annotation) = annotation {
+                annotation.value()
+            } else {
+                self.tape.push_null()?
+            };
+            let optional = self.tape.push_bool(optional_marker.is_some())?;
             return self.node(
                 NodeTag::IDENTIFIER,
-                Span::new(token.start, annotation.span.end),
-                &[name, annotation.value(), optional],
+                Span::new(token.start, end),
+                &[name, annotation, optional],
             );
         }
         self.node(NodeTag::IDENTIFIER, span, &[name])
@@ -4626,6 +4735,27 @@ impl<'s> Parser<'s> {
         // Only trivia after `)` participates in the arrow's no-LineTerminator restriction.
         let arrow = lookahead.next_token();
         arrow.kind == TokenKind::Arrow && !arrow.flags.line_break_before()
+    }
+
+    fn looks_like_parenthesized_arrow(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let mut depth = 1_u32;
+        loop {
+            let token = lookahead.next_token();
+            match token.kind {
+                TokenKind::LeftParen => depth = depth.saturating_add(1),
+                TokenKind::RightParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        let arrow = lookahead.next_token();
+                        return arrow.kind == TokenKind::Arrow && !arrow.flags.line_break_before();
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
     }
 
     const fn is_property_name_start(kind: TokenKind, allow_private: bool) -> bool {
