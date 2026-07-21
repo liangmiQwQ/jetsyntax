@@ -119,7 +119,7 @@ impl<'s> Parser<'s> {
             source,
             lexer,
             current,
-            tape: TapeBuilder::new(source_len),
+            tape: TapeBuilder::new_parser(source_len),
             context: ParserContext::new(grammar),
             options,
             function_depth: 0,

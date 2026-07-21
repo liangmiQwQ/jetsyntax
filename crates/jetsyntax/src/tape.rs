@@ -404,7 +404,6 @@ impl TapeBuilder {
     /// The parser must emit current-branch backward references. [`Self::finish`] proves the tree
     /// invariant from the reference markers maintained during construction.
     #[must_use]
-    #[allow(dead_code)] // Parser integration is owned by a separate concurrent change.
     pub(crate) fn new_parser(source_bytes: u32) -> Self {
         Self::with_mode(source_bytes, BuilderMode::Parser)
     }
