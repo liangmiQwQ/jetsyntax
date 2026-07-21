@@ -25,7 +25,7 @@ describe("parse", () => {
   it("bounds recovery for an unterminated braced Unicode string escape", () => {
     const result = parse("var value = \"\\u{67\";");
 
-    expect(result.program.body[0].declarations[0].id.right).toMatchObject({
+    expect(result.program.body[0].declarations[0].init).toMatchObject({
       type: "Literal",
       raw: "\"\\u{67\"",
       value: "u{67",
@@ -164,7 +164,7 @@ describe("parse", () => {
     const result = parse(source, { semanticErrors: true });
 
     expect(result.diagnostics).toEqual([]);
-    const [plain, computed, stream] = result.program.body[0].declarations[0].id.right.properties;
+    const [plain, computed, stream] = result.program.body[0].declarations[0].init.properties;
     expect(plain).toMatchObject({
       type: "Property",
       method: true,
@@ -207,7 +207,7 @@ describe("parse", () => {
     const result = parse(source, { semanticErrors: true });
 
     expect(result.diagnostics).toEqual([]);
-    const properties = result.program.body[0].declarations[0].id.right.properties;
+    const properties = result.program.body[0].declarations[0].init.properties;
     expect(properties).toMatchObject([
       { computed: true, method: false, shorthand: false },
       { key: { type: "Identifier", name: "return" }, computed: false, shorthand: false },
@@ -239,5 +239,66 @@ describe("parse", () => {
       { type: "MethodDefinition", key: { name: "return" }, computed: false },
       { type: "PropertyDefinition", key: { bigint: "1" }, computed: false },
     ]);
+  });
+
+  it("separates declaration initializers from binding defaults", () => {
+    const source = [
+      "const value = source, second = other;",
+      "for (let index = 0; index < limit; index++) {}",
+      "function defaults(value = fallback, { key } = object, [first] = list, ...rest) {}",
+      "const [nested = 1, { item: renamed = fallback }, [inner] = list] = source;",
+    ].join("\n");
+    const result = parse(source, { sourceType: "script" });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[0].declarations).toMatchObject([
+      {
+        id: { type: "Identifier", name: "value" },
+        init: { type: "Identifier", name: "source" },
+      },
+      {
+        id: { type: "Identifier", name: "second" },
+        init: { type: "Identifier", name: "other" },
+      },
+    ]);
+    expect(result.program.body[1].init.declarations[0]).toMatchObject({
+      id: { type: "Identifier", name: "index" },
+      init: { type: "Literal", value: 0 },
+    });
+    expect(result.program.body[2].params).toMatchObject([
+      { type: "AssignmentPattern", left: { type: "Identifier", name: "value" } },
+      { type: "AssignmentPattern", left: { type: "ObjectPattern" } },
+      { type: "AssignmentPattern", left: { type: "ArrayPattern" } },
+      { type: "RestElement", argument: { type: "Identifier", name: "rest" } },
+    ]);
+    expect(result.program.body[3].declarations[0]).toMatchObject({
+      id: {
+        type: "ArrayPattern",
+        elements: [
+          { type: "AssignmentPattern" },
+          {
+            type: "ObjectPattern",
+            properties: [{ value: { type: "AssignmentPattern" } }],
+          },
+          { type: "AssignmentPattern", left: { type: "ArrayPattern" } },
+        ],
+      },
+      init: { type: "Identifier", name: "source" },
+    });
+  });
+
+  it("diagnoses defaults on rest bindings without panicking", () => {
+    const sources = [
+      "function invalid(...rest = fallback) {}",
+      "const [...rest = fallback] = source;",
+      "const { ...rest = fallback } = source;",
+    ];
+
+    for (const source of sources) {
+      const result = parse(source, { sourceType: "script" });
+      expect(result.diagnostics).not.toEqual([]);
+      expect(result.panicked).toBe(false);
+      expect(result.program.type).toBe("Program");
+    }
   });
 });

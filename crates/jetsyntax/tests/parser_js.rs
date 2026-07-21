@@ -307,6 +307,144 @@ fn parser_should_accept_binding_and_assignment_patterns() {
     assert_clean_cases(&cases);
 }
 
+/// Declaration initializers and binding-element defaults occupy distinct ESTree fields.
+#[test]
+fn parser_should_separate_declaration_initializers_from_binding_defaults() {
+    let source = "const value = source, second = other;\
+                  for (let index = 0; index < limit; index++) {}\
+                  function defaults(value = fallback, { key } = object, [first] = list, ...rest) {}\
+                  const [nested = 1, { item: renamed = fallback }, [inner] = list] = source;";
+    let parsed = parse(
+        source,
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse binding defaults");
+    inspect_tape("binding defaults", &parsed).expect("valid binding-default tape");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let declarators = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::VARIABLE_DECLARATOR,
+                fields,
+                ..
+            } => Some(fields.to_vec()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(declarators.len(), 4);
+    for (declarator, expected_init) in
+        declarators[..3]
+            .iter()
+            .zip([NodeTag::IDENTIFIER, NodeTag::IDENTIFIER, NodeTag::LITERAL])
+    {
+        assert_eq!(
+            node_tag(&parsed.tape, declarator[0]),
+            Ok(NodeTag::IDENTIFIER)
+        );
+        assert_eq!(node_tag(&parsed.tape, declarator[1]), Ok(expected_init));
+    }
+    assert_eq!(
+        node_tag(&parsed.tape, declarators[3][0]),
+        Ok(NodeTag::ARRAY_PATTERN)
+    );
+    assert_eq!(
+        node_tag(&parsed.tape, declarators[3][1]),
+        Ok(NodeTag::IDENTIFIER)
+    );
+
+    let function = parsed
+        .tape
+        .validation()
+        .find_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::FUNCTION_DECLARATION,
+                fields,
+                ..
+            } => Some(fields.to_vec()),
+            _ => None,
+        })
+        .expect("function declaration");
+    let parameters = list_items(&parsed.tape, function[1]).expect("function parameters");
+    assert_eq!(parameters.len(), 4);
+    assert_eq!(
+        node_tag(&parsed.tape, parameters[0]),
+        Ok(NodeTag::ASSIGNMENT_PATTERN)
+    );
+    assert_eq!(
+        node_tag(&parsed.tape, parameters[1]),
+        Ok(NodeTag::ASSIGNMENT_PATTERN)
+    );
+    assert_eq!(
+        node_tag(&parsed.tape, parameters[2]),
+        Ok(NodeTag::ASSIGNMENT_PATTERN)
+    );
+    assert_eq!(
+        node_tag(&parsed.tape, parameters[3]),
+        Ok(NodeTag::REST_ELEMENT)
+    );
+    let object_default = node_fields(&parsed.tape, parameters[1], NodeTag::ASSIGNMENT_PATTERN)
+        .expect("object default");
+    let array_default = node_fields(&parsed.tape, parameters[2], NodeTag::ASSIGNMENT_PATTERN)
+        .expect("array default");
+    assert_eq!(
+        node_tag(&parsed.tape, object_default[0]),
+        Ok(NodeTag::OBJECT_PATTERN)
+    );
+    assert_eq!(
+        node_tag(&parsed.tape, array_default[0]),
+        Ok(NodeTag::ARRAY_PATTERN)
+    );
+    let rest = node_fields(&parsed.tape, parameters[3], NodeTag::REST_ELEMENT).expect("rest");
+    assert_eq!(node_tag(&parsed.tape, rest[0]), Ok(NodeTag::IDENTIFIER));
+
+    let nested = node_fields(&parsed.tape, declarators[3][0], NodeTag::ARRAY_PATTERN)
+        .expect("nested pattern");
+    let nested = list_items(&parsed.tape, nested[0]).expect("nested elements");
+    assert_eq!(
+        node_tag(&parsed.tape, nested[0]),
+        Ok(NodeTag::ASSIGNMENT_PATTERN)
+    );
+    assert_eq!(
+        node_tag(&parsed.tape, nested[1]),
+        Ok(NodeTag::OBJECT_PATTERN)
+    );
+    assert_eq!(
+        node_tag(&parsed.tape, nested[2]),
+        Ok(NodeTag::ASSIGNMENT_PATTERN)
+    );
+}
+
+/// Rest bindings reject defaults while retaining a validated recovery tree.
+#[test]
+fn parser_should_diagnose_rest_binding_defaults() {
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script(
+                "parameter rest default",
+                "function invalid(...rest = fallback) {}",
+                &[NodeTag::REST_ELEMENT, NodeTag::ASSIGNMENT_PATTERN],
+            ),
+            GrammarCase::script(
+                "array rest default",
+                "const [...rest = fallback] = source;",
+                &[NodeTag::ARRAY_PATTERN, NodeTag::REST_ELEMENT],
+            ),
+            GrammarCase::script(
+                "object rest default",
+                "const { ...rest = fallback } = source;",
+                &[NodeTag::OBJECT_PATTERN, NodeTag::REST_ELEMENT],
+            ),
+        ],
+        false,
+    );
+}
+
 /// Regular expressions and template literals require parser-directed rescanning after `/`, `}`, and tags.
 #[test]
 fn parser_should_accept_regular_expressions_and_templates() {
@@ -838,6 +976,13 @@ fn node_fields(tape: &FrozenTape, offset: u32, expected: NodeTag) -> Result<&[u3
         TapeValue::Node { tag, fields, .. } if tag == expected => Ok(fields),
         TapeValue::Node { tag, .. } => Err(format!("node is {tag:?}, expected {expected:?}")),
         value => Err(format!("record is not a node: {value:?}")),
+    }
+}
+
+fn list_items(tape: &FrozenTape, offset: u32) -> Result<&[u32], String> {
+    match tape.value_at(offset).map_err(|error| error.to_string())? {
+        TapeValue::List { items, .. } => Ok(items),
+        value => Err(format!("record is not a list: {value:?}")),
     }
 }
 

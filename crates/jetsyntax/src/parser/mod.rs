@@ -345,9 +345,9 @@ impl<'s> Parser<'s> {
         while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
             let parameter = if self.eat(TokenKind::Ellipsis).is_some() {
                 let argument = self.parse_binding_pattern(BindingKind::Parameter)?;
-                self.node(NodeTag::REST_ELEMENT, argument.span, &[argument.value()])?
+                self.parse_binding_rest_element(argument)?
             } else {
-                self.parse_binding_pattern(BindingKind::Parameter)?
+                self.parse_binding_element(BindingKind::Parameter)?
             };
             params.push(parameter.value());
             if self.eat(TokenKind::Comma).is_none() {
@@ -2214,19 +2214,9 @@ impl<'s> Parser<'s> {
                     }
                     let element = if self.eat(TokenKind::Ellipsis).is_some() {
                         let argument = self.parse_binding_pattern(binding_kind)?;
-                        self.node(NodeTag::REST_ELEMENT, argument.span, &[argument.value()])?
+                        self.parse_binding_rest_element(argument)?
                     } else {
-                        let left = self.parse_binding_pattern(binding_kind)?;
-                        if self.eat(TokenKind::Eq).is_some() {
-                            let right = self.parse_assignment_expression(true)?;
-                            self.node(
-                                NodeTag::ASSIGNMENT_PATTERN,
-                                Span::new(left.span.start, right.span.end),
-                                &[left.value(), right.value()],
-                            )?
-                        } else {
-                            left
-                        }
+                        self.parse_binding_element(binding_kind)?
                     };
                     elements.push(element.value());
                     if self.eat(TokenKind::Comma).is_none() {
@@ -2242,33 +2232,24 @@ impl<'s> Parser<'s> {
                 let mut properties = Vec::new();
                 while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
                     if self.eat(TokenKind::Ellipsis).is_some() {
-                        let argument = self.parse_binding_pattern(binding_kind)?;
-                        properties.push(
-                            self.node(NodeTag::REST_ELEMENT, argument.span, &[argument.value()])?
-                                .value(),
-                        );
+                        let argument = self.parse_binding_identifier(binding_kind)?;
+                        properties.push(self.parse_binding_rest_element(argument)?.value());
                     } else {
                         let property_start = self.current.start;
                         let property_name = self.parse_property_name(false)?;
                         let key = property_name.key;
                         let shorthand =
                             property_name.shorthand && self.current.kind != TokenKind::Colon;
-                        let mut value = if self.eat(TokenKind::Colon).is_some() {
-                            self.parse_binding_pattern(binding_kind)?
+                        let value = if self.eat(TokenKind::Colon).is_some() {
+                            self.parse_binding_element(binding_kind)?
                         } else {
                             if !property_name.shorthand {
                                 self.error(key.span, "property name requires a binding target");
                             }
-                            self.binding_identifier_from_span(key.span, binding_kind)?
+                            let binding =
+                                self.binding_identifier_from_span(key.span, binding_kind)?;
+                            self.parse_binding_default(binding)?
                         };
-                        if self.eat(TokenKind::Eq).is_some() {
-                            let right = self.parse_assignment_expression(true)?;
-                            value = self.node(
-                                NodeTag::ASSIGNMENT_PATTERN,
-                                Span::new(value.span.start, right.span.end),
-                                &[value.value(), right.value()],
-                            )?;
-                        }
                         let property_kind = self.tape.push_u32(0)?;
                         let method = self.tape.push_bool(false)?;
                         let shorthand = self.tape.push_bool(shorthand)?;
@@ -2301,19 +2282,47 @@ impl<'s> Parser<'s> {
                     &[properties],
                 )
             }
-            _ => {
-                let mut pattern = self.parse_binding_identifier(binding_kind)?;
-                if self.eat(TokenKind::Eq).is_some() {
-                    let right = self.parse_assignment_expression(true)?;
-                    pattern = self.node(
-                        NodeTag::ASSIGNMENT_PATTERN,
-                        Span::new(pattern.span.start, right.span.end),
-                        &[pattern.value(), right.value()],
-                    )?;
-                }
-                Ok(pattern)
-            }
+            _ => self.parse_binding_identifier(binding_kind),
         }
+    }
+
+    fn parse_binding_element(
+        &mut self,
+        binding_kind: BindingKind,
+    ) -> Result<ParsedNode, ParseError> {
+        let pattern = self.parse_binding_pattern(binding_kind)?;
+        self.parse_binding_default(pattern)
+    }
+
+    fn parse_binding_default(&mut self, pattern: ParsedNode) -> Result<ParsedNode, ParseError> {
+        if self.eat(TokenKind::Eq).is_none() {
+            return Ok(pattern);
+        }
+        let right = self.parse_assignment_expression(true)?;
+        self.node(
+            NodeTag::ASSIGNMENT_PATTERN,
+            Span::new(pattern.span.start, right.span.end),
+            &[pattern.value(), right.value()],
+        )
+    }
+
+    fn parse_binding_rest_element(
+        &mut self,
+        mut argument: ParsedNode,
+    ) -> Result<ParsedNode, ParseError> {
+        if let Some(equals) = self.eat(TokenKind::Eq) {
+            self.error(
+                Self::token_span(equals),
+                "rest element cannot have a default",
+            );
+            let right = self.parse_assignment_expression(true)?;
+            argument = self.node(
+                NodeTag::ASSIGNMENT_PATTERN,
+                Span::new(argument.span.start, right.span.end),
+                &[argument.value(), right.value()],
+            )?;
+        }
+        self.node(NodeTag::REST_ELEMENT, argument.span, &[argument.value()])
     }
 
     fn binding_identifier_from_span(
