@@ -611,6 +611,9 @@ impl<'s> Parser<'s> {
             }
             has_trailing_comma =
                 matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof);
+            if self.reports_ecmascript_early_errors() && has_rest && !has_trailing_comma {
+                self.error(self.current_span(), "rest parameter must be last");
+            }
         }
         Ok(ParsedParameters {
             values,
@@ -1852,9 +1855,11 @@ impl<'s> Parser<'s> {
             self.rollback_assignment_patterns(assignment_patterns);
             return arrow;
         }
-        if self.options.language.is_typescript()
-            && self.current.kind == TokenKind::LeftParen
-            && self.looks_like_parenthesized_arrow()
+        // JavaScript cover grammar handles ordinary arrow heads; only a rest prefix needs binding grammar.
+        if self.current.kind == TokenKind::LeftParen
+            && (self.options.language.is_typescript() && self.looks_like_parenthesized_arrow()
+                || !self.options.language.is_typescript()
+                    && self.starts_parenthesized_rest_parameter())
         {
             let start = self.take().start;
             let arrow = self.parse_parenthesized_arrow_function(start, allow_in);
@@ -1936,14 +1941,29 @@ impl<'s> Parser<'s> {
         start: u32,
         allow_in: bool,
     ) -> Result<ParsedNode, ParseError> {
+        let outer_grammar = self.context.grammar();
+        let inherited_async_parameters =
+            outer_grammar.parameters() && outer_grammar.async_function();
+        let inherited_generator_parameters =
+            outer_grammar.parameters() && outer_grammar.generator();
         let previous_grammar = self.enter_function_context(false, false);
-        self.context
-            .set_grammar(self.context.grammar().with_parameters(true));
+        self.context.set_grammar(
+            self.context
+                .grammar()
+                .with_parameters(true)
+                .with_async_function(inherited_async_parameters)
+                .with_generator(inherited_generator_parameters),
+        );
         let parameters = self.parse_parameters()?;
         self.expect(TokenKind::RightParen);
         self.expect(TokenKind::Arrow);
-        self.context
-            .set_grammar(self.context.grammar().with_parameters(false));
+        self.context.set_grammar(
+            self.context
+                .grammar()
+                .with_parameters(false)
+                .with_async_function(false)
+                .with_generator(false),
+        );
         if self.reports_ecmascript_early_errors()
             && parameters.has_rest
             && parameters.has_trailing_comma
@@ -1976,30 +1996,35 @@ impl<'s> Parser<'s> {
         let previous_grammar = self.enter_function_context(false, true);
         self.context
             .set_grammar(self.context.grammar().with_parameters(true));
-        let mut parameters = Vec::new();
-        let mut simple_parameters = true;
-        if self.eat(TokenKind::LeftParen).is_some() {
-            while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
-                let pattern = self.parse_parameter_binding()?;
-                if self.current.kind == TokenKind::Eq {
-                    simple_parameters = false;
-                }
-                simple_parameters &= self.last_node_tag == Some(NodeTag::IDENTIFIER);
-                parameters.push(self.parse_binding_default(pattern)?.value());
-                if self.eat(TokenKind::Comma).is_none() {
-                    break;
-                }
-            }
-            self.expect(TokenKind::RightParen);
+        let parenthesized = self.eat(TokenKind::LeftParen).is_some();
+        let (parameters, simple_parameters, invalid_rest_trailing_comma) = if parenthesized {
+            let parameters = self.parse_parameters()?;
+            let invalid_rest_trailing_comma = parameters.has_rest && parameters.has_trailing_comma;
+            let simple = parameters.simple;
+            let values = parameters.values;
+            (values, simple, invalid_rest_trailing_comma)
         } else {
-            parameters.push(
-                self.parse_binding_identifier(BindingKind::Parameter)?
-                    .value(),
-            );
+            (
+                vec![
+                    self.parse_binding_identifier(BindingKind::Parameter)?
+                        .value(),
+                ],
+                true,
+                false,
+            )
+        };
+        if parenthesized {
+            self.expect(TokenKind::RightParen);
         }
         self.expect(TokenKind::Arrow);
         self.context
             .set_grammar(self.context.grammar().with_parameters(false));
+        if self.reports_ecmascript_early_errors() && invalid_rest_trailing_comma {
+            self.error(
+                self.current_span(),
+                "rest parameter cannot have a trailing comma",
+            );
+        }
         if self.reports_ecmascript_early_errors()
             && !simple_parameters
             && self.current.kind == TokenKind::LeftBrace
@@ -4830,6 +4855,22 @@ impl<'s> Parser<'s> {
                 }
                 TokenKind::Eof => return false,
                 _ => {}
+            }
+        }
+    }
+
+    fn starts_parenthesized_rest_parameter(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        loop {
+            let parameter = lookahead.next_token();
+            if parameter.kind == TokenKind::Ellipsis {
+                return true;
+            }
+            if !Self::is_identifier_name(parameter.kind)
+                || lookahead.next_token().kind != TokenKind::Comma
+            {
+                return false;
             }
         }
     }

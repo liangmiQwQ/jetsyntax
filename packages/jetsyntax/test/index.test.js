@@ -330,6 +330,75 @@ describe("parse", () => {
     });
   });
 
+  it("materializes parenthesized rest-arrow parameters", () => {
+    const source = [
+      "const direct = (...args) => args;",
+      "const prefixed = (first, second, third, ...rest) => rest;",
+      "const destructured = (...[first, second]) => first;",
+      "const asynchronous = async (...args) => await invoke(...args);",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true, sourceType: "script" });
+
+    expect(result.diagnostics).toEqual([]);
+    const [direct, prefixed, destructured, asynchronous] = result.program.body.map(
+      statement => statement.declarations[0].init,
+    );
+    expect(direct).toMatchObject({
+      type: "ArrowFunctionExpression",
+      params: [{ type: "RestElement", argument: { type: "Identifier", name: "args" } }],
+    });
+    expect(prefixed.params.at(-1)).toMatchObject({
+      type: "RestElement",
+      argument: { type: "Identifier", name: "rest" },
+    });
+    expect(destructured.params).toMatchObject([
+      { type: "RestElement", argument: { type: "ArrayPattern" } },
+    ]);
+    expect(asynchronous).toMatchObject({
+      type: "ArrowFunctionExpression",
+      async: true,
+      params: [{ type: "RestElement", argument: { type: "Identifier", name: "args" } }],
+      body: { type: "AwaitExpression" },
+    });
+  });
+
+  it("preserves non-rest parenthesized expression paths", () => {
+    const result = parse(
+      "const assigned = (value = fallback); const destructured = ({ value } = source);",
+      { preserveParens: true, semanticErrors: true, sourceType: "script" },
+    );
+
+    expect(result.diagnostics).toEqual([]);
+    for (const statement of result.program.body) {
+      expect(statement.declarations[0].init.type).toBe("ParenthesizedExpression");
+    }
+  });
+
+  it("diagnoses invalid rest-arrow parameters", () => {
+    for (
+      const source of [
+        "const invalid = (...args = []) => args;",
+        "const invalid = (...args,) => args;",
+        "const invalid = (...args, value) => args;",
+        "const invalid = (...first, ...second) => first;",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true, sourceType: "script" });
+
+      expect(result.diagnostics, source).not.toEqual([]);
+      const arrow = result.program.body[0].declarations[0].init;
+      expect(arrow.type).toBe("ArrowFunctionExpression");
+      expect(arrow.params.some(parameter => parameter.type === "RestElement")).toBe(true);
+    }
+
+    const nestedAwait = parse("async(value = (...await) => {}) => {};", {
+      semanticErrors: true,
+      sourceType: "script",
+    });
+    expect(nestedAwait.diagnostics).not.toEqual([]);
+    expect(nestedAwait.program.body[0].expression.type).toBe("ArrowFunctionExpression");
+  });
+
   it("rejects line terminators before zero-parameter arrow tokens", () => {
     for (const source of ["const callback = ()\n=> value;", "const callback = ()/*\n*/=> value;"]) {
       const result = parse(source, { sourceType: "script" });

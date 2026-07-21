@@ -505,6 +505,89 @@ fn parser_should_accept_zero_parameter_arrow_functions() {
     assert_clean_cases(&cases);
 }
 
+/// Rest parameters use binding grammar while ordinary parenthesized arrows retain cover grammar.
+#[test]
+fn parser_should_accept_parenthesized_rest_arrow_parameters() {
+    let cases = [
+        GrammarCase::script(
+            "direct rest parameter",
+            "const variadic = (...args) => args;",
+            &[NodeTag::ARROW_FUNCTION_EXPRESSION, NodeTag::REST_ELEMENT],
+        ),
+        GrammarCase::script(
+            "preceding parameters",
+            "const variadic = (first, second, third, ...rest) => rest;",
+            &[NodeTag::ARROW_FUNCTION_EXPRESSION, NodeTag::REST_ELEMENT],
+        ),
+        GrammarCase::script(
+            "destructured rest parameters",
+            "const array = (...[first, second]) => first; const object = (...{ length }) => length;",
+            &[
+                NodeTag::ARROW_FUNCTION_EXPRESSION,
+                NodeTag::REST_ELEMENT,
+                NodeTag::ARRAY_PATTERN,
+                NodeTag::OBJECT_PATTERN,
+            ],
+        ),
+        GrammarCase::script(
+            "async rest parameter",
+            "const variadic = async (...args) => await invoke(...args);",
+            &[
+                NodeTag::ARROW_FUNCTION_EXPRESSION,
+                NodeTag::REST_ELEMENT,
+                NodeTag::AWAIT_EXPRESSION,
+            ],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
+/// Default and destructuring expressions must remain on the existing parenthesized cover path.
+#[test]
+fn parser_should_preserve_non_rest_parenthesized_expression_paths() {
+    assert_clean_cases(&[GrammarCase::script(
+        "default and destructuring expressions",
+        "const assigned = (value = fallback); const destructured = ({ value } = source);",
+        &[NodeTag::PARENTHESIZED_EXPRESSION],
+    )]);
+}
+
+/// Rest parameters cannot carry defaults or a trailing comma.
+#[test]
+fn parser_should_diagnose_invalid_rest_arrow_parameters() {
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script(
+                "rest default",
+                "const invalid = (...args = []) => args;",
+                &[NodeTag::ARROW_FUNCTION_EXPRESSION, NodeTag::REST_ELEMENT],
+            ),
+            GrammarCase::script(
+                "rest trailing comma",
+                "const invalid = (...args,) => args;",
+                &[NodeTag::ARROW_FUNCTION_EXPRESSION, NodeTag::REST_ELEMENT],
+            ),
+            GrammarCase::script(
+                "rest followed by parameter",
+                "const invalid = (...args, value) => args;",
+                &[NodeTag::ARROW_FUNCTION_EXPRESSION, NodeTag::REST_ELEMENT],
+            ),
+            GrammarCase::script(
+                "multiple rest parameters",
+                "const invalid = (...first, ...second) => first;",
+                &[NodeTag::ARROW_FUNCTION_EXPRESSION, NodeTag::REST_ELEMENT],
+            ),
+            GrammarCase::script(
+                "await rest binding nested in async parameters",
+                "async(value = (...await) => {}) => {};",
+                &[NodeTag::ARROW_FUNCTION_EXPRESSION, NodeTag::REST_ELEMENT],
+            ),
+        ],
+        true,
+    );
+}
+
 /// Import calls need parentheses before they can be used as `new` callees.
 #[test]
 fn parser_should_restrict_import_call_new_callees() {
