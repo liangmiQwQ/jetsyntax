@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "test262": {
+    "repository": "tc39/test262",
+    "ref": "9e61c12835c5e4a3bdba93850427e6742c4f64c4",
+    "root": "test",
+    "inventory": {
+      "standaloneFiles": 53414,
+      "fixtureFiles": 284,
+      "executions": 102597,
+      "parseNegativeFiles": 4658
+    }
+  },
+  "typescript": {
+    "repository": "microsoft/TypeScript",
+    "ref": "637d5746b70257028fb95aad32ddec6b26ab0a14",
+    "root": "tests/cases",
+    "inventory": {
+      "caseFiles": 12444,
+      "configurations": 14973,
+      "sourceUnits": 16210,
+      "nonSourceUnits": 567,
+      "executions": 20742,
+      "nonSourceExecutions": 1080
+    }
+  },
+  "babel": {
+    "repository": "babel/babel",
+    "ref": "61bfda575b03e6a32af7877b65651a37eb339426",
+    "root": "packages/babel-parser/test/fixtures",
+    "inventory": {
+      "enabledFixtures": 5936,
+      "upstreamDisabled": 2,
+      "upstreamUndiscovered": 1,
+      "clean": 3511,
+      "recovery": 1727,
+      "fatal": 698,
+      "executions": 5936
+    }
+  }
+}

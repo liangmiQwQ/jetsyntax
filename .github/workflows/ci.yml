@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: pnpm
+      - uses: oxc-project/setup-rust@v1.0.9
+        with:
+          components: clippy rustfmt
+          cache-key: quality
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm lint
+      - run: pnpm fmt
+      - run: pnpm --filter @jetsyntax/conformance test:loaders
+      - run: pnpm test
+
+  conformance:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: yuku-toolchain/parser-test-suite
+          ref: ecfa810e631e1fcc6835734dc26c05fd08fab07f
+          path: parser-test-suite
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: pnpm
+      - uses: oxc-project/setup-rust@v1.0.9
+        with:
+          cache-key: conformance-${{ matrix.shard }}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test:conformance -- --suite parser-test-suite
+        env:
+          CONFORMANCE_REPORT: ${{ github.workspace }}/reports/conformance-${{ matrix.shard }}.json
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 4
+          SUITE_COMMIT: ecfa810e631e1fcc6835734dc26c05fd08fab07f
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-${{ matrix.shard }}
+          path: reports/conformance-${{ matrix.shard }}.json
+
+  official-conformance:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { suite: test262, shard: 0, total: 8, repository: tc39/test262, ref: 9e61c12835c5e4a3bdba93850427e6742c4f64c4, root: test }
+          - { suite: test262, shard: 1, total: 8, repository: tc39/test262, ref: 9e61c12835c5e4a3bdba93850427e6742c4f64c4, root: test }
+          - { suite: test262, shard: 2, total: 8, repository: tc39/test262, ref: 9e61c12835c5e4a3bdba93850427e6742c4f64c4, root: test }
+          - { suite: test262, shard: 3, total: 8, repository: tc39/test262, ref: 9e61c12835c5e4a3bdba93850427e6742c4f64c4, root: test }
+          - { suite: test262, shard: 4, total: 8, repository: tc39/test262, ref: 9e61c12835c5e4a3bdba93850427e6742c4f64c4, root: test }
+          - { suite: test262, shard: 5, total: 8, repository: tc39/test262, ref: 9e61c12835c5e4a3bdba93850427e6742c4f64c4, root: test }
+          - { suite: test262, shard: 6, total: 8, repository: tc39/test262, ref: 9e61c12835c5e4a3bdba93850427e6742c4f64c4, root: test }
+          - { suite: test262, shard: 7, total: 8, repository: tc39/test262, ref: 9e61c12835c5e4a3bdba93850427e6742c4f64c4, root: test }
+          - { suite: typescript, shard: 0, total: 4, repository: microsoft/TypeScript, ref: 637d5746b70257028fb95aad32ddec6b26ab0a14, root: tests/cases }
+          - { suite: typescript, shard: 1, total: 4, repository: microsoft/TypeScript, ref: 637d5746b70257028fb95aad32ddec6b26ab0a14, root: tests/cases }
+          - { suite: typescript, shard: 2, total: 4, repository: microsoft/TypeScript, ref: 637d5746b70257028fb95aad32ddec6b26ab0a14, root: tests/cases }
+          - { suite: typescript, shard: 3, total: 4, repository: microsoft/TypeScript, ref: 637d5746b70257028fb95aad32ddec6b26ab0a14, root: tests/cases }
+          - { suite: babel, shard: 0, total: 4, repository: babel/babel, ref: 61bfda575b03e6a32af7877b65651a37eb339426, root: packages/babel-parser/test/fixtures }
+          - { suite: babel, shard: 1, total: 4, repository: babel/babel, ref: 61bfda575b03e6a32af7877b65651a37eb339426, root: packages/babel-parser/test/fixtures }
+          - { suite: babel, shard: 2, total: 4, repository: babel/babel, ref: 61bfda575b03e6a32af7877b65651a37eb339426, root: packages/babel-parser/test/fixtures }
+          - { suite: babel, shard: 3, total: 4, repository: babel/babel, ref: 61bfda575b03e6a32af7877b65651a37eb339426, root: packages/babel-parser/test/fixtures }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.ref }}
+          path: official-suite
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: pnpm
+      - uses: oxc-project/setup-rust@v1.0.9
+        with:
+          cache-key: official-${{ matrix.suite }}-${{ matrix.shard }}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm --filter @jetsyntax/conformance test:official -- --suite ${{ matrix.suite }} --root official-suite/${{ matrix.root }} --ref ${{ matrix.ref }}
+        env:
+          CONFORMANCE_REPORT: ${{ github.workspace }}/reports/official-${{ matrix.suite }}-${{ matrix.shard }}.json
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ matrix.total }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: official-${{ matrix.suite }}-${{ matrix.shard }}
+          path: reports/official-${{ matrix.suite }}-${{ matrix.shard }}.json
+
+  official-conformance-summary:
+    if: always()
+    needs: official-conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: official-*
+          path: reports/official
+          merge-multiple: true
+      - run: node tasks/conformance/aggregate-official.mjs reports/official
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: official-conformance-summary
+          path: reports/official/official-summary.json

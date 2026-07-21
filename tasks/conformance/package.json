@@ -1,0 +1,16 @@
+{
+  "name": "@jetsyntax/conformance",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "aggregate:official": "node aggregate-official.mjs",
+    "test": "node run.mjs",
+    "test:loaders": "node --test test/official-loaders.test.mjs",
+    "test:official": "node official-run.mjs"
+  },
+  "dependencies": {
+    "jetsyntax": "workspace:*",
+    "typescript": "6.0.2",
+    "yaml": "2.8.1"
+  }
+}
