@@ -19,13 +19,17 @@
 //! - Nodes and lists carry an exact word length and an immediate reference count.
 //! - Spans and source slices use UTF-8 byte offsets into the caller-owned source.
 //! - Decoded strings use byte offsets into the tape's packed UTF-8 string pool.
+//! - Parser-produced tapes flag bit 27 as an incoming-reference marker on non-root records.
 //! - Wire bytes are little-endian, regardless of host endianness.
 //! - Node field order is defined by `JetSyntax`'s decoder schema, not encoded field names.
 
 use std::{
     error::Error,
     fmt,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 pub const MAGIC: u32 = 0x4A53_5450;
@@ -34,7 +38,9 @@ pub const HEADER_WORDS: usize = 12;
 
 const FLAG_SOURCE_UTF8: u32 = 1 << 0;
 const FLAG_POOL_UTF8: u32 = 1 << 1;
+const FLAG_REFERENCE_MARKERS: u32 = 1 << 2;
 const WIRE_FLAGS: u32 = FLAG_SOURCE_UTF8 | FLAG_POOL_UTF8;
+const PARSER_WIRE_FLAGS: u32 = WIRE_FLAGS | FLAG_REFERENCE_MARKERS;
 
 const HEADER_MAGIC: usize = 0;
 const HEADER_VERSION: usize = 1;
@@ -54,7 +60,9 @@ const KIND_MASK: u32 = 0xF000_0000;
 const NODE_FLAGS_SHIFT: u32 = 16;
 const NODE_FLAGS_MASK: u32 = 0x00FF_0000;
 const NODE_TAG_MASK: u32 = 0x0000_FFFF;
+const REFERENCE_MARKER: u32 = 1 << 27;
 const INLINE_U32_MASK: u32 = 0x0FFF_FFFF;
+const MARKED_INLINE_U32_MASK: u32 = INLINE_U32_MASK & !REFERENCE_MARKER;
 
 const MAX_INITIAL_WORD_CAPACITY: usize = 16 * 1024 * 1024;
 const MAX_INITIAL_RECORD_CAPACITY: usize = 4 * 1024 * 1024;
@@ -306,6 +314,8 @@ pub struct Checkpoint {
     last_record_id: Option<u64>,
     value_count: u32,
     node_count: u32,
+    edge_count: u32,
+    last_record_offset: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -379,6 +389,8 @@ pub struct TapeBuilder {
     records: Vec<BuilderRecord>,
     value_count: u32,
     node_count: u32,
+    edge_count: u32,
+    last_record_offset: Option<u32>,
 }
 
 impl TapeBuilder {
@@ -389,8 +401,8 @@ impl TapeBuilder {
 
     /// Creates the low-overhead builder used only by the parser.
     ///
-    /// The parser must emit current-branch backward references. [`Self::finish`] strictly validates
-    /// the completed wire tape before returning it.
+    /// The parser must emit current-branch backward references. [`Self::finish`] proves the tree
+    /// invariant from the reference markers maintained during construction.
     #[must_use]
     #[allow(dead_code)] // Parser integration is owned by a separate concurrent change.
     pub(crate) fn new_parser(source_bytes: u32) -> Self {
@@ -418,6 +430,8 @@ impl TapeBuilder {
             },
             value_count: 0,
             node_count: 0,
+            edge_count: 0,
+            last_record_offset: None,
         }
     }
 
@@ -431,6 +445,8 @@ impl TapeBuilder {
             last_record_id: self.records.last().map(|record| record.id),
             value_count: self.value_count,
             node_count: self.node_count,
+            edge_count: self.edge_count,
+            last_record_offset: self.last_record_offset,
         }
     }
 
@@ -459,12 +475,14 @@ impl TapeBuilder {
         {
             return Err(TapeError::ForeignCheckpoint);
         }
-        self.unmark_discarded_references(checkpoint.records_len)?;
+        self.unmark_discarded_references(checkpoint.records_len, checkpoint.words_len)?;
         self.words.truncate(checkpoint.words_len);
         self.string_pool.truncate(checkpoint.pool_len);
         self.records.truncate(checkpoint.records_len);
         self.value_count = checkpoint.value_count;
         self.node_count = checkpoint.node_count;
+        self.edge_count = checkpoint.edge_count;
+        self.last_record_offset = checkpoint.last_record_offset;
         Ok(())
     }
 
@@ -492,7 +510,11 @@ impl TapeBuilder {
     ///
     /// Returns [`TapeError::TooLarge`] if the tape exceeds its wire limits.
     pub fn push_u32(&mut self, value: u32) -> Result<ValueRef, TapeError> {
-        if value <= INLINE_U32_MASK {
+        let inline_mask = match self.mode {
+            BuilderMode::Safe => INLINE_U32_MASK,
+            BuilderMode::Parser => MARKED_INLINE_U32_MASK,
+        };
+        if value <= inline_mask {
             self.push_record(&[(KIND_INLINE_U32 << KIND_SHIFT) | value])
         } else {
             self.push_record(&[KIND_U32 << KIND_SHIFT, value])
@@ -642,10 +664,7 @@ impl TapeBuilder {
                 }
                 self.validate_tree_references()?;
             }
-            BuilderMode::Parser if root.0.builder_id != self.id => {
-                return Err(TapeError::ForeignReference);
-            }
-            BuilderMode::Parser => {}
+            BuilderMode::Parser => self.validate_parser_root(root)?,
         }
 
         let record_end = to_u32(self.words.len())?;
@@ -659,7 +678,10 @@ impl TapeBuilder {
         self.words[HEADER_MAGIC] = MAGIC;
         self.words[HEADER_VERSION] = FORMAT_VERSION;
         self.words[HEADER_SIZE] = to_u32(HEADER_WORDS)?;
-        self.words[HEADER_FLAGS] = WIRE_FLAGS;
+        self.words[HEADER_FLAGS] = match self.mode {
+            BuilderMode::Safe => WIRE_FLAGS,
+            BuilderMode::Parser => PARSER_WIRE_FLAGS,
+        };
         self.words[HEADER_TOTAL_WORDS] = to_u32(self.words.len())?;
         self.words[HEADER_RECORD_END] = record_end;
         self.words[HEADER_POOL_BYTES] = pool_bytes;
@@ -671,7 +693,7 @@ impl TapeBuilder {
 
         match self.mode {
             BuilderMode::Safe => Ok(FrozenTape::from_builder(self.words, self.records)),
-            BuilderMode::Parser => FrozenTape::from_words(self.words),
+            BuilderMode::Parser => Ok(FrozenTape::from_parser(self.words)),
         }
     }
 
@@ -707,13 +729,16 @@ impl TapeBuilder {
             self.value_count > 0,
             "completed records must increment the value count"
         );
-        if self.mode == BuilderMode::Safe {
-            debug_assert_eq!(self.records.len(), record_index as usize);
-            self.records.push(BuilderRecord {
-                id: record_id,
-                offset,
-                incoming: 0,
-            });
+        match self.mode {
+            BuilderMode::Safe => {
+                debug_assert_eq!(self.records.len(), record_index as usize);
+                self.records.push(BuilderRecord {
+                    id: record_id,
+                    offset,
+                    incoming: 0,
+                });
+            }
+            BuilderMode::Parser => self.last_record_offset = Some(offset),
         }
         ValueRef {
             builder_id: self.id,
@@ -734,28 +759,45 @@ impl TapeBuilder {
     }
 
     fn mark_references(&mut self, references: &[ValueRef]) -> Result<(), TapeError> {
-        if self.mode == BuilderMode::Parser {
-            return Ok(());
-        }
-        for (marked, reference) in references.iter().enumerate() {
-            let index = match self.reference_index(*reference) {
-                Ok(index) => index,
-                Err(error) => {
-                    self.unmark_references(&references[..marked]);
-                    return Err(error);
+        match self.mode {
+            BuilderMode::Safe => {
+                for (marked, reference) in references.iter().enumerate() {
+                    let index = match self.reference_index(*reference) {
+                        Ok(index) => index,
+                        Err(error) => {
+                            self.unmark_references(&references[..marked]);
+                            return Err(error);
+                        }
+                    };
+                    let Some(incoming) = self.records[index].incoming.checked_add(1) else {
+                        self.unmark_references(&references[..marked]);
+                        return Err(TapeError::TooLarge);
+                    };
+                    self.records[index].incoming = incoming;
                 }
-            };
-            let Some(incoming) = self.records[index].incoming.checked_add(1) else {
-                self.unmark_references(&references[..marked]);
-                return Err(TapeError::TooLarge);
-            };
-            self.records[index].incoming = incoming;
+            }
+            BuilderMode::Parser => {
+                let parent_offset = to_u32(self.words.len())?;
+                for (marked, reference) in references.iter().enumerate() {
+                    if let Err(error) = self.mark_parser_reference(*reference, parent_offset) {
+                        self.unmark_references(&references[..marked]);
+                        return Err(error);
+                    }
+                }
+            }
         }
         Ok(())
     }
 
     fn unmark_references(&mut self, references: &[ValueRef]) {
         if self.mode == BuilderMode::Parser {
+            for reference in references {
+                let offset = reference.offset as usize;
+                debug_assert_ne!(self.words[offset] & REFERENCE_MARKER, 0);
+                self.words[offset] &= !REFERENCE_MARKER;
+                debug_assert!(self.edge_count > 0);
+                self.edge_count = self.edge_count.saturating_sub(1);
+            }
             return;
         }
         for reference in references {
@@ -772,37 +814,38 @@ impl TapeBuilder {
         }
     }
 
-    fn unmark_discarded_references(&mut self, retained_records: usize) -> Result<(), TapeError> {
-        if self.mode == BuilderMode::Parser {
-            return Ok(());
-        }
-        for record_index in retained_records..self.records.len() {
-            let offset = to_usize(self.records[record_index].offset)?;
-            let kind = (self.words[offset] & KIND_MASK) >> KIND_SHIFT;
-            let references = match kind {
-                KIND_NODE => offset + 5..offset + 5 + to_usize(self.words[offset + 4])?,
-                KIND_LIST => offset + 3..offset + 3 + to_usize(self.words[offset + 2])?,
-                _ => offset..offset,
-            };
-            for word in references {
-                let reference = self.words[word];
-                let Ok(target) = self
-                    .records
-                    .binary_search_by_key(&reference, |record| record.offset)
-                else {
-                    debug_assert!(false, "builder records only contain valid references");
-                    continue;
-                };
-                if target >= retained_records {
-                    continue;
+    fn unmark_discarded_references(
+        &mut self,
+        retained_records: usize,
+        retained_words: usize,
+    ) -> Result<(), TapeError> {
+        match self.mode {
+            BuilderMode::Safe => {
+                for record_index in retained_records..self.records.len() {
+                    let offset = to_usize(self.records[record_index].offset)?;
+                    let references = record_references(&self.words, offset)?;
+                    for word in references {
+                        let reference = self.words[word];
+                        let Ok(target) = self
+                            .records
+                            .binary_search_by_key(&reference, |record| record.offset)
+                        else {
+                            debug_assert!(false, "builder records only contain valid references");
+                            continue;
+                        };
+                        if target >= retained_records {
+                            continue;
+                        }
+                        let incoming = &mut self.records[target].incoming;
+                        debug_assert!(
+                            *incoming > 0,
+                            "discarded references must have an incoming edge"
+                        );
+                        *incoming = incoming.saturating_sub(1);
+                    }
                 }
-                let incoming = &mut self.records[target].incoming;
-                debug_assert!(
-                    *incoming > 0,
-                    "discarded references must have an incoming edge"
-                );
-                *incoming = incoming.saturating_sub(1);
             }
+            BuilderMode::Parser => self.unmark_parser_rollback(retained_words)?,
         }
         Ok(())
     }
@@ -827,6 +870,101 @@ impl TapeBuilder {
                 offset: record.offset,
                 reason,
             });
+        }
+        Ok(())
+    }
+
+    fn mark_parser_reference(
+        &mut self,
+        reference: ValueRef,
+        parent_offset: u32,
+    ) -> Result<(), TapeError> {
+        if reference.builder_id != self.id
+            || reference.record_id != 0
+            || reference.record_index >= self.value_count
+            || reference.offset < to_u32(HEADER_WORDS)?
+        {
+            return Err(TapeError::ForeignReference);
+        }
+        if reference.offset >= parent_offset {
+            return Err(TapeError::MalformedRecord {
+                offset: parent_offset,
+                reason: "reference does not point backward",
+            });
+        }
+        let Some(header) = self.words.get_mut(reference.offset as usize) else {
+            return Err(TapeError::ForeignReference);
+        };
+        if *header & REFERENCE_MARKER != 0 {
+            return Err(TapeError::MalformedRecord {
+                offset: reference.offset,
+                reason: "record is referenced more than once",
+            });
+        }
+        let Some(edge_count) = self.edge_count.checked_add(1) else {
+            return Err(TapeError::TooLarge);
+        };
+        *header |= REFERENCE_MARKER;
+        self.edge_count = edge_count;
+        Ok(())
+    }
+
+    fn validate_parser_root(&self, root: NodeRef) -> Result<(), TapeError> {
+        if root.0.builder_id != self.id || root.0.record_id != 0 {
+            return Err(TapeError::ForeignReference);
+        }
+        if self.last_record_offset != Some(root.offset())
+            || root.0.record_index.checked_add(1) != Some(self.value_count)
+        {
+            return Err(TapeError::RootMustBeFinalNode);
+        }
+        let Some(header) = self.words.get(root.offset() as usize) else {
+            return Err(TapeError::ForeignReference);
+        };
+        if (header & KIND_MASK) >> KIND_SHIFT != KIND_NODE {
+            return Err(TapeError::RootMustBeFinalNode);
+        }
+        if header & REFERENCE_MARKER != 0 {
+            return Err(TapeError::MalformedRecord {
+                offset: root.offset(),
+                reason: "root is referenced by another record",
+            });
+        }
+        let Some(expected_edges) = self.value_count.checked_sub(1) else {
+            return Err(TapeError::RootMustBeFinalNode);
+        };
+        // Backward edges are acyclic, and the marker limits every record to one parent. V-1 edges therefore connect every non-root record to the final root.
+        if self.edge_count != expected_edges {
+            return Err(TapeError::MalformedRecord {
+                offset: root.offset(),
+                reason: "non-root record is not referenced exactly once",
+            });
+        }
+        Ok(())
+    }
+
+    fn unmark_parser_rollback(&mut self, retained_words: usize) -> Result<(), TapeError> {
+        // Discarded parents may have marked retained children; edges wholly inside the discarded suffix disappear with truncation.
+        let mut offset = retained_words;
+        while offset < self.words.len() {
+            let references = record_references(&self.words, offset)?;
+            for word in references {
+                let target = to_usize(self.words[word])?;
+                if target >= retained_words {
+                    continue;
+                }
+                let Some(header) = self.words.get_mut(target) else {
+                    return Err(TapeError::ForeignCheckpoint);
+                };
+                debug_assert_ne!(*header & REFERENCE_MARKER, 0);
+                *header &= !REFERENCE_MARKER;
+            }
+            offset = offset
+                .checked_add(record_word_len(&self.words, offset)?)
+                .ok_or(TapeError::TooLarge)?;
+        }
+        if offset != self.words.len() {
+            return Err(TapeError::ForeignCheckpoint);
         }
         Ok(())
     }
@@ -861,6 +999,80 @@ impl TapeBuilder {
     }
 }
 
+fn record_references(words: &[u32], offset: usize) -> Result<std::ops::Range<usize>, TapeError> {
+    let kind = (words
+        .get(offset)
+        .copied()
+        .ok_or(TapeError::ForeignCheckpoint)?
+        & KIND_MASK)
+        >> KIND_SHIFT;
+    let references = match kind {
+        KIND_NODE => {
+            let count = to_usize(
+                words
+                    .get(offset + 4)
+                    .copied()
+                    .ok_or(TapeError::ForeignCheckpoint)?,
+            )?;
+            offset + 5..offset + 5 + count
+        }
+        KIND_LIST => {
+            let count = to_usize(
+                words
+                    .get(offset + 2)
+                    .copied()
+                    .ok_or(TapeError::ForeignCheckpoint)?,
+            )?;
+            offset + 3..offset + 3 + count
+        }
+        _ => offset..offset,
+    };
+    if references.end > words.len() {
+        return Err(TapeError::ForeignCheckpoint);
+    }
+    Ok(references)
+}
+
+fn record_word_len(words: &[u32], offset: usize) -> Result<usize, TapeError> {
+    let header = words
+        .get(offset)
+        .copied()
+        .ok_or(TapeError::ForeignCheckpoint)?;
+    let kind = (header & KIND_MASK) >> KIND_SHIFT;
+    match kind {
+        KIND_NODE | KIND_LIST => words
+            .get(offset + 1)
+            .copied()
+            .ok_or(TapeError::ForeignCheckpoint)
+            .and_then(to_usize),
+        KIND_NULL | KIND_BOOL | KIND_INLINE_U32 => Ok(1),
+        KIND_U32 => Ok(2),
+        KIND_F64 | KIND_SOURCE_SLICE | KIND_POOL_STRING => Ok(3),
+        _ => Err(TapeError::ForeignCheckpoint),
+    }
+}
+
+fn collect_record_offsets(words: &[u32]) -> Box<[u32]> {
+    let record_end = words[HEADER_RECORD_END] as usize;
+    let mut offsets = Vec::with_capacity(words[HEADER_VALUE_COUNT] as usize);
+    let mut offset = HEADER_WORDS;
+    while offset < record_end {
+        offsets.push(u32::try_from(offset).unwrap_or(u32::MAX));
+        let Ok(size) = record_word_len(words, offset) else {
+            debug_assert!(false, "frozen tapes only contain complete records");
+            break;
+        };
+        let Some(next_offset) = offset.checked_add(size) else {
+            debug_assert!(false, "frozen tape record offsets fit usize");
+            break;
+        };
+        offset = next_offset;
+    }
+    debug_assert_eq!(offset, record_end);
+    debug_assert_eq!(offsets.len(), words[HEADER_VALUE_COUNT] as usize);
+    offsets.into_boxed_slice()
+}
+
 fn to_u32(value: usize) -> Result<u32, TapeError> {
     u32::try_from(value).map_err(|_| TapeError::TooLarge)
 }
@@ -889,8 +1101,8 @@ pub struct TapeHeader {
 
 #[derive(Clone, Debug)]
 pub struct FrozenTape {
-    words: Box<[u32]>,
-    record_offsets: Box<[u32]>,
+    words: Vec<u32>,
+    record_offsets: OnceLock<Box<[u32]>>,
 }
 
 impl FrozenTape {
@@ -902,8 +1114,15 @@ impl FrozenTape {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
-            words: words.into_boxed_slice(),
-            record_offsets,
+            words,
+            record_offsets: OnceLock::from(record_offsets),
+        }
+    }
+
+    const fn from_parser(words: Vec<u32>) -> Self {
+        Self {
+            words,
+            record_offsets: OnceLock::new(),
         }
     }
 
@@ -914,14 +1133,14 @@ impl FrozenTape {
     /// Returns an error if the header, records, references, or pool violate the wire format.
     pub fn from_words(words: Vec<u32>) -> Result<Self, TapeError> {
         let mut tape = Self {
-            words: words.into_boxed_slice(),
-            record_offsets: Box::default(),
+            words,
+            record_offsets: OnceLock::new(),
         };
         let mut record_offsets = Vec::new();
         for record in tape.validation() {
             record_offsets.push(record?.offset);
         }
-        tape.record_offsets = record_offsets.into_boxed_slice();
+        tape.record_offsets = OnceLock::from(record_offsets.into_boxed_slice());
         Ok(tape)
     }
 
@@ -950,7 +1169,7 @@ impl FrozenTape {
 
     /// Consumes the validated tape and returns its wire words without copying them.
     #[must_use]
-    pub fn into_words(self) -> Box<[u32]> {
+    pub fn into_words(self) -> Vec<u32> {
         self.words
     }
 
@@ -983,11 +1202,11 @@ impl FrozenTape {
     /// Returns [`TapeError::InvalidRecordOffset`] if `offset` is outside the record section or
     /// points inside another record.
     pub fn value_at(&self, offset: u32) -> Result<TapeValue<'_>, TapeError> {
-        if self.record_offsets.binary_search(&offset).is_err() {
+        if self.record_offsets().binary_search(&offset).is_err() {
             return Err(TapeError::InvalidRecordOffset(offset));
         }
         let offset_usize = to_usize(offset)?;
-        let header = self.words[offset_usize];
+        let header = self.value_header(self.words[offset_usize]);
         let kind = (header & KIND_MASK) >> KIND_SHIFT;
         let value = match kind {
             KIND_NODE => {
@@ -1025,7 +1244,7 @@ impl FrozenTape {
             }
             KIND_NULL => TapeValue::Null,
             KIND_BOOL => TapeValue::Bool(header & 1 != 0),
-            KIND_INLINE_U32 => TapeValue::U32(header & INLINE_U32_MASK),
+            KIND_INLINE_U32 => TapeValue::U32(header & self.inline_u32_mask()),
             KIND_U32 => TapeValue::U32(self.words[offset_usize + 1]),
             KIND_F64 => {
                 let bits = u64::from(self.words[offset_usize + 1])
@@ -1048,6 +1267,32 @@ impl FrozenTape {
             }
         };
         Ok(value)
+    }
+
+    fn record_offsets(&self) -> &[u32] {
+        // NAPI transfers parser words directly, so only native random access pays for this scan.
+        self.record_offsets
+            .get_or_init(|| collect_record_offsets(&self.words))
+    }
+
+    fn has_reference_markers(&self) -> bool {
+        self.words[HEADER_FLAGS] & FLAG_REFERENCE_MARKERS != 0
+    }
+
+    fn value_header(&self, header: u32) -> u32 {
+        if self.has_reference_markers() {
+            header & !REFERENCE_MARKER
+        } else {
+            header
+        }
+    }
+
+    fn inline_u32_mask(&self) -> u32 {
+        if self.has_reference_markers() {
+            MARKED_INLINE_U32_MASK
+        } else {
+            INLINE_U32_MASK
+        }
     }
 
     /// Borrows the packed UTF-8 string pool directly from the tape allocation.
@@ -1184,6 +1429,7 @@ pub struct ValidationIter<'a> {
     seen_values: u32,
     offsets: Vec<u32>,
     incoming: Vec<u8>,
+    reference_markers: bool,
     last_was_node: bool,
     pending_error: Option<TapeError>,
     finished: bool,
@@ -1205,6 +1451,7 @@ impl<'a> ValidationIter<'a> {
                 seen_values: 0,
                 offsets: Vec::new(),
                 incoming: Vec::new(),
+                reference_markers: tape.has_reference_markers(),
                 last_was_node: false,
                 pending_error: None,
                 finished: false,
@@ -1222,6 +1469,7 @@ impl<'a> ValidationIter<'a> {
                 seen_values: 0,
                 offsets: Vec::new(),
                 incoming: Vec::new(),
+                reference_markers: false,
                 last_was_node: false,
                 pending_error: Some(error),
                 finished: false,
@@ -1281,14 +1529,32 @@ impl<'a> ValidationIter<'a> {
                 reason: "root is referenced by another record",
             }));
         }
-        if let Some(index) = self.incoming[..self.incoming.len().saturating_sub(1)]
-            .iter()
-            .position(|count| *count != 1)
+        if self.reference_markers
+            && self.tape.words[to_usize(self.root).unwrap_or(0)] & REFERENCE_MARKER != 0
         {
             return Some(Err(TapeError::MalformedRecord {
-                offset: self.offsets[index],
-                reason: "non-root record is not referenced exactly once",
+                offset: self.root,
+                reason: "root carries a reference marker",
             }));
+        }
+        for (index, incoming) in self.incoming[..self.incoming.len().saturating_sub(1)]
+            .iter()
+            .enumerate()
+        {
+            if *incoming != 1 {
+                return Some(Err(TapeError::MalformedRecord {
+                    offset: self.offsets[index],
+                    reason: "non-root record is not referenced exactly once",
+                }));
+            }
+            if self.reference_markers
+                && self.tape.words[self.offsets[index] as usize] & REFERENCE_MARKER == 0
+            {
+                return Some(Err(TapeError::MalformedRecord {
+                    offset: self.offsets[index],
+                    reason: "referenced record is missing its marker",
+                }));
+            }
         }
         None
     }
@@ -1314,7 +1580,7 @@ impl<'a> Iterator for ValidationIter<'a> {
         }
 
         let offset = self.cursor;
-        let header = self.tape.words[offset];
+        let header = self.tape.value_header(self.tape.words[offset]);
         let kind = (header & KIND_MASK) >> KIND_SHIFT;
 
         let (size, value, is_node) = match kind {
@@ -1417,7 +1683,11 @@ impl<'a> Iterator for ValidationIter<'a> {
             KIND_BOOL if header & !1 == KIND_BOOL << KIND_SHIFT => {
                 (1, TapeValue::Bool(header & 1 != 0), false)
             }
-            KIND_INLINE_U32 => (1, TapeValue::U32(header & INLINE_U32_MASK), false),
+            KIND_INLINE_U32 => (
+                1,
+                TapeValue::U32(header & self.tape.inline_u32_mask()),
+                false,
+            ),
             KIND_U32 if header == KIND_U32 << KIND_SHIFT => {
                 if offset
                     .checked_add(2)
@@ -1505,7 +1775,7 @@ fn validate_header(words: &[u32]) -> Result<TapeHeader, TapeError> {
     if words[HEADER_SIZE] != to_u32(HEADER_WORDS)? {
         return Err(TapeError::InvalidHeader("header size does not match"));
     }
-    if words[HEADER_FLAGS] != WIRE_FLAGS {
+    if words[HEADER_FLAGS] != WIRE_FLAGS && words[HEADER_FLAGS] != PARSER_WIRE_FLAGS {
         return Err(TapeError::InvalidHeader("unsupported flags"));
     }
     if to_usize(words[HEADER_TOTAL_WORDS])? != words.len() {
@@ -1614,7 +1884,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_builder_matches_safe_builder_without_record_metadata() {
+    fn parser_builder_decodes_like_safe_builder_without_eager_record_metadata() {
         fn program(mut builder: TapeBuilder) -> (TapeBuilder, NodeRef) {
             let name = builder.push_source_slice(Span::new(0, 4)).expect("name");
             let identifier = builder
@@ -1635,9 +1905,28 @@ mod tests {
 
         let safe = safe.finish(safe_root).expect("safe finish");
         let parser = parser.finish(parser_root).expect("parser finish");
+        assert!(safe.record_offsets.get().is_some());
+        assert!(parser.record_offsets.get().is_none());
 
-        assert_eq!(parser.words, safe.words);
-        assert_eq!(parser.record_offsets, safe.record_offsets);
+        let safe_records = safe
+            .validation()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("safe");
+        let parser_records = parser
+            .validation()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parser");
+        assert_eq!(parser.header(), safe.header());
+        assert_eq!(parser_records, safe_records);
+        assert!(parser.record_offsets.get().is_none());
+
+        let strict = FrozenTape::from_words(parser.words().to_vec()).expect("strict parser tape");
+        assert!(strict.record_offsets.get().is_some());
+        assert_eq!(
+            parser.value_at(parser_root.offset()).expect("parser root"),
+            safe.value_at(safe_root.offset()).expect("safe root")
+        );
+        assert!(parser.record_offsets.get().is_some());
     }
 
     #[test]
@@ -1659,37 +1948,38 @@ mod tests {
     }
 
     #[test]
-    fn parser_builder_finish_rejects_shared_records() {
+    fn parser_builder_rejects_shared_records_during_construction() {
         let mut tape = TapeBuilder::new_parser(0);
         let value = tape.push_null().expect("shared");
-        let root = tape
-            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[value, value])
-            .expect("root");
-
         assert!(matches!(
-            tape.finish(root),
+            tape.push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[value, value]),
             Err(TapeError::MalformedRecord {
                 reason: "record is referenced more than once",
                 ..
             })
         ));
+        assert_eq!(tape.words[value.offset() as usize] & REFERENCE_MARKER, 0);
+        assert_eq!(tape.edge_count, 0);
+
+        let root = tape
+            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[value])
+            .expect("root");
+        tape.finish(root)
+            .expect("finish after rejected shared edge");
     }
 
     #[test]
-    fn parser_builder_finish_rejects_forward_references() {
+    fn parser_builder_rejects_forward_references_during_construction() {
         let mut tape = TapeBuilder::new_parser(0);
+        let _value = tape.push_null().expect("value");
         let forward = ValueRef {
             builder_id: tape.id,
             record_id: 0,
             record_index: 0,
             offset: to_u32(tape.words.len()).expect("future offset"),
         };
-        let root = tape
-            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[forward])
-            .expect("trusted append");
-
         assert!(matches!(
-            tape.finish(root),
+            tape.push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[forward]),
             Err(TapeError::MalformedRecord {
                 reason: "reference does not point backward",
                 ..
@@ -1705,9 +1995,12 @@ mod tests {
         let _discarded = tape
             .push_node(NodeTag::IDENTIFIER, Span::new(0, 0), 0, &[retained])
             .expect("discarded node");
+        assert_ne!(tape.words[retained.offset() as usize] & REFERENCE_MARKER, 0);
         tape.rollback(checkpoint).expect("rollback");
         assert_eq!(tape.value_count, 1);
         assert_eq!(tape.node_count, 0);
+        assert_eq!(tape.edge_count, 0);
+        assert_eq!(tape.words[retained.offset() as usize] & REFERENCE_MARKER, 0);
         assert!(tape.records.is_empty());
 
         let root = tape
@@ -1715,6 +2008,67 @@ mod tests {
             .expect("program");
         let tape = tape.finish(root).expect("finish tape");
         assert_eq!(tape.header().value_count, 2);
+    }
+
+    #[test]
+    fn parser_builder_rejects_foreign_references() {
+        let mut foreign = TapeBuilder::new_parser(0);
+        let value = foreign.push_null().expect("foreign value");
+        let mut tape = TapeBuilder::new_parser(0);
+
+        assert!(matches!(
+            tape.push_list(&[value]),
+            Err(TapeError::ForeignReference)
+        ));
+    }
+
+    #[test]
+    fn parser_builder_rejects_a_non_final_root() {
+        let mut tape = TapeBuilder::new_parser(0);
+        let value = tape.push_null().expect("value");
+        let root = tape
+            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[value])
+            .expect("root");
+        let _trailing = tape.push_null().expect("trailing value");
+
+        assert!(matches!(
+            tape.finish(root),
+            Err(TapeError::RootMustBeFinalNode)
+        ));
+    }
+
+    #[test]
+    fn strict_validation_checks_parser_reference_markers() {
+        let mut tape = TapeBuilder::new_parser(0);
+        let value = tape.push_u32(REFERENCE_MARKER).expect("full integer");
+        let root = tape
+            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[value])
+            .expect("root");
+        let tape = tape.finish(root).expect("parser tape");
+        assert_eq!(
+            tape.value_header(tape.words[value.offset() as usize]) >> KIND_SHIFT,
+            KIND_U32
+        );
+
+        let mut missing_marker = tape.words().to_vec();
+        missing_marker[value.offset() as usize] &= !REFERENCE_MARKER;
+        assert!(matches!(
+            FrozenTape::from_words(missing_marker),
+            Err(TapeError::MalformedRecord {
+                reason: "referenced record is missing its marker",
+                ..
+            })
+        ));
+
+        let mut marked_root = tape.words().to_vec();
+        marked_root[root.offset() as usize] |= REFERENCE_MARKER;
+        assert!(matches!(
+            FrozenTape::from_words(marked_root),
+            Err(TapeError::MalformedRecord {
+                reason: "root carries a reference marker",
+                ..
+            })
+        ));
     }
 
     #[test]

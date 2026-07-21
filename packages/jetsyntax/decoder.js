@@ -6,7 +6,15 @@ const KIND_SHIFT = 28;
 const KIND_MASK = 0xF000_0000;
 const NODE_FLAGS_MASK = 0x00FF_0000;
 const NODE_TAG_MASK = 0x0000_FFFF;
+const REFERENCE_MARKER = 0x0800_0000;
 const INLINE_U32_MASK = 0x0FFF_FFFF;
+const MARKED_INLINE_U32_MASK = INLINE_U32_MASK & ~REFERENCE_MARKER;
+
+const FLAG_SOURCE_UTF8 = 1 << 0;
+const FLAG_POOL_UTF8 = 1 << 1;
+const FLAG_REFERENCE_MARKERS = 1 << 2;
+const WIRE_FLAGS = FLAG_SOURCE_UTF8 | FLAG_POOL_UTF8;
+const PARSER_WIRE_FLAGS = WIRE_FLAGS | FLAG_REFERENCE_MARKERS;
 
 const KIND_NODE = 1;
 const KIND_LIST = 2;
@@ -21,6 +29,7 @@ const KIND_POOL_STRING = 9;
 const HOST_LITTLE_ENDIAN = new Uint8Array(Uint32Array.of(0x0102_0304).buffer)[0] === 4;
 
 const HEADER_TOTAL_WORDS = 4;
+const HEADER_FLAGS = 3;
 const HEADER_RECORD_END = 5;
 const HEADER_POOL_BYTES = 6;
 const HEADER_ROOT = 7;
@@ -304,6 +313,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
     if (reference >= parentOffset || decoded[reference] === undefined) {
       throw new Error(`invalid JetSyntax backward reference ${reference} from ${parentOffset}`);
     }
+    requireReferenceMarker(reference);
     return decoded[reference];
   }
 
@@ -312,14 +322,26 @@ function decodeTapeInternal(source, tape, options, trusted) {
     if (reference < HEADER_WORDS || reference >= parentOffset) {
       throw new Error(`invalid JetSyntax backward reference ${reference} from ${parentOffset}`);
     }
+    requireReferenceMarker(reference);
     return decodeTrustedValue(reference);
+  }
+
+  function requireReferenceMarker(reference) {
+    if (header.referenceMarkers && (tape[reference] & REFERENCE_MARKER) === 0) {
+      throw new Error(`missing JetSyntax reference marker at word ${reference}`);
+    }
+  }
+
+  function valueHeader(offset) {
+    const record = tape[offset];
+    return header.referenceMarkers ? (record & ~REFERENCE_MARKER) >>> 0 : record;
   }
 
   const readReference = trusted ? readTrustedReference : readDecodedReference;
 
   function decodeTrustedValue(offset) {
     requireWords(offset, 1, header.recordEnd);
-    const record = tape[offset];
+    const record = valueHeader(offset);
     const kind = (record & KIND_MASK) >>> KIND_SHIFT;
     switch (kind) {
       case KIND_NODE: {
@@ -356,7 +378,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
         }
         return (record & 1) !== 0;
       case KIND_INLINE_U32:
-        return record & INLINE_U32_MASK;
+        return record & header.inlineU32Mask;
       case KIND_U32:
         if (record !== (KIND_U32 << KIND_SHIFT) >>> 0) {
           throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
@@ -393,7 +415,10 @@ function decodeTapeInternal(source, tape, options, trusted) {
     if (root < HEADER_WORDS || root >= header.recordEnd) {
       throw new Error(`invalid JetSyntax tape root offset ${root}`);
     }
-    const record = tape[root];
+    if (header.referenceMarkers && (tape[root] & REFERENCE_MARKER) !== 0) {
+      throw new Error("invalid JetSyntax tape: root carries a reference marker");
+    }
+    const record = valueHeader(root);
     if ((record >>> KIND_SHIFT) !== KIND_NODE) {
       throw new Error("invalid JetSyntax tape: root record is not a node");
     }
@@ -411,7 +436,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
     let last = 0;
     while (offset < header.recordEnd) {
       last = offset;
-      const record = tape[offset];
+      const record = valueHeader(offset);
       const kind = (record & KIND_MASK) >>> KIND_SHIFT;
       let size;
       let value;
@@ -455,7 +480,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
           break;
         case KIND_INLINE_U32:
           size = 1;
-          value = record & INLINE_U32_MASK;
+          value = record & header.inlineU32Mask;
           break;
         case KIND_U32:
           size = 2;
@@ -505,6 +530,9 @@ function decodeTapeInternal(source, tape, options, trusted) {
     }
     if ((tape[header.root] >>> KIND_SHIFT) !== KIND_NODE) {
       throw new Error("invalid JetSyntax tape: root record is not a node");
+    }
+    if (header.referenceMarkers && (tape[header.root] & REFERENCE_MARKER) !== 0) {
+      throw new Error("invalid JetSyntax tape: root carries a reference marker");
     }
     return decoded[header.root];
   }
@@ -1052,6 +1080,10 @@ function validateHeader(tape) {
     throw new Error(`unsupported JetSyntax tape version ${tape[1]}`);
   }
   if (tape[2] !== HEADER_WORDS) throw new Error("invalid JetSyntax tape header size");
+  const flags = tape[HEADER_FLAGS];
+  if (flags !== WIRE_FLAGS && flags !== PARSER_WIRE_FLAGS) {
+    throw new Error("unsupported JetSyntax tape flags");
+  }
   if (tape[HEADER_TOTAL_WORDS] !== tape.length) {
     throw new Error("invalid JetSyntax tape total word count");
   }
@@ -1064,6 +1096,8 @@ function validateHeader(tape) {
     throw new Error("invalid JetSyntax record/string-pool bounds");
   }
   return {
+    inlineU32Mask: flags === PARSER_WIRE_FLAGS ? MARKED_INLINE_U32_MASK : INLINE_U32_MASK,
+    referenceMarkers: flags === PARSER_WIRE_FLAGS,
     recordEnd,
     poolBytes,
     root: tape[HEADER_ROOT],

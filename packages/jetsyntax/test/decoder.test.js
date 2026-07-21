@@ -10,10 +10,12 @@ const KIND_INLINE_U32 = 5;
 const KIND_SOURCE_SLICE = 8;
 const KIND_POOL_STRING = 9;
 const KIND_SHIFT = 28;
+const REFERENCE_MARKER = 0x0800_0000;
 
 class HandcraftedTape {
   words = new Array(12).fill(0);
   pool = [];
+  references = [];
 
   null() {
     return this.record([(KIND_NULL << KIND_SHIFT) >>> 0]);
@@ -39,10 +41,12 @@ class HandcraftedTape {
   }
 
   list(items) {
+    this.references.push(...items);
     return this.record([(KIND_LIST << KIND_SHIFT) >>> 0, 3 + items.length, items.length, ...items]);
   }
 
   node(tag, start, end, fields) {
+    this.references.push(...fields);
     return this.record([
       ((KIND_NODE << KIND_SHIFT) | tag) >>> 0,
       5 + fields.length,
@@ -53,8 +57,11 @@ class HandcraftedTape {
     ]);
   }
 
-  finish(root) {
+  finish(root, { referenceMarkers = false } = {}) {
     const recordEnd = this.words.length;
+    if (referenceMarkers) {
+      for (const reference of this.references) this.words[reference] |= REFERENCE_MARKER;
+    }
     for (let index = 0; index < this.pool.length; index += 4) {
       this.words.push(
         (this.pool[index] ?? 0)
@@ -66,7 +73,7 @@ class HandcraftedTape {
     this.words[0] = 0x4A53_5450;
     this.words[1] = 1;
     this.words[2] = 12;
-    this.words[3] = 3;
+    this.words[3] = referenceMarkers ? 7 : 3;
     this.words[4] = this.words.length;
     this.words[5] = recordEnd;
     this.words[6] = this.pool.length;
@@ -117,6 +124,26 @@ describe("decodeTape", () => {
           init: { type: "Literal", value: 42, raw: "42" },
         }],
       }],
+    });
+  });
+
+  it("decodes reference-marked records without exposing the marker as data", () => {
+    const tape = new HandcraftedTape();
+    const name = tape.string("answer");
+    const identifier = tape.node(2, 0, 0, [name]);
+    const statement = tape.node(5, 0, 0, [identifier]);
+    const body = tape.list([statement]);
+    const sourceType = tape.integer(1);
+    const program = tape.node(1, 0, 0, [body, sourceType]);
+    const encoded = tape.finish(program, { referenceMarkers: true });
+
+    expect(encoded[sourceType] & REFERENCE_MARKER).toBe(REFERENCE_MARKER);
+    expect(encoded[program] & REFERENCE_MARKER).toBe(0);
+    expect(decodeTape("", encoded)).toEqual(decodeTrustedTape("", encoded));
+    expect(decodeTrustedTape("", encoded)).toMatchObject({
+      type: "Program",
+      sourceType: "module",
+      body: [{ expression: { name: "answer" } }],
     });
   });
 
