@@ -60,4 +60,27 @@ describe("parse", () => {
     const method = result.program.body[1].declaration.body.body[0];
     expect(method.value.body.body[0].argument.type).toBe("TemplateLiteral");
   });
+
+  it("materializes keyword and private member names", () => {
+    const source = [
+      "AsyncGeneratorPrototype.return;",
+      "class C { #field = 1; read(object) { return object?.#field; } }",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[0].expression.property).toMatchObject({
+      type: "Identifier",
+      name: "return",
+    });
+    const returned = result.program.body[1].body.body[1].value.body.body[0].argument;
+    expect(returned).toMatchObject({
+      type: "ChainExpression",
+      expression: {
+        type: "MemberExpression",
+        optional: true,
+        property: { type: "PrivateIdentifier", name: "field" },
+      },
+    });
+  });
 });

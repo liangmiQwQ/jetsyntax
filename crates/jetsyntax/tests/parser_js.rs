@@ -372,6 +372,62 @@ fn parser_should_accept_optional_chaining() {
     assert_clean_cases(&cases);
 }
 
+/// Dot member properties accept `IdentifierName` keywords and declared private names.
+#[test]
+fn parser_should_accept_keyword_and_private_member_names() {
+    let cases = [
+        GrammarCase::script(
+            "every keyword IdentifierName",
+            "object.break.case.catch.class.const.continue.debugger.default.delete.do.else.export.extends.false.finally.for.function.if.import.in.instanceof.new.null.return.super.switch.this.throw.true.try.typeof.var.void.while.with.yield.async.await.let.static.of.get.set.as.satisfies.accessor.using.declare.abstract.interface.type.enum.namespace.module.implements.infer.keyof.readonly.unique.unknown.never.any.boolean.number.string.symbol.object.undefined.is.asserts.public.protected.private.override.out.meta.from.require;",
+            &[NodeTag::MEMBER_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "optional keyword IdentifierName",
+            "iterator?.return;",
+            &[NodeTag::CHAIN_EXPRESSION, NodeTag::MEMBER_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "declared private member",
+            "class C { read(object) { return object.#field; } optional(object) { return object?.#field; } #field = 1; }",
+            &[
+                NodeTag::CLASS_DECLARATION,
+                NodeTag::PRIVATE_IDENTIFIER,
+                NodeTag::CHAIN_EXPRESSION,
+                NodeTag::MEMBER_EXPRESSION,
+            ],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
+/// Private member names retain class-scope declaration diagnostics.
+#[test]
+fn parser_should_diagnose_invalid_private_member_scope() {
+    let cases = [
+        (
+            "object.#field;",
+            "private name is only valid inside a class",
+        ),
+        (
+            "class C { read(object) { return object.#missing; } }",
+            "private name `missing` is not declared",
+        ),
+    ];
+
+    for (source, expected_message) in cases {
+        let parsed = parse(source, ParseOptions::default()).expect("recover parse");
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected_message),
+            "missing `{expected_message}` in {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
 /// Async and generator context controls whether `await` and `yield` are expressions or identifiers.
 #[test]
 fn parser_should_accept_async_functions_and_generators() {

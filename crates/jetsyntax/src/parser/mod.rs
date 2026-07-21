@@ -1320,7 +1320,7 @@ impl<'s> Parser<'s> {
             match self.current.kind {
                 TokenKind::Dot => {
                     self.bump();
-                    let property = self.parse_identifier()?;
+                    let property = self.parse_member_property()?;
                     let computed = self.tape.push_bool(false)?;
                     let optional = self.tape.push_bool(false)?;
                     expression = self.node(
@@ -1352,7 +1352,7 @@ impl<'s> Parser<'s> {
                             &[expression.value(), arguments, optional],
                         )?;
                     } else {
-                        let property = self.parse_identifier()?;
+                        let property = self.parse_member_property()?;
                         let computed = self.tape.push_bool(false)?;
                         let optional = self.tape.push_bool(true)?;
                         expression = self.node(
@@ -1933,6 +1933,28 @@ impl<'s> Parser<'s> {
         }
         let name = self.tape.push_source_slice(Self::token_span(token))?;
         self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name])
+    }
+
+    fn parse_member_property(&mut self) -> Result<ParsedNode, ParseError> {
+        let token = self.take();
+        if token.kind == TokenKind::PrivateIdentifier {
+            let name_span = Span::new(token.start.saturating_add(1), token.end);
+            let name_text = self
+                .source
+                .get(name_span.start as usize..name_span.end as usize)
+                .unwrap_or_default();
+            let _ = self.context.use_private(name_text, name_span);
+            let name = self.tape.push_source_slice(name_span)?;
+            return self.node(
+                NodeTag::PRIVATE_IDENTIFIER,
+                Self::token_span(token),
+                &[name],
+            );
+        }
+        if !Self::is_member_identifier_name(token.kind) {
+            self.error(Self::token_span(token), "expected an identifier");
+        }
+        self.identifier_from_span(Self::token_span(token))
     }
 
     fn identifier_from_span(&mut self, span: Span) -> Result<ParsedNode, ParseError> {
@@ -3088,6 +3110,49 @@ impl<'s> Parser<'s> {
                 | TokenKind::From
                 | TokenKind::Require
         )
+    }
+
+    const fn is_member_identifier_name(kind: TokenKind) -> bool {
+        Self::is_identifier_name(kind)
+            || matches!(
+                kind,
+                TokenKind::Break
+                    | TokenKind::Case
+                    | TokenKind::Catch
+                    | TokenKind::Class
+                    | TokenKind::Const
+                    | TokenKind::Continue
+                    | TokenKind::Debugger
+                    | TokenKind::Default
+                    | TokenKind::Delete
+                    | TokenKind::Do
+                    | TokenKind::Else
+                    | TokenKind::Export
+                    | TokenKind::Extends
+                    | TokenKind::False
+                    | TokenKind::Finally
+                    | TokenKind::For
+                    | TokenKind::Function
+                    | TokenKind::If
+                    | TokenKind::Import
+                    | TokenKind::In
+                    | TokenKind::Instanceof
+                    | TokenKind::New
+                    | TokenKind::Null
+                    | TokenKind::Return
+                    | TokenKind::Super
+                    | TokenKind::Switch
+                    | TokenKind::This
+                    | TokenKind::Throw
+                    | TokenKind::True
+                    | TokenKind::Try
+                    | TokenKind::Typeof
+                    | TokenKind::Var
+                    | TokenKind::Void
+                    | TokenKind::While
+                    | TokenKind::With
+                    | TokenKind::Yield
+            )
     }
 }
 
