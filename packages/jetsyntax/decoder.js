@@ -236,13 +236,6 @@ export function decodeTape(source, tape, options = {}) {
   if (header.poolBytes > 0 && !HOST_LITTLE_ENDIAN) {
     throw new Error("JetSyntax zero-copy string-pool decoding requires a little-endian host");
   }
-  const recordStarts = indexRecords(tape, header.recordEnd);
-  if (!recordStarts.has(header.root) || header.root !== recordStarts.last) {
-    throw new Error(`invalid JetSyntax tape root offset ${header.root}`);
-  }
-  if ((tape[header.root] >>> KIND_SHIFT) !== KIND_NODE) {
-    throw new Error("invalid JetSyntax tape: root record is not a node");
-  }
 
   const sourceOffsets = makeSourceOffsets(source, header.sourceBytes);
   const poolBytes = new Uint8Array(
@@ -253,7 +246,7 @@ export function decodeTape(source, tape, options = {}) {
   const poolDecoder = new TextDecoder("utf-8", { fatal: true });
   const numberBytes = new ArrayBuffer(8);
   const numberView = new DataView(numberBytes);
-  const decoded = new Map();
+  const decoded = new Array(header.recordEnd);
 
   function sourceSlice(start, end) {
     if (start > end) {
@@ -286,61 +279,113 @@ export function decodeTape(source, tape, options = {}) {
   }
 
   function readReference(reference, parentOffset) {
-    if (reference >= parentOffset || !recordStarts.has(reference)) {
+    if (reference >= parentOffset || decoded[reference] === undefined) {
       throw new Error(`invalid JetSyntax backward reference ${reference} from ${parentOffset}`);
     }
-    return readValue(reference);
+    return decoded[reference];
   }
 
-  function readValue(offset) {
-    if (!recordStarts.has(offset)) {
-      throw new Error(`invalid JetSyntax record offset ${offset}`);
-    }
-    if (decoded.has(offset)) return decoded.get(offset);
-
-    const record = tape[offset];
-    const kind = (record & KIND_MASK) >>> KIND_SHIFT;
-    let value;
-    switch (kind) {
-      case KIND_NODE:
-        value = decodeNode(offset, record);
-        break;
-      case KIND_LIST: {
-        const count = tape[offset + 2];
-        value = new Array(count);
-        for (let index = 0; index < count; index++) {
-          value[index] = readReference(tape[offset + 3 + index], offset);
+  function decodeRecords() {
+    let offset = HEADER_WORDS;
+    let last = 0;
+    while (offset < header.recordEnd) {
+      last = offset;
+      const record = tape[offset];
+      const kind = (record & KIND_MASK) >>> KIND_SHIFT;
+      let size;
+      let value;
+      switch (kind) {
+        case KIND_NODE:
+          requireWords(offset, 5, header.recordEnd);
+          size = 5 + tape[offset + 4];
+          if (tape[offset + 1] !== size) {
+            throw new Error(`invalid JetSyntax node length at word ${offset}`);
+          }
+          requireWords(offset, size, header.recordEnd);
+          value = decodeNode(offset, record);
+          break;
+        case KIND_LIST: {
+          requireWords(offset, 3, header.recordEnd);
+          const count = tape[offset + 2];
+          size = 3 + count;
+          if (record !== KIND_LIST << KIND_SHIFT || tape[offset + 1] !== size) {
+            throw new Error(`invalid JetSyntax list record at word ${offset}`);
+          }
+          requireWords(offset, size, header.recordEnd);
+          value = new Array(count);
+          for (let index = 0; index < count; index++) {
+            value[index] = readReference(tape[offset + 3 + index], offset);
+          }
+          break;
         }
-        break;
+        case KIND_NULL:
+          size = 1;
+          if (record !== (KIND_NULL << KIND_SHIFT) >>> 0) {
+            throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+          }
+          value = null;
+          break;
+        case KIND_BOOL:
+          size = 1;
+          if ((record & ~1) !== KIND_BOOL << KIND_SHIFT) {
+            throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+          }
+          value = (record & 1) !== 0;
+          break;
+        case KIND_INLINE_U32:
+          size = 1;
+          value = record & INLINE_U32_MASK;
+          break;
+        case KIND_U32:
+          size = 2;
+          if (record !== (KIND_U32 << KIND_SHIFT) >>> 0) {
+            throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+          }
+          requireWords(offset, size, header.recordEnd);
+          value = tape[offset + 1];
+          break;
+        case KIND_F64:
+          size = 3;
+          if (record !== (KIND_F64 << KIND_SHIFT) >>> 0) {
+            throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+          }
+          requireWords(offset, size, header.recordEnd);
+          numberView.setUint32(0, tape[offset + 1], true);
+          numberView.setUint32(4, tape[offset + 2], true);
+          value = numberView.getFloat64(0, true);
+          break;
+        case KIND_SOURCE_SLICE:
+          size = 3;
+          if (record !== (KIND_SOURCE_SLICE << KIND_SHIFT) >>> 0) {
+            throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+          }
+          requireWords(offset, size, header.recordEnd);
+          value = sourceSlice(tape[offset + 1], tape[offset + 2]);
+          break;
+        case KIND_POOL_STRING:
+          size = 3;
+          if (record !== (KIND_POOL_STRING << KIND_SHIFT) >>> 0) {
+            throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+          }
+          requireWords(offset, size, header.recordEnd);
+          value = poolString(tape[offset + 1], tape[offset + 2]);
+          break;
+        default:
+          throw new Error(`unknown JetSyntax tape value kind ${kind} at word ${offset}`);
       }
-      case KIND_NULL:
-        value = null;
-        break;
-      case KIND_BOOL:
-        value = (record & 1) !== 0;
-        break;
-      case KIND_INLINE_U32:
-        value = record & INLINE_U32_MASK;
-        break;
-      case KIND_U32:
-        value = tape[offset + 1];
-        break;
-      case KIND_F64:
-        numberView.setUint32(0, tape[offset + 1], true);
-        numberView.setUint32(4, tape[offset + 2], true);
-        value = numberView.getFloat64(0, true);
-        break;
-      case KIND_SOURCE_SLICE:
-        value = sourceSlice(tape[offset + 1], tape[offset + 2]);
-        break;
-      case KIND_POOL_STRING:
-        value = poolString(tape[offset + 1], tape[offset + 2]);
-        break;
-      default:
-        throw new Error(`unknown JetSyntax tape value kind ${kind} at word ${offset}`);
+      decoded[offset] = value;
+      offset += size;
     }
-    decoded.set(offset, value);
-    return value;
+    if (offset !== header.recordEnd) {
+      throw new Error("JetSyntax record section ends inside a record");
+    }
+    if (header.root !== last || decoded[header.root] === undefined) {
+      throw new Error(`invalid JetSyntax tape root offset ${header.root}`);
+    }
+    if ((tape[header.root] >>> KIND_SHIFT) !== KIND_NODE) {
+      throw new Error("invalid JetSyntax tape: root record is not a node");
+    }
+    return decoded[header.root];
   }
 
   function decodeNode(offset, record) {
@@ -825,7 +870,7 @@ export function decodeTape(source, tape, options = {}) {
     }
   }
 
-  return readValue(header.root);
+  return decodeRecords();
 }
 
 function validateHeader(tape) {
@@ -852,63 +897,6 @@ function validateHeader(tape) {
     root: tape[HEADER_ROOT],
     sourceBytes: tape[HEADER_SOURCE_BYTES],
   };
-}
-
-function indexRecords(tape, recordEnd) {
-  const starts = new Set();
-  let offset = HEADER_WORDS;
-  let last = 0;
-  while (offset < recordEnd) {
-    starts.add(offset);
-    last = offset;
-    const record = tape[offset];
-    const kind = (record & KIND_MASK) >>> KIND_SHIFT;
-    let size;
-    if (kind === KIND_NODE) {
-      requireWords(offset, 5, recordEnd);
-      size = 5 + tape[offset + 4];
-      if (tape[offset + 1] !== size) throw new Error(`invalid JetSyntax node length at word ${offset}`);
-    } else if (kind === KIND_LIST) {
-      requireWords(offset, 3, recordEnd);
-      size = 3 + tape[offset + 2];
-      if (record !== KIND_LIST << KIND_SHIFT || tape[offset + 1] !== size) {
-        throw new Error(`invalid JetSyntax list record at word ${offset}`);
-      }
-    } else {
-      size = scalarSize(kind, record, offset);
-    }
-    requireWords(offset, size, recordEnd);
-    offset += size;
-  }
-  if (offset !== recordEnd) throw new Error("JetSyntax record section ends inside a record");
-  starts.last = last;
-  return starts;
-}
-
-function scalarSize(kind, record, offset) {
-  switch (kind) {
-    case KIND_NULL:
-      if (record !== (KIND_NULL << KIND_SHIFT) >>> 0) break;
-      return 1;
-    case KIND_BOOL:
-      if ((record & ~1) !== KIND_BOOL << KIND_SHIFT) break;
-      return 1;
-    case KIND_INLINE_U32:
-      return 1;
-    case KIND_U32:
-      if (record !== (KIND_U32 << KIND_SHIFT) >>> 0) break;
-      return 2;
-    case KIND_F64:
-      if (record !== (KIND_F64 << KIND_SHIFT) >>> 0) break;
-      return 3;
-    case KIND_SOURCE_SLICE:
-      if (record !== (KIND_SOURCE_SLICE << KIND_SHIFT) >>> 0) break;
-      return 3;
-    case KIND_POOL_STRING:
-      if (record !== (KIND_POOL_STRING << KIND_SHIFT) >>> 0) break;
-      return 3;
-  }
-  throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
 }
 
 function requireWords(offset, size, recordEnd) {
