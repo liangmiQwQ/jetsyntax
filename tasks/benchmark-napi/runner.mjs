@@ -1,6 +1,6 @@
 import { performance } from "node:perf_hooks";
 
-export function measureInterleaved(parsers, { initialOffset = 0, now = performance.now, samples, warmups }) {
+export function measureInterleaved(parsers, { initialOffset = 0, now = () => performance.now(), samples, warmups }) {
   if (parsers.length === 0) throw new Error("at least one parser is required");
   const timings = parsers.map(() => new Float64Array(samples));
 
