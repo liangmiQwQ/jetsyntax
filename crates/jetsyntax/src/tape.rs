@@ -243,6 +243,7 @@ impl NodeTag {
 pub struct ValueRef {
     builder_id: u64,
     record_id: u64,
+    record_index: u32,
     offset: u32,
 }
 
@@ -620,6 +621,8 @@ impl TapeBuilder {
     }
 
     fn complete_record(&mut self, offset: u32, record_id: u64) -> ValueRef {
+        let record_index = u32::try_from(self.records.len())
+            .expect("record count cannot exceed the validated u32 tape length");
         self.records.push(BuilderRecord {
             id: record_id,
             offset,
@@ -628,6 +631,7 @@ impl TapeBuilder {
         ValueRef {
             builder_id: self.id,
             record_id,
+            record_index,
             offset,
         }
     }
@@ -735,13 +739,12 @@ impl TapeBuilder {
         if reference.builder_id != self.id {
             return Err(TapeError::ForeignReference);
         }
-        let Ok(index) = self
-            .records
-            .binary_search_by_key(&reference.offset, |record| record.offset)
-        else {
+        let index =
+            usize::try_from(reference.record_index).map_err(|_| TapeError::ForeignReference)?;
+        let Some(record) = self.records.get(index) else {
             return Err(TapeError::ForeignReference);
         };
-        if self.records[index].id != reference.record_id {
+        if (record.id, record.offset) != (reference.record_id, reference.offset) {
             return Err(TapeError::ForeignReference);
         }
         Ok(index)
@@ -1699,6 +1702,7 @@ mod tests {
         let forward = ValueRef {
             builder_id: builder.id,
             record_id: builder.next_record_id,
+            record_index: to_u32(builder.records.len()).expect("future record index"),
             offset: to_u32(builder.words.len()).expect("future offset"),
         };
         assert!(matches!(
