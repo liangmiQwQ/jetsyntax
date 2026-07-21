@@ -79,6 +79,24 @@ impl ParsedNode {
     }
 }
 
+struct ParsedPropertyName {
+    key: ParsedNode,
+    computed: bool,
+    shorthand: bool,
+}
+
+#[derive(Clone, Copy)]
+struct AssignmentPatternCandidate {
+    node: NodeRef,
+    tag: NodeTag,
+    group_start: usize,
+}
+
+#[derive(Clone, Copy)]
+struct AssignmentPatternCheckpoint {
+    candidate_len: usize,
+}
+
 struct Parser<'s> {
     source: &'s str,
     lexer: Lexer<'s>,
@@ -87,6 +105,7 @@ struct Parser<'s> {
     context: ParserContext<'s>,
     options: ParseOptions,
     function_depth: u32,
+    assignment_pattern_candidates: Vec<AssignmentPatternCandidate>,
 }
 
 impl<'s> Parser<'s> {
@@ -104,6 +123,7 @@ impl<'s> Parser<'s> {
             context: ParserContext::new(grammar),
             options,
             function_depth: 0,
+            assignment_pattern_candidates: Vec::new(),
         }
     }
 
@@ -148,7 +168,8 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_statement(&mut self) -> Result<ParsedNode, ParseError> {
-        match self.current.kind {
+        let assignment_patterns = self.assignment_pattern_checkpoint();
+        let statement = match self.current.kind {
             TokenKind::Semicolon => self.parse_empty_statement(),
             TokenKind::LeftBrace => self.parse_block_statement(),
             TokenKind::Const
@@ -192,7 +213,9 @@ impl<'s> Parser<'s> {
             TokenKind::Debugger => self.parse_debugger_statement(),
             TokenKind::With => self.parse_with_statement(),
             _ => self.parse_expression_or_labeled_statement(),
-        }
+        };
+        self.rollback_assignment_patterns(assignment_patterns);
+        statement
     }
 
     fn parse_empty_statement(&mut self) -> Result<ParsedNode, ParseError> {
@@ -460,24 +483,19 @@ impl<'s> Parser<'s> {
             leading_key = Some(self.identifier_from_span(Self::token_span(token))?);
         }
 
-        let (key, computed) = if generator {
-            self.parse_generator_method_name(true)?
-        } else {
-            let computed = leading_key.is_none() && self.eat(TokenKind::LeftBracket).is_some();
-            let key = if let Some(key) = leading_key {
-                key
-            } else if self.current.kind == TokenKind::PrivateIdentifier {
-                self.parse_class_private_identifier()?
-            } else if matches!(self.current.kind, TokenKind::String | TokenKind::Number) {
-                self.parse_literal()?
-            } else {
-                self.parse_identifier()?
-            };
-            if computed {
-                self.expect(TokenKind::RightBracket);
+        let property_name = if generator {
+            self.parse_property_name(true)?
+        } else if let Some(key) = leading_key {
+            ParsedPropertyName {
+                key,
+                computed: false,
+                shorthand: true,
             }
-            (key, computed)
+        } else {
+            self.parse_property_name(true)?
         };
+        let key = property_name.key;
+        let computed = property_name.computed;
 
         if generator && !is_static && !computed && self.source_text(key.span) == "constructor" {
             self.error(key.span, "class constructor cannot be a generator method");
@@ -1100,6 +1118,7 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_assignment_expression(&mut self, allow_in: bool) -> Result<ParsedNode, ParseError> {
+        let assignment_patterns = self.assignment_pattern_checkpoint();
         if self.current.kind == TokenKind::Async && self.looks_like_async_arrow() {
             let start = self.take().start;
             let previous_grammar = self.enter_function_context(false, true);
@@ -1132,11 +1151,13 @@ impl<'s> Parser<'s> {
             let parameters = self.tape.push_list(&parameters)?;
             let asynchronous = self.tape.push_bool(true)?;
             let expression = self.tape.push_bool(expression_body)?;
-            return self.node(
+            let arrow = self.node(
                 NodeTag::ARROW_FUNCTION_EXPRESSION,
                 Span::new(start, body.span.end),
                 &[parameters, body.value(), asynchronous, expression],
             );
+            self.rollback_assignment_patterns(assignment_patterns);
+            return arrow;
         }
         let left = self.parse_conditional_expression(allow_in)?;
         if self.eat(TokenKind::Arrow).is_some() {
@@ -1151,44 +1172,31 @@ impl<'s> Parser<'s> {
             self.leave_function_context(previous_grammar);
             let asynchronous = self.tape.push_bool(false)?;
             let expression = self.tape.push_bool(expression_body)?;
-            return self.node(
+            let arrow = self.node(
                 NodeTag::ARROW_FUNCTION_EXPRESSION,
                 Span::new(left.span.start, body.span.end),
                 &[params, body.value(), asynchronous, expression],
             );
+            self.rollback_assignment_patterns(assignment_patterns);
+            return arrow;
         }
         let Some(operator) = assignment_operator(self.current.kind) else {
+            self.retain_root_assignment_pattern(assignment_patterns, left.node);
             return Ok(left);
         };
         self.bump();
-        let mut assignment_left = left;
         if operator == AssignmentOperator::Assign {
-            let source = self
-                .source
-                .get(left.span.start as usize..left.span.end as usize)
-                .unwrap_or_default();
-            if source.contains('[') {
-                assignment_left = self.node(
-                    NodeTag::ARRAY_PATTERN,
-                    left.span,
-                    &[assignment_left.value()],
-                )?;
-            }
-            if source.contains('{') {
-                assignment_left = self.node(
-                    NodeTag::OBJECT_PATTERN,
-                    left.span,
-                    &[assignment_left.value()],
-                )?;
-            }
+            self.retag_assignment_pattern(left.node)?;
         }
         let right = self.parse_assignment_expression(allow_in)?;
         let operator = self.tape.push_u32(operator as u32)?;
-        self.node(
+        let assignment = self.node(
             NodeTag::ASSIGNMENT_EXPRESSION,
             Span::new(left.span.start, right.span.end),
-            &[operator, assignment_left.value(), right.value()],
-        )
+            &[operator, left.value(), right.value()],
+        );
+        self.rollback_assignment_patterns(assignment_patterns);
+        assignment
     }
 
     fn parse_conditional_expression(&mut self, allow_in: bool) -> Result<ParsedNode, ParseError> {
@@ -1718,6 +1726,7 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_array_expression(&mut self) -> Result<ParsedNode, ParseError> {
+        let assignment_patterns = self.assignment_pattern_checkpoint();
         let start = self.take().start;
         let mut elements = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightBracket | TokenKind::Eof) {
@@ -1727,7 +1736,15 @@ impl<'s> Parser<'s> {
             }
             let element = if self.eat(TokenKind::Ellipsis).is_some() {
                 let argument = self.parse_assignment_expression(true)?;
-                self.node(NodeTag::SPREAD_ELEMENT, argument.span, &[argument.value()])?
+                let spread =
+                    self.node(NodeTag::SPREAD_ELEMENT, argument.span, &[argument.value()])?;
+                self.assignment_pattern_candidates
+                    .push(AssignmentPatternCandidate {
+                        node: spread.node,
+                        tag: NodeTag::REST_ELEMENT,
+                        group_start: usize::MAX,
+                    });
+                spread
             } else {
                 self.parse_assignment_expression(true)?
             };
@@ -1738,23 +1755,36 @@ impl<'s> Parser<'s> {
         }
         let end = self.expect(TokenKind::RightBracket).end;
         let elements = self.tape.push_list(&elements)?;
-        self.node(
+        let expression = self.node(
             NodeTag::ARRAY_EXPRESSION,
             Span::new(start, end),
             &[elements],
-        )
+        )?;
+        self.register_assignment_pattern(
+            assignment_patterns,
+            expression.node,
+            NodeTag::ARRAY_PATTERN,
+        );
+        Ok(expression)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn parse_object_expression(&mut self) -> Result<ParsedNode, ParseError> {
+        let assignment_patterns = self.assignment_pattern_checkpoint();
         let start = self.take().start;
         let mut properties = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
             if self.eat(TokenKind::Ellipsis).is_some() {
                 let argument = self.parse_assignment_expression(true)?;
-                properties.push(
-                    self.node(NodeTag::SPREAD_ELEMENT, argument.span, &[argument.value()])?
-                        .value(),
-                );
+                let spread =
+                    self.node(NodeTag::SPREAD_ELEMENT, argument.span, &[argument.value()])?;
+                self.assignment_pattern_candidates
+                    .push(AssignmentPatternCandidate {
+                        node: spread.node,
+                        tag: NodeTag::REST_ELEMENT,
+                        group_start: usize::MAX,
+                    });
+                properties.push(spread.value());
             } else {
                 let property_start = self.current.start;
                 let async_token = if self.current.kind == TokenKind::Async {
@@ -1768,25 +1798,47 @@ impl<'s> Parser<'s> {
                 if generator {
                     self.bump();
                 }
-                let (key, computed) = if generator {
-                    self.parse_generator_method_name(false)?
+                let property_name = if generator {
+                    self.parse_property_name(false)?
                 } else if let Some(token) = async_token {
-                    (self.identifier_from_span(Self::token_span(token))?, false)
-                } else if matches!(self.current.kind, TokenKind::String | TokenKind::Number) {
-                    (self.parse_literal()?, false)
+                    ParsedPropertyName {
+                        key: self.identifier_from_span(Self::token_span(token))?,
+                        computed: false,
+                        shorthand: true,
+                    }
                 } else {
-                    (self.parse_identifier()?, false)
+                    self.parse_property_name(false)?
                 };
+                let key = property_name.key;
+                let computed = property_name.computed;
                 let (value, method, shorthand) = if generator {
-                    (
-                        self.parse_method_function(key.span.start, true, asynchronous)?,
-                        true,
-                        false,
-                    )
+                    let method_patterns = self.assignment_pattern_checkpoint();
+                    let value = self.parse_method_function(key.span.start, true, asynchronous)?;
+                    self.rollback_assignment_patterns(method_patterns);
+                    (value, true, false)
+                } else if self.current.kind == TokenKind::LeftParen {
+                    let method_patterns = self.assignment_pattern_checkpoint();
+                    let value = self.parse_method_function(key.span.start, false, false)?;
+                    self.rollback_assignment_patterns(method_patterns);
+                    (value, true, false)
                 } else if self.eat(TokenKind::Colon).is_some() {
                     (self.parse_assignment_expression(true)?, false, false)
                 } else {
-                    (self.identifier_from_span(key.span)?, false, true)
+                    if !property_name.shorthand {
+                        self.error(key.span, "property name requires `:` or method parameters");
+                    }
+                    let mut value = self.identifier_from_span(key.span)?;
+                    if self.eat(TokenKind::Eq).is_some() {
+                        let default_patterns = self.assignment_pattern_checkpoint();
+                        let right = self.parse_assignment_expression(true)?;
+                        self.rollback_assignment_patterns(default_patterns);
+                        value = self.node(
+                            NodeTag::ASSIGNMENT_PATTERN,
+                            Span::new(key.span.start, right.span.end),
+                            &[value.value(), right.value()],
+                        )?;
+                    }
+                    (value, false, property_name.shorthand)
                 };
                 let kind = self.tape.push_u32(0)?;
                 let method = self.tape.push_bool(method)?;
@@ -1814,11 +1866,17 @@ impl<'s> Parser<'s> {
         }
         let end = self.expect(TokenKind::RightBrace).end;
         let properties = self.tape.push_list(&properties)?;
-        self.node(
+        let expression = self.node(
             NodeTag::OBJECT_EXPRESSION,
             Span::new(start, end),
             &[properties],
-        )
+        )?;
+        self.register_assignment_pattern(
+            assignment_patterns,
+            expression.node,
+            NodeTag::OBJECT_PATTERN,
+        );
+        Ok(expression)
     }
 
     fn parse_new_expression(&mut self) -> Result<ParsedNode, ParseError> {
@@ -2039,15 +2097,22 @@ impl<'s> Parser<'s> {
         )
     }
 
-    fn parse_generator_method_name(
+    fn parse_property_name(
         &mut self,
         class_element: bool,
-    ) -> Result<(ParsedNode, bool), ParseError> {
+    ) -> Result<ParsedPropertyName, ParseError> {
         if self.eat(TokenKind::LeftBracket).is_some() {
-            let key = self.parse_expression(true)?;
+            let assignment_patterns = self.assignment_pattern_checkpoint();
+            let key = self.parse_assignment_expression(true)?;
             self.expect(TokenKind::RightBracket);
-            return Ok((key, true));
+            self.rollback_assignment_patterns(assignment_patterns);
+            return Ok(ParsedPropertyName {
+                key,
+                computed: true,
+                shorthand: false,
+            });
         }
+        let shorthand = Self::is_identifier_name(self.current.kind);
         let key = if class_element && self.current.kind == TokenKind::PrivateIdentifier {
             self.parse_class_private_identifier()?
         } else if matches!(
@@ -2058,7 +2123,11 @@ impl<'s> Parser<'s> {
         } else {
             self.parse_identifier_name()?
         };
-        Ok((key, false))
+        Ok(ParsedPropertyName {
+            key,
+            computed: false,
+            shorthand,
+        })
     }
 
     fn identifier_from_span(&mut self, span: Span) -> Result<ParsedNode, ParseError> {
@@ -2145,10 +2214,17 @@ impl<'s> Parser<'s> {
                                 .value(),
                         );
                     } else {
-                        let key = self.parse_identifier()?;
+                        let property_start = self.current.start;
+                        let property_name = self.parse_property_name(false)?;
+                        let key = property_name.key;
+                        let shorthand =
+                            property_name.shorthand && self.current.kind != TokenKind::Colon;
                         let mut value = if self.eat(TokenKind::Colon).is_some() {
                             self.parse_binding_pattern(binding_kind)?
                         } else {
+                            if !property_name.shorthand {
+                                self.error(key.span, "property name requires a binding target");
+                            }
                             self.binding_identifier_from_span(key.span, binding_kind)?
                         };
                         if self.eat(TokenKind::Eq).is_some() {
@@ -2161,12 +2237,12 @@ impl<'s> Parser<'s> {
                         }
                         let property_kind = self.tape.push_u32(0)?;
                         let method = self.tape.push_bool(false)?;
-                        let shorthand = self.tape.push_bool(key.span == value.span)?;
-                        let computed = self.tape.push_bool(false)?;
+                        let shorthand = self.tape.push_bool(shorthand)?;
+                        let computed = self.tape.push_bool(property_name.computed)?;
                         properties.push(
                             self.node(
                                 NodeTag::PROPERTY,
-                                Span::new(key.span.start, value.span.end),
+                                Span::new(property_start, value.span.end),
                                 &[
                                     key.value(),
                                     value.value(),
@@ -3092,6 +3168,60 @@ impl<'s> Parser<'s> {
     ) -> Result<ParsedNode, ParseError> {
         let node = self.tape.push_node(tag, span, 0, fields)?;
         Ok(ParsedNode { node, span })
+    }
+
+    const fn assignment_pattern_checkpoint(&self) -> AssignmentPatternCheckpoint {
+        AssignmentPatternCheckpoint {
+            candidate_len: self.assignment_pattern_candidates.len(),
+        }
+    }
+
+    fn rollback_assignment_patterns(&mut self, checkpoint: AssignmentPatternCheckpoint) {
+        self.assignment_pattern_candidates
+            .truncate(checkpoint.candidate_len);
+    }
+
+    fn retain_root_assignment_pattern(
+        &mut self,
+        checkpoint: AssignmentPatternCheckpoint,
+        root: NodeRef,
+    ) {
+        if self
+            .assignment_pattern_candidates
+            .last()
+            .is_none_or(|candidate| candidate.node.offset() != root.offset())
+        {
+            self.rollback_assignment_patterns(checkpoint);
+        }
+    }
+
+    fn register_assignment_pattern(
+        &mut self,
+        checkpoint: AssignmentPatternCheckpoint,
+        root: NodeRef,
+        tag: NodeTag,
+    ) {
+        self.assignment_pattern_candidates
+            .push(AssignmentPatternCandidate {
+                node: root,
+                tag,
+                group_start: checkpoint.candidate_len,
+            });
+    }
+
+    fn retag_assignment_pattern(&mut self, root: NodeRef) -> Result<(), ParseError> {
+        let Some(group) = self.assignment_pattern_candidates.last().copied() else {
+            return Ok(());
+        };
+        if group.node.offset() != root.offset() {
+            return Ok(());
+        }
+        for candidate in &self.assignment_pattern_candidates[group.group_start..] {
+            self.tape.retag_node(candidate.node, candidate.tag)?;
+        }
+        self.assignment_pattern_candidates
+            .truncate(group.group_start);
+        Ok(())
     }
 
     fn consume_semicolon(&mut self) -> u32 {

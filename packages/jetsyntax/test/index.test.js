@@ -124,4 +124,48 @@ describe("parse", () => {
       async: true,
     });
   });
+
+  it("materializes property names across objects, patterns, and classes", () => {
+    const source = [
+      "const object = { [key]: value, return: keyword, 0: numeric, 1n: bigint, shorthand, [method]() {} };",
+      "const { [key]: computed, return: renamed, 0: zero, 1n: big, shorthand = fallback } = source;",
+      "({ [key]: target, return: other } = source);",
+      "class Properties { [field] = value; [method]() {} return() {} 1n = value; }",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const properties = result.program.body[0].declarations[0].id.right.properties;
+    expect(properties).toMatchObject([
+      { computed: true, method: false, shorthand: false },
+      { key: { type: "Identifier", name: "return" }, computed: false, shorthand: false },
+      { key: { type: "Literal", value: 0 }, computed: false },
+      { key: { type: "Literal", bigint: "1" }, computed: false },
+      { key: { type: "Identifier", name: "shorthand" }, shorthand: true },
+      {
+        computed: true,
+        method: true,
+        value: { type: "FunctionExpression", generator: false, async: false },
+      },
+    ]);
+    const binding = result.program.body[1].declarations[0].id;
+    expect(binding.properties).toMatchObject([
+      { computed: true, shorthand: false },
+      { key: { name: "return" }, computed: false, shorthand: false },
+      { key: { value: 0 }, computed: false },
+      { key: { bigint: "1" }, computed: false },
+      { shorthand: true, value: { type: "AssignmentPattern" } },
+    ]);
+    const assignment = result.program.body[2].expression.expression.left;
+    expect(assignment).toMatchObject({
+      type: "ObjectPattern",
+      properties: [{ computed: true }, { key: { name: "return" } }],
+    });
+    expect(result.program.body[3].body.body).toMatchObject([
+      { type: "PropertyDefinition", computed: true },
+      { type: "MethodDefinition", computed: true },
+      { type: "MethodDefinition", key: { name: "return" }, computed: false },
+      { type: "PropertyDefinition", key: { bigint: "1" }, computed: false },
+    ]);
+  });
 });

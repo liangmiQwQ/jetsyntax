@@ -534,6 +534,47 @@ fn parser_should_diagnose_generator_method_early_errors() {
     assert_diagnostic_cases(&cases, true);
 }
 
+/// Property names retain their key form and method, field, or shorthand role.
+#[test]
+fn parser_should_accept_property_names_across_objects_patterns_and_classes() {
+    let cases = [
+        GrammarCase::script(
+            "object property names",
+            "const object = { [key]: value, return: keyword, \"text\": stringValue, 0: numeric, 1n: bigint, shorthand, [method]() { return value; }, default() { return value; } };",
+            &[
+                NodeTag::OBJECT_EXPRESSION,
+                NodeTag::PROPERTY,
+                NodeTag::FUNCTION_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
+            "binding pattern property names",
+            "const { [key]: computed, return: keyword, \"text\": stringValue, 0: numeric, 1n: bigint, shorthand = fallback } = source;",
+            &[
+                NodeTag::OBJECT_PATTERN,
+                NodeTag::PROPERTY,
+                NodeTag::ASSIGNMENT_PATTERN,
+            ],
+        ),
+        GrammarCase::script(
+            "assignment pattern property names",
+            "({ [key]: computed, return: keyword, \"text\": stringValue, 0: numeric, 1n: bigint } = source);",
+            &[NodeTag::OBJECT_PATTERN, NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "class property names",
+            "class Properties { [field] = value; [method]() {} return() {} \"text\" = value; 0() {} 1n = value; }",
+            &[
+                NodeTag::CLASS_DECLARATION,
+                NodeTag::PROPERTY_DEFINITION,
+                NodeTag::METHOD_DEFINITION,
+            ],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
 /// Recoverable syntax errors must still return a validated program tape.
 #[test]
 fn parser_should_recover_with_a_valid_tape() {
