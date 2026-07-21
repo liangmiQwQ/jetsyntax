@@ -464,9 +464,70 @@ fn parser_should_accept_async_functions_and_generators() {
                 NodeTag::AWAIT_EXPRESSION,
             ],
         ),
+        GrammarCase::module(
+            "exported async functions",
+            "export async function load() { return await fetchValue(); } export default async function* stream() { yield await next(); }",
+            &[
+                NodeTag::EXPORT_NAMED_DECLARATION,
+                NodeTag::EXPORT_DEFAULT_DECLARATION,
+                NodeTag::FUNCTION_DECLARATION,
+                NodeTag::AWAIT_EXPRESSION,
+                NodeTag::YIELD_EXPRESSION,
+            ],
+        ),
     ];
 
     assert_clean_cases(&cases);
+}
+
+/// `async function` export forms may not cross a line terminator.
+#[test]
+fn parser_should_respect_line_breaks_in_exported_async_functions() {
+    assert_diagnostic_cases(
+        &[GrammarCase::module(
+            "named export line break",
+            "export async/*\n*/function split() {}",
+            &[
+                NodeTag::EXPORT_NAMED_DECLARATION,
+                NodeTag::FUNCTION_DECLARATION,
+            ],
+        )],
+        false,
+    );
+    assert_clean_cases(&[GrammarCase::module(
+        "default export line break",
+        "export default async\nfunction split() {}",
+        &[
+            NodeTag::EXPORT_DEFAULT_DECLARATION,
+            NodeTag::FUNCTION_DECLARATION,
+        ],
+    )]);
+}
+
+/// Malformed exported async functions recover inside their original export wrappers.
+#[test]
+fn parser_should_recover_malformed_exported_async_functions() {
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::module(
+                "malformed named async function export",
+                "export async function broken(",
+                &[
+                    NodeTag::EXPORT_NAMED_DECLARATION,
+                    NodeTag::FUNCTION_DECLARATION,
+                ],
+            ),
+            GrammarCase::module(
+                "malformed default async generator export",
+                "export default async function* broken(",
+                &[
+                    NodeTag::EXPORT_DEFAULT_DECLARATION,
+                    NodeTag::FUNCTION_DECLARATION,
+                ],
+            ),
+        ],
+        false,
+    );
 }
 
 /// Generator methods preserve prefixes, computed names, and isolated function scopes.

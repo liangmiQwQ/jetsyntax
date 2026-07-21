@@ -193,7 +193,7 @@ impl<'s> Parser<'s> {
                 self.parse_module_declaration()
             }
             TokenKind::Function => self.parse_function(true, false),
-            TokenKind::Async if self.followed_by_word("function") => {
+            TokenKind::Async if self.followed_by_token_without_line_break(TokenKind::Function) => {
                 self.bump();
                 self.parse_function(true, true)
             }
@@ -655,6 +655,12 @@ impl<'s> Parser<'s> {
         }
         if self.eat(TokenKind::Default).is_some() {
             let (declaration, needs_semicolon) = match self.current.kind {
+                TokenKind::Async
+                    if self.followed_by_token_without_line_break(TokenKind::Function) =>
+                {
+                    self.bump();
+                    (self.parse_function(true, true)?, false)
+                }
                 TokenKind::Function => (self.parse_function(true, false)?, false),
                 TokenKind::Class => (self.parse_class(true)?, false),
                 _ => (self.parse_assignment_expression(true)?, true),
@@ -754,6 +760,10 @@ impl<'s> Parser<'s> {
             }
             TokenKind::Namespace | TokenKind::Module if self.options.language.is_typescript() => {
                 self.parse_module_declaration()?
+            }
+            TokenKind::Async if self.followed_by_token_without_line_break(TokenKind::Function) => {
+                self.bump();
+                self.parse_function(true, true)?
             }
             TokenKind::Function => self.parse_function(true, false)?,
             TokenKind::Class => self.parse_class(true)?,
@@ -3308,6 +3318,17 @@ impl<'s> Parser<'s> {
         self.source
             .get(self.current.end as usize..)
             .is_some_and(|rest| rest.trim_start().starts_with(word))
+    }
+
+    fn followed_by_token_without_line_break(&self, kind: TokenKind) -> bool {
+        if self.current.flags.escaped() {
+            return false;
+        }
+        // A separate lexer keeps trivia-sensitive lookahead from mutating live diagnostics.
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let token = lookahead.next_token();
+        token.kind == kind && !token.flags.line_break_before() && !token.flags.escaped()
     }
 
     fn source_text(&self, span: Span) -> &'s str {

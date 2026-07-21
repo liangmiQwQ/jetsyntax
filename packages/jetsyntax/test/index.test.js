@@ -61,6 +61,78 @@ describe("parse", () => {
     expect(method.value.body.body[0].argument.type).toBe("TemplateLiteral");
   });
 
+  it("materializes named and default exported async functions", () => {
+    const source = [
+      "export async function load() { return await fetchValue(); }",
+      "export default async function* stream() { yield await next(); }",
+    ].join("\n");
+    const result = parse(source);
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      {
+        type: "ExportNamedDeclaration",
+        declaration: {
+          type: "FunctionDeclaration",
+          generator: false,
+          async: true,
+        },
+      },
+      {
+        type: "ExportDefaultDeclaration",
+        declaration: {
+          type: "FunctionDeclaration",
+          generator: true,
+          async: true,
+        },
+      },
+    ]);
+  });
+
+  it("does not join exported async functions across a line break", () => {
+    const named = parse("export async/*\n*/function split() {}");
+    expect(named.diagnostics).not.toEqual([]);
+    expect(named.program.type).toBe("Program");
+
+    const defaultExport = parse("export default async\nfunction split() {}");
+    expect(defaultExport.diagnostics).toEqual([]);
+    expect(defaultExport.program.body).toMatchObject([
+      {
+        type: "ExportDefaultDeclaration",
+        declaration: { type: "Identifier", name: "async" },
+      },
+      {
+        type: "FunctionDeclaration",
+        generator: false,
+        async: false,
+      },
+    ]);
+  });
+
+  it("recovers malformed exported async functions", () => {
+    const named = parse("export async function broken(");
+    const defaultExport = parse("export default async function* broken(");
+
+    expect(named.diagnostics).not.toEqual([]);
+    expect(named.program.body[0]).toMatchObject({
+      type: "ExportNamedDeclaration",
+      declaration: {
+        type: "FunctionDeclaration",
+        generator: false,
+        async: true,
+      },
+    });
+    expect(defaultExport.diagnostics).not.toEqual([]);
+    expect(defaultExport.program.body[0]).toMatchObject({
+      type: "ExportDefaultDeclaration",
+      declaration: {
+        type: "FunctionDeclaration",
+        generator: true,
+        async: true,
+      },
+    });
+  });
+
   it("materializes keyword and private member names", () => {
     const source = [
       "AsyncGeneratorPrototype.return;",
