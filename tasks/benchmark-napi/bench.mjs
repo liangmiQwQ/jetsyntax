@@ -2,7 +2,6 @@ import { spawnSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
-import { performance } from "node:perf_hooks";
 
 import swc from "@swc/core";
 import { parse as parseJetSyntax } from "jetsyntax";
@@ -11,6 +10,7 @@ import { parse as parseYuku } from "yuku-parser";
 
 import { compareWithYuku, positiveInteger } from "./metrics.mjs";
 import { prepareFixtures } from "./prepare.mjs";
+import { measureInterleaved } from "./runner.mjs";
 
 const require = createRequire(import.meta.url);
 const root = resolve(import.meta.dirname, "../..");
@@ -45,12 +45,13 @@ for (const fixture of fixtures) {
   const parsers = parserCases(fixture);
   for (const parser of parsers) validate(parser, fixture);
 
-  // Rotate the first parser per fixture to reduce systematic thermal bias.
-  const offset = fixtures.indexOf(fixture) % parsers.length;
-  const ordered = [...parsers.slice(offset), ...parsers.slice(0, offset)];
-  for (const parser of ordered) {
-    globalThis.gc?.();
-    const stats = measure(() => parser.parse(fixture.source));
+  globalThis.gc?.();
+  const measurements = measureInterleaved(
+    parsers.map((parser) => ({ name: parser.name, run: () => parser.parse(fixture.source) })),
+    { initialOffset: fixtures.indexOf(fixture), samples, warmups },
+  );
+  for (const parser of parsers) {
+    const stats = measurements.get(parser.name);
     const result = {
       fixture: fixture.name,
       bytes: Buffer.byteLength(fixture.source),
@@ -107,7 +108,8 @@ function parserCases(fixture) {
   return [
     {
       name: "JetSyntax",
-      parse: (source) => {
+      parse: (source) => parseJetSyntax(source, { lang: fixture.lang }).program.body.length,
+      validate: (source) => {
         const result = parseJetSyntax(source, { lang: fixture.lang });
         if (result.diagnostics.length !== 0) {
           throw new Error(`JetSyntax emitted ${result.diagnostics.length} diagnostics for ${fixture.name}`);
@@ -132,28 +134,10 @@ function parserCases(fixture) {
 }
 
 function validate(parser, fixture) {
-  const bodyLength = parser.parse(fixture.source);
+  const bodyLength = (parser.validate ?? parser.parse)(fixture.source);
   if (!Number.isInteger(bodyLength) || bodyLength < 1) {
     throw new Error(`${parser.name} did not materialize ${fixture.name}`);
   }
-}
-
-function measure(parse) {
-  for (let index = 0; index < warmups; index++) parse();
-
-  const timings = new Float64Array(samples);
-  for (let index = 0; index < samples; index++) {
-    const start = performance.now();
-    parse();
-    timings[index] = performance.now() - start;
-  }
-  timings.sort();
-
-  return {
-    medianMs: timings[Math.floor(samples / 2)],
-    minimumMs: timings[0],
-    p99Ms: timings[Math.min(samples - 1, Math.floor(samples * 0.99))],
-  };
 }
 
 function parserMetadata() {
