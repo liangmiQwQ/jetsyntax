@@ -1,0 +1,57 @@
+{
+  "name": "jetsyntax",
+  "version": "0.0.0-alpha.0",
+  "description": "Experimental JavaScript, TypeScript, JSX, and TSX parser",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "binding.js",
+    "binding.d.ts",
+    "decoder.js",
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "keywords": [
+    "estree",
+    "javascript",
+    "jsx",
+    "parser",
+    "typescript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/liangmiQwQ/jetsyntax.git",
+    "directory": "packages/jetsyntax"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "build": "napi build --manifest-path ../../napi/Cargo.toml --platform --release --esm --js binding.js --dts binding.d.ts --output-dir .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.7.4",
+    "vitest": "4.1.10"
+  },
+  "napi": {
+    "binaryName": "jetsyntax",
+    "packageName": "@jetsyntax/binding",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-pc-windows-msvc",
+      "x86_64-pc-windows-msvc",
+      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl"
+    ]
+  }
+}

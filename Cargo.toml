@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "napi"]
 
 [workspace.package]
 version = "0.0.0-alpha.0"
@@ -12,6 +12,9 @@ repository = "https://github.com/liangmiQwQ/jetsyntax"
 
 [workspace.dependencies]
 jetsyntax = { path = "crates/jetsyntax", version = "0.0.0-alpha.0" }
+napi = { version = "3.11.0", default-features = false, features = ["napi9"] }
+napi-build = "2.3.2"
+napi-derive = "3.6.0"
 unicode-id-start = "1.4.0"
 
 [workspace.lints.clippy]
