@@ -380,4 +380,75 @@ describe("parse", () => {
       expect(result.program.type).toBe("Program");
     }
   });
+
+  it("materializes catch binding patterns in an isolated scope", () => {
+    const source = [
+      "let message;",
+      "try {} catch ({ message, code = 1, ...rest }) {}",
+      "try {} catch ([first, , third = 3, ...tail]) {}",
+      "try {} catch {}",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true, sourceType: "script" });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[1].handler.param).toMatchObject({
+      type: "ObjectPattern",
+      properties: [
+        {
+          type: "Property",
+          key: { type: "Identifier", name: "message" },
+          value: { type: "Identifier", name: "message" },
+          shorthand: true,
+        },
+        {
+          type: "Property",
+          key: { type: "Identifier", name: "code" },
+          value: {
+            type: "AssignmentPattern",
+            left: { type: "Identifier", name: "code" },
+            right: { type: "Literal", value: 1 },
+          },
+          shorthand: true,
+        },
+        { type: "RestElement", argument: { type: "Identifier", name: "rest" } },
+      ],
+    });
+    expect(result.program.body[2].handler.param).toMatchObject({
+      type: "ArrayPattern",
+      elements: [
+        { type: "Identifier", name: "first" },
+        null,
+        {
+          type: "AssignmentPattern",
+          left: { type: "Identifier", name: "third" },
+          right: { type: "Literal", value: 3 },
+        },
+        { type: "RestElement", argument: { type: "Identifier", name: "tail" } },
+      ],
+    });
+    expect(result.program.body[3].handler.param).toBeNull();
+  });
+
+  it("diagnoses a default on the catch parameter", () => {
+    const result = parse("try {} catch (error = fallback) {}", { sourceType: "script" });
+
+    expect(result.diagnostics[0]).toBe("expected RightParen, found Eq");
+    expect(result.panicked).toBe(false);
+    expect(result.program.type).toBe("Program");
+  });
+
+  it("diagnoses commas following catch rest bindings", () => {
+    const cases = [
+      ["try {} catch ([...rest, tail]) {}", "rest element must be last"],
+      ["try {} catch ([...rest,]) {}", "rest element must be last"],
+      ["try {} catch ({ ...rest, }) {}", "rest property must be last"],
+    ];
+
+    for (const [source, expected] of cases) {
+      const result = parse(source, { sourceType: "script" });
+      expect(result.diagnostics).toEqual([expected]);
+      expect(result.panicked).toBe(false);
+      expect(result.program.type).toBe("Program");
+    }
+  });
 });

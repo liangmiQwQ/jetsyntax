@@ -498,6 +498,111 @@ fn parser_should_diagnose_rest_binding_defaults() {
     );
 }
 
+/// Catch parameters use binding-pattern nodes without conflicting with the enclosing scope.
+#[test]
+fn parser_should_preserve_catch_binding_patterns_and_scope() {
+    let source = "let message;\
+                  try {} catch ({ message, code = 1, ...rest }) {}\
+                  try {} catch ([first, , third = 3, ...tail]) {}\
+                  try {} catch {}";
+    let parsed = parse(
+        source,
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse catch patterns");
+    inspect_tape("catch patterns", &parsed).expect("valid catch-pattern tape");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let program =
+        node_fields(&parsed.tape, parsed.tape.header().root, NodeTag::PROGRAM).expect("Program");
+    let body = list_items(&parsed.tape, program[0]).expect("Program body");
+
+    let object_try =
+        node_fields(&parsed.tape, body[1], NodeTag::TRY_STATEMENT).expect("object try");
+    let object_catch =
+        node_fields(&parsed.tape, object_try[1], NodeTag::CATCH_CLAUSE).expect("object catch");
+    let object = node_fields(&parsed.tape, object_catch[0], NodeTag::OBJECT_PATTERN)
+        .expect("object pattern");
+    let properties = list_items(&parsed.tape, object[0]).expect("object properties");
+    assert_eq!(properties.len(), 3);
+    assert_eq!(node_tag(&parsed.tape, properties[0]), Ok(NodeTag::PROPERTY));
+    let default_property =
+        node_fields(&parsed.tape, properties[1], NodeTag::PROPERTY).expect("default property");
+    assert_eq!(
+        node_tag(&parsed.tape, default_property[1]),
+        Ok(NodeTag::ASSIGNMENT_PATTERN)
+    );
+    assert_eq!(
+        node_tag(&parsed.tape, properties[2]),
+        Ok(NodeTag::REST_ELEMENT)
+    );
+
+    let array_try = node_fields(&parsed.tape, body[2], NodeTag::TRY_STATEMENT).expect("array try");
+    let array_catch =
+        node_fields(&parsed.tape, array_try[1], NodeTag::CATCH_CLAUSE).expect("array catch");
+    let array =
+        node_fields(&parsed.tape, array_catch[0], NodeTag::ARRAY_PATTERN).expect("array pattern");
+    let elements = list_items(&parsed.tape, array[0]).expect("array elements");
+    assert_eq!(elements.len(), 4);
+    assert!(matches!(
+        parsed.tape.value_at(elements[1]),
+        Ok(TapeValue::Null)
+    ));
+    assert_eq!(
+        node_tag(&parsed.tape, elements[2]),
+        Ok(NodeTag::ASSIGNMENT_PATTERN)
+    );
+    assert_eq!(
+        node_tag(&parsed.tape, elements[3]),
+        Ok(NodeTag::REST_ELEMENT)
+    );
+
+    let optional_try =
+        node_fields(&parsed.tape, body[3], NodeTag::TRY_STATEMENT).expect("optional try");
+    let optional_catch =
+        node_fields(&parsed.tape, optional_try[1], NodeTag::CATCH_CLAUSE).expect("optional catch");
+    assert!(matches!(
+        parsed.tape.value_at(optional_catch[0]),
+        Ok(TapeValue::Null)
+    ));
+}
+
+/// Catch parameters reject initializers and commas following rest bindings while recovering a tree.
+#[test]
+fn parser_should_diagnose_invalid_catch_bindings() {
+    let cases = [
+        (
+            "try {} catch (error = fallback) {}",
+            "expected RightParen, found Eq",
+        ),
+        (
+            "try {} catch ([...rest, tail]) {}",
+            "rest element must be last",
+        ),
+        ("try {} catch ([...rest,]) {}", "rest element must be last"),
+        (
+            "try {} catch ({ ...rest, }) {}",
+            "rest property must be last",
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let parsed = parse(source, ParseOptions::default()).expect("recover invalid catch");
+        inspect_tape("invalid catch", &parsed).expect("valid recovered catch tape");
+        assert_eq!(
+            parsed
+                .diagnostics
+                .first()
+                .map(|diagnostic| &*diagnostic.message),
+            Some(expected)
+        );
+    }
+}
+
 /// Regular expressions and template literals require parser-directed rescanning after `/`, `}`, and tags.
 #[test]
 fn parser_should_accept_regular_expressions_and_templates() {

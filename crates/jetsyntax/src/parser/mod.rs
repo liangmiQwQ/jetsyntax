@@ -996,14 +996,14 @@ impl<'s> Parser<'s> {
         let block = self.parse_block_statement()?;
         let (handler, has_handler) = if self.eat(TokenKind::Catch).is_some() {
             let catch_start = self.previous_end(block.span.end);
+            self.context.enter_scope(ScopeKind::Catch);
             let parameter = if self.eat(TokenKind::LeftParen).is_some() {
-                let parameter = self.parse_binding_identifier(BindingKind::Lexical)?;
+                let parameter = self.parse_binding_pattern(BindingKind::Lexical)?;
                 self.expect(TokenKind::RightParen);
                 parameter.value()
             } else {
                 self.tape.push_null()?
             };
-            self.context.enter_scope(ScopeKind::Catch);
             let body = self.parse_block_statement()?;
             let _ = self.context.leave_scope();
             (
@@ -2220,15 +2220,19 @@ impl<'s> Parser<'s> {
                         elements.push(self.tape.push_null()?);
                         continue;
                     }
-                    let element = if self.eat(TokenKind::Ellipsis).is_some() {
+                    let rest = self.eat(TokenKind::Ellipsis).is_some();
+                    let element = if rest {
                         let argument = self.parse_binding_pattern(binding_kind)?;
                         self.parse_binding_rest_element(argument)?
                     } else {
                         self.parse_binding_element(binding_kind)?
                     };
                     elements.push(element.value());
-                    if self.eat(TokenKind::Comma).is_none() {
+                    let Some(comma) = self.eat(TokenKind::Comma) else {
                         break;
+                    };
+                    if rest {
+                        self.error(Self::token_span(comma), "rest element must be last");
                     }
                 }
                 let end = self.expect(TokenKind::RightBracket).end;
@@ -2239,7 +2243,8 @@ impl<'s> Parser<'s> {
                 let start = self.take().start;
                 let mut properties = Vec::new();
                 while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
-                    if self.eat(TokenKind::Ellipsis).is_some() {
+                    let rest = self.eat(TokenKind::Ellipsis).is_some();
+                    if rest {
                         let argument = self.parse_binding_identifier(binding_kind)?;
                         properties.push(self.parse_binding_rest_element(argument)?.value());
                     } else {
@@ -2278,8 +2283,11 @@ impl<'s> Parser<'s> {
                             .value(),
                         );
                     }
-                    if self.eat(TokenKind::Comma).is_none() {
+                    let Some(comma) = self.eat(TokenKind::Comma) else {
                         break;
+                    };
+                    if rest {
+                        self.error(Self::token_span(comma), "rest property must be last");
                     }
                 }
                 let end = self.expect(TokenKind::RightBrace).end;
