@@ -240,6 +240,7 @@ fn lexer_should_recognize_strings_and_line_continuations() {
         r"'escaped\' quote'",
         r#""escaped\" quote""#,
         r"'unicode \u{1f600}'",
+        r#""surrogate \u{d800}""#,
         "'continued\\\nline'",
         "\"continued\\\r\nline\"",
     ];
@@ -255,6 +256,7 @@ fn lexer_should_recognize_strings_and_line_continuations() {
 #[test]
 fn lexer_should_scan_template_segments_on_demand() {
     assert_single_token("`plain`", TokenKind::NoSubstitutionTemplate);
+    assert_single_token(r"`unicode \u{1f600}`", TokenKind::NoSubstitutionTemplate);
 
     let source = "`before ${value} between ${other} after`";
     let mut lexer = Lexer::new(source);
@@ -275,6 +277,76 @@ fn lexer_should_scan_template_segments_on_demand() {
     assert_eq!(lexer.source_text(tail), "} after`");
     assert_eq!(lexer.next_token().kind, TokenKind::Eof);
     assert!(lexer.errors().is_empty(), "{:?}", lexer.errors());
+}
+
+/// Braced Unicode escapes in strings and templates require digits, a closing brace, and an
+/// in-range code point.
+///
+/// Reproduces: malformed braced escapes previously completed without a lexical diagnostic.
+#[test]
+fn lexer_should_reject_invalid_braced_unicode_literal_escapes() {
+    for source in [
+        r#""\u{}""#,
+        r#""\u{g}""#,
+        r#""\u{110000}""#,
+        r"`\u{}`",
+        r"`\u{g}`",
+        r"`\u{110000}`",
+        r"`\u{67`",
+    ] {
+        let mut lexer = Lexer::new(source);
+        let token = lexer.next_token();
+        assert!(
+            matches!(
+                token.kind,
+                TokenKind::String | TokenKind::NoSubstitutionTemplate
+            ),
+            "{source:?}: {token:?}"
+        );
+        assert!(!lexer.errors().is_empty(), "{source:?}");
+        assert!(
+            lexer
+                .errors()
+                .iter()
+                .all(|error| error.start <= error.end && error.end as usize <= source.len()),
+            "{source:?}: {:?}",
+            lexer.errors()
+        );
+    }
+}
+
+/// Unterminated braced escapes recover within the source and tokenization always reaches EOF.
+///
+/// Reproduces: `var value = "\u{67";` previously completed without any diagnostic.
+#[test]
+fn lexer_should_bound_unterminated_braced_unicode_escape_recovery() {
+    let source = r#"var value = "\u{67";"#;
+    let mut lexer = Lexer::new(source);
+    let mut token_count = 0;
+
+    loop {
+        let token = lexer.next_token();
+        token_count += 1;
+        assert!(token.start <= token.end, "{token:?}");
+        assert!(token.end as usize <= source.len(), "{token:?}");
+        assert!(
+            token_count <= source.len() + 1,
+            "lexer did not make bounded progress"
+        );
+        if token.kind == TokenKind::Eof {
+            break;
+        }
+    }
+
+    assert!(!lexer.errors().is_empty());
+    assert!(
+        lexer
+            .errors()
+            .iter()
+            .all(|error| error.start <= error.end && error.end as usize <= source.len()),
+        "{:?}",
+        lexer.errors()
+    );
 }
 
 /// A slash becomes a regular expression only after an explicit grammar-directed rescan.

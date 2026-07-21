@@ -830,6 +830,10 @@ impl<'s> Lexer<'s> {
             }
             self.position += 1;
             if byte == b'\\' {
+                let escape_start = self.position - 1;
+                if self.scan_braced_unicode_escape(escape_start) {
+                    continue;
+                }
                 if self.bytes.get(self.position) == Some(&b'\r') {
                     self.position += 1;
                     if self.bytes.get(self.position) == Some(&b'\n') {
@@ -879,11 +883,45 @@ impl<'s> Lexer<'s> {
             }
             self.position += 1;
             if byte == b'\\' && self.bytes.get(self.position).is_some() {
-                self.advance_char();
+                let escape_start = self.position - 1;
+                if !self.scan_braced_unicode_escape(escape_start) {
+                    self.advance_char();
+                }
             }
         }
         self.error(start, self.position, "unterminated template literal");
         self.token(TokenKind::TemplateTail, start, flags)
+    }
+
+    fn scan_braced_unicode_escape(&mut self, escape_start: usize) -> bool {
+        if self.bytes.get(self.position) != Some(&b'u') || self.peek(1) != Some(b'{') {
+            return false;
+        }
+
+        self.position += 2;
+        let digits_start = self.position;
+        while self
+            .bytes
+            .get(self.position)
+            .is_some_and(u8::is_ascii_hexdigit)
+        {
+            self.position += 1;
+        }
+        let value = parse_hex(&self.bytes[digits_start..self.position]);
+        if self.position == digits_start || self.bytes.get(self.position) != Some(&b'}') {
+            self.error(escape_start, self.position, "invalid braced Unicode escape");
+            return true;
+        }
+
+        self.position += 1;
+        if value.is_none_or(|value| value > 0x10_FFFF) {
+            self.error(
+                escape_start,
+                self.position,
+                "Unicode escape is outside the valid range",
+            );
+        }
+        true
     }
 
     fn current_identifier_start(&self) -> bool {
