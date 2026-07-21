@@ -761,8 +761,8 @@ function decodeLiteral(base, raw, kind) {
       return { ...base, value: decodeQuotedString(`\"${raw.slice(1, -1)}\"`), raw };
     case 6: {
       const slash = lastRegexpSlash(raw);
-      const pattern = raw.slice(1, slash);
-      const flags = raw.slice(slash + 1);
+      const pattern = slash === -1 ? raw.slice(1) : raw.slice(1, slash);
+      const flags = slash === -1 ? "" : raw.slice(slash + 1);
       let value = null;
       try {
         value = new RegExp(pattern, flags);
@@ -820,7 +820,7 @@ function lastRegexpSlash(raw) {
     for (let cursor = index - 1; cursor >= 0 && raw[cursor] === "\\"; cursor--) backslashes++;
     if (backslashes % 2 === 0) return index;
   }
-  throw new Error("invalid JetSyntax regular-expression literal");
+  return -1;
 }
 
 function templateElementRaw(tokenRaw) {
@@ -865,5 +865,7 @@ function patternItems(value, property, tag) {
   if (Array.isArray(value)) return value;
   const items = value?.[property];
   if (Array.isArray(items)) return items;
+  if (value?.type === "ParenthesizedExpression") return patternItems(value.expression, property, tag);
+  if (value && typeof value === "object" && typeof value.type === "string") return [value];
   throw new Error(`JetSyntax node tag ${tag} expected a list or recoverable expression field`);
 }

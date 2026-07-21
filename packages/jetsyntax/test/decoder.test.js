@@ -204,6 +204,42 @@ describe("decodeTape", () => {
     });
   });
 
+  it("bounds recovery patterns that temporarily wrap expression nodes", () => {
+    const source = "value";
+    const tape = new HandcraftedTape();
+    const name = tape.source(0, 5);
+    const identifier = tape.node(2, 0, 5, [name]);
+    const pattern = tape.node(53, 0, 5, [identifier]);
+    const statement = tape.node(5, 0, 5, [pattern]);
+    const body = tape.list([statement]);
+    const sourceType = tape.integer(0);
+    const program = tape.node(1, 0, 5, [body, sourceType]);
+
+    const decoded = decodeTape(source, tape.finish(program));
+    expect(decoded.body[0].expression).toMatchObject({
+      type: "ArrayPattern",
+      elements: [{ type: "Identifier", name: "value" }],
+    });
+  });
+
+  it("materializes an unterminated regular expression without throwing", () => {
+    const source = "/unterminated";
+    const tape = new HandcraftedTape();
+    const raw = tape.source(0, source.length);
+    const regexpKind = tape.integer(6);
+    const literal = tape.node(4, 0, source.length, [raw, regexpKind]);
+    const statement = tape.node(5, 0, source.length, [literal]);
+    const body = tape.list([statement]);
+    const sourceType = tape.integer(0);
+    const program = tape.node(1, 0, source.length, [body, sourceType]);
+
+    const decoded = decodeTape(source, tape.finish(program));
+    expect(decoded.body[0].expression).toMatchObject({
+      type: "Literal",
+      regex: { pattern: "unterminated", flags: "" },
+    });
+  });
+
   it("fails loudly for unsupported, unknown, and malformed tags", () => {
     for (const [tag, message] of [[260, "unsupported"], [4096, "unknown"]]) {
       const tape = new HandcraftedTape();
