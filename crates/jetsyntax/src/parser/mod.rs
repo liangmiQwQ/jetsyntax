@@ -1175,42 +1175,27 @@ impl<'s> Parser<'s> {
                 );
             }
             self.expect(TokenKind::Arrow);
-            let expression_body = self.current.kind != TokenKind::LeftBrace;
-            let body = if expression_body {
-                self.parse_assignment_expression(allow_in)?
-            } else {
-                self.parse_block_statement()?
-            };
+            let arrow = self.parse_arrow_function(start, &parameters, true, allow_in);
             self.leave_function_context(previous_grammar);
-            let parameters = self.tape.push_list(&parameters)?;
-            let asynchronous = self.tape.push_bool(true)?;
-            let expression = self.tape.push_bool(expression_body)?;
-            let arrow = self.node(
-                NodeTag::ARROW_FUNCTION_EXPRESSION,
-                Span::new(start, body.span.end),
-                &[parameters, body.value(), asynchronous, expression],
-            );
+            self.rollback_assignment_patterns(assignment_patterns);
+            return arrow;
+        }
+        if self.current.kind == TokenKind::LeftParen && self.looks_like_empty_arrow() {
+            let start = self.take().start;
+            self.expect(TokenKind::RightParen);
+            self.expect(TokenKind::Arrow);
+            let previous_grammar = self.enter_function_context(false, false);
+            let arrow = self.parse_arrow_function(start, &[], false, allow_in);
+            self.leave_function_context(previous_grammar);
             self.rollback_assignment_patterns(assignment_patterns);
             return arrow;
         }
         let left = self.parse_conditional_expression(allow_in)?;
         if self.eat(TokenKind::Arrow).is_some() {
-            let params = self.tape.push_list(&[left.value()])?;
-            let expression_body = self.current.kind != TokenKind::LeftBrace;
             let previous_grammar = self.enter_function_context(false, false);
-            let body = if expression_body {
-                self.parse_assignment_expression(allow_in)?
-            } else {
-                self.parse_block_statement()?
-            };
+            let arrow =
+                self.parse_arrow_function(left.span.start, &[left.value()], false, allow_in);
             self.leave_function_context(previous_grammar);
-            let asynchronous = self.tape.push_bool(false)?;
-            let expression = self.tape.push_bool(expression_body)?;
-            let arrow = self.node(
-                NodeTag::ARROW_FUNCTION_EXPRESSION,
-                Span::new(left.span.start, body.span.end),
-                &[params, body.value(), asynchronous, expression],
-            );
             self.rollback_assignment_patterns(assignment_patterns);
             return arrow;
         }
@@ -1231,6 +1216,29 @@ impl<'s> Parser<'s> {
         );
         self.rollback_assignment_patterns(assignment_patterns);
         assignment
+    }
+
+    fn parse_arrow_function(
+        &mut self,
+        start: u32,
+        parameters: &[ValueRef],
+        asynchronous: bool,
+        allow_in: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let expression_body = self.current.kind != TokenKind::LeftBrace;
+        let body = if expression_body {
+            self.parse_assignment_expression(allow_in)?
+        } else {
+            self.parse_block_statement()?
+        };
+        let parameters = self.tape.push_list(parameters)?;
+        let asynchronous = self.tape.push_bool(asynchronous)?;
+        let expression = self.tape.push_bool(expression_body)?;
+        self.node(
+            NodeTag::ARROW_FUNCTION_EXPRESSION,
+            Span::new(start, body.span.end),
+            &[parameters, body.value(), asynchronous, expression],
+        )
     }
 
     fn parse_conditional_expression(&mut self, allow_in: bool) -> Result<ParsedNode, ParseError> {
@@ -3355,6 +3363,17 @@ impl<'s> Parser<'s> {
                 let boundary = rest.find([';', '{', '}']);
                 arrow.is_some_and(|arrow| boundary.is_none_or(|boundary| arrow < boundary))
             })
+    }
+
+    fn looks_like_empty_arrow(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        if lookahead.next_token().kind != TokenKind::RightParen {
+            return false;
+        }
+        // Only trivia after `)` participates in the arrow's no-LineTerminator restriction.
+        let arrow = lookahead.next_token();
+        arrow.kind == TokenKind::Arrow && !arrow.flags.line_break_before()
     }
 
     const fn is_identifier_name(kind: TokenKind) -> bool {

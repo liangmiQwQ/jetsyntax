@@ -61,6 +61,85 @@ describe("parse", () => {
     expect(method.value.body.body[0].argument.type).toBe("TemplateLiteral");
   });
 
+  it("materializes zero-parameter arrow functions", () => {
+    const source = [
+      "const expression = () => 1;",
+      "const block = (/* parameters */) /* arrow */ => { return 2; };",
+      "const nested = promise.then(() => value);",
+      "const invoked = (() => value)();",
+    ].join("\n");
+    const result = parse(source, {
+      preserveParens: true,
+      semanticErrors: true,
+      sourceType: "script",
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    const [expression, block, nested, invoked] = result.program.body.map(
+      statement => statement.declarations[0].init,
+    );
+    expect(expression).toMatchObject({
+      type: "ArrowFunctionExpression",
+      id: null,
+      params: [],
+      body: { type: "Literal", value: 1 },
+      generator: false,
+      async: false,
+      expression: true,
+    });
+    expect(source.slice(expression.start, expression.end)).toBe("() => 1");
+    expect(block).toMatchObject({
+      type: "ArrowFunctionExpression",
+      params: [],
+      body: { type: "BlockStatement" },
+      async: false,
+      expression: false,
+    });
+    expect(source.slice(block.start, block.end)).toBe(
+      "(/* parameters */) /* arrow */ => { return 2; }",
+    );
+    expect(nested.arguments[0]).toMatchObject({
+      type: "ArrowFunctionExpression",
+      params: [],
+      body: { type: "Identifier", name: "value" },
+    });
+    expect(invoked.callee).toMatchObject({
+      type: "ParenthesizedExpression",
+      expression: { type: "ArrowFunctionExpression", params: [] },
+    });
+
+    const unwrapped = parse("const invoked = (() => value)();", {
+      preserveParens: false,
+      sourceType: "script",
+    });
+    expect(unwrapped.diagnostics).toEqual([]);
+    expect(unwrapped.program.body[0].declarations[0].init.callee).toMatchObject({
+      type: "ArrowFunctionExpression",
+      params: [],
+    });
+  });
+
+  it("rejects line terminators before zero-parameter arrow tokens", () => {
+    for (const source of ["const callback = ()\n=> value;", "const callback = ()/*\n*/=> value;"]) {
+      const result = parse(source, { sourceType: "script" });
+
+      expect(result.diagnostics).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
+  it("recovers truncated zero-parameter arrow bodies", () => {
+    const result = parse("const callback = () =>", { sourceType: "script" });
+
+    expect(result.diagnostics).not.toEqual([]);
+    expect(result.program.body[0].declarations[0].init).toMatchObject({
+      type: "ArrowFunctionExpression",
+      params: [],
+      async: false,
+      expression: true,
+    });
+  });
+
   it("materializes named and default exported async functions", () => {
     const source = [
       "export async function load() { return await fetchValue(); }",

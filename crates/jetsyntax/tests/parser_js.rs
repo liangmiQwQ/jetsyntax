@@ -241,6 +241,58 @@ fn parser_should_accept_functions_classes_and_modules() {
     assert_clean_cases(&cases);
 }
 
+/// Empty arrow parameter lists accept either expression or block bodies in nested expression positions.
+#[test]
+fn parser_should_accept_zero_parameter_arrow_functions() {
+    let cases = [
+        GrammarCase::script(
+            "expression and block bodies",
+            "const expression = () => value; const block = () => { return value; };",
+            &[
+                NodeTag::ARROW_FUNCTION_EXPRESSION,
+                NodeTag::BLOCK_STATEMENT,
+                NodeTag::RETURN_STATEMENT,
+            ],
+        ),
+        GrammarCase::script(
+            "comment trivia",
+            "const callback = (/* parameters */) /* arrow */ => value;",
+            &[NodeTag::ARROW_FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "nested and parenthesized",
+            "promise.then(() => value); const invoked = (() => value)();",
+            &[
+                NodeTag::ARROW_FUNCTION_EXPRESSION,
+                NodeTag::CALL_EXPRESSION,
+                NodeTag::PARENTHESIZED_EXPRESSION,
+            ],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
+/// Line terminators before `=>` stay invalid, and truncated bodies retain a recoverable tape.
+#[test]
+fn parser_should_recover_invalid_zero_parameter_arrow_functions() {
+    let cases = [
+        GrammarCase::script("direct line break", "const callback = ()\n=> value;", &[]),
+        GrammarCase::script(
+            "comment line break",
+            "const callback = ()/*\n*/=> value;",
+            &[],
+        ),
+        GrammarCase::script(
+            "truncated body",
+            "const callback = () =>",
+            &[NodeTag::ARROW_FUNCTION_EXPRESSION],
+        ),
+    ];
+
+    assert_diagnostic_cases(&cases, false);
+}
+
 /// Parameter and `var` bindings belong to their nearest function and must not leak into siblings.
 #[test]
 fn parser_should_isolate_function_scopes() {
