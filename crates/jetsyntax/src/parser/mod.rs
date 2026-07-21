@@ -1173,8 +1173,39 @@ impl<'s> Parser<'s> {
         minimum: u8,
         allow_in: bool,
     ) -> Result<ParsedNode, ParseError> {
+        // TypeScript gives `as` and `satisfies` the same binding threshold as relational `in`.
+        const TS_ASSERTION_BINDING: u8 = 14;
+
         let mut left = self.parse_unary_expression()?;
-        while let Some(binding) = binary_binding(self.current.kind, allow_in) {
+        loop {
+            if self.options.language.is_typescript()
+                && minimum <= TS_ASSERTION_BINDING
+                && !self.current.flags.line_break_before()
+                && !self.current.flags.escaped()
+                && matches!(self.current.kind, TokenKind::As | TokenKind::Satisfies)
+            {
+                let operator = self.take();
+                let type_annotation =
+                    if operator.kind == TokenKind::As && self.current.kind == TokenKind::Const {
+                        self.parse_const_assertion_type()?
+                    } else {
+                        self.parse_type()?
+                    };
+                left = self.node(
+                    if operator.kind == TokenKind::Satisfies {
+                        NodeTag::TS_SATISFIES_EXPRESSION
+                    } else {
+                        NodeTag::TS_AS_EXPRESSION
+                    },
+                    Span::new(left.span.start, type_annotation.span.end),
+                    &[left.value(), type_annotation.value()],
+                )?;
+                continue;
+            }
+
+            let Some(binding) = binary_binding(self.current.kind, allow_in) else {
+                break;
+            };
             if binding.left < minimum {
                 break;
             }
@@ -1195,6 +1226,12 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_unary_expression(&mut self) -> Result<ParsedNode, ParseError> {
+        if self.options.language.is_typescript()
+            && !self.options.language.is_jsx()
+            && self.current.kind == TokenKind::Lt
+        {
+            return self.parse_type_assertion();
+        }
         if let Some(operator) = unary_operator(self.current.kind) {
             let start = self.take().start;
             let argument = self.parse_unary_expression()?;
@@ -1260,6 +1297,18 @@ impl<'s> Parser<'s> {
             );
         }
         self.parse_postfix_expression()
+    }
+
+    fn parse_type_assertion(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Lt).start;
+        let type_annotation = self.parse_type()?;
+        self.expect_type_greater();
+        let expression = self.parse_unary_expression()?;
+        self.node(
+            NodeTag::TS_TYPE_ASSERTION,
+            Span::new(start, expression.span.end),
+            &[type_annotation.value(), expression.value()],
+        )
     }
 
     // Postfix operations must stay in precedence order within one left-folding dispatch loop.
@@ -1355,6 +1404,17 @@ impl<'s> Parser<'s> {
                         NodeTag::UPDATE_EXPRESSION,
                         Span::new(expression.span.start, token.end),
                         &[operator, prefix, expression.value()],
+                    )?;
+                }
+                TokenKind::Bang
+                    if self.options.language.is_typescript()
+                        && !self.current.flags.line_break_before() =>
+                {
+                    let bang = self.take();
+                    expression = self.node(
+                        NodeTag::TS_NON_NULL_EXPRESSION,
+                        Span::new(expression.span.start, bang.end),
+                        &[expression.value()],
                     )?;
                 }
                 _ => break,
@@ -2216,6 +2276,18 @@ impl<'s> Parser<'s> {
             NodeTag::TS_TYPE_REFERENCE,
             Span::new(start, end),
             &[type_name.value(), type_arguments],
+        )
+    }
+
+    fn parse_const_assertion_type(&mut self) -> Result<ParsedNode, ParseError> {
+        let token = self.expect(TokenKind::Const);
+        let name = self.tape.push_source_slice(Self::token_span(token))?;
+        let identifier = self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name])?;
+        let type_arguments = self.tape.push_null()?;
+        self.node(
+            NodeTag::TS_TYPE_REFERENCE,
+            Self::token_span(token),
+            &[identifier.value(), type_arguments],
         )
     }
 

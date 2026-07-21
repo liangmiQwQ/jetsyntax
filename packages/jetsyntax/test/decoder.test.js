@@ -456,6 +456,56 @@ describe("decodeTape", () => {
     expect(Object.hasOwn(typeAnnotation, "readonly")).toBe(false);
   });
 
+  it("decodes TypeScript expression wrappers with Babel 8 field order", () => {
+    const source = "input! as Model satisfies Constraint; <number>input;";
+    const tape = new HandcraftedTape();
+    const input = tape.node(2, 0, 5, [tape.string("input")]);
+    const nonNull = tape.node(530, 0, 6, [input]);
+    const model = tape.node(2, 10, 15, [tape.string("Model")]);
+    const modelType = tape.node(513, 10, 15, [model, tape.null()]);
+    const asExpression = tape.node(528, 0, 15, [nonNull, modelType]);
+    const constraint = tape.node(2, 26, 36, [tape.string("Constraint")]);
+    const constraintType = tape.node(513, 26, 36, [constraint, tape.null()]);
+    const satisfies = tape.node(529, 0, 36, [asExpression, constraintType]);
+    const satisfiesStatement = tape.node(5, 0, 36, [satisfies]);
+
+    const numberType = tape.node(548, 39, 45, []);
+    const assertedInput = tape.node(2, 46, 51, [tape.string("input")]);
+    const typeAssertion = tape.node(560, 38, 51, [numberType, assertedInput]);
+    const assertionStatement = tape.node(5, 38, 52, [typeAssertion]);
+    const program = tape.node(1, 0, 52, [
+      tape.list([satisfiesStatement, assertionStatement]),
+      tape.integer(1),
+    ]);
+
+    const decoded = decodeTape(source, tape.finish(program));
+    expect(decoded.body[0].expression).toMatchObject({
+      type: "TSSatisfiesExpression",
+      expression: {
+        type: "TSAsExpression",
+        expression: {
+          type: "TSNonNullExpression",
+          expression: { type: "Identifier", name: "input" },
+        },
+        typeAnnotation: {
+          type: "TSTypeReference",
+          typeName: { type: "Identifier", name: "Model" },
+          typeArguments: null,
+        },
+      },
+      typeAnnotation: {
+        type: "TSTypeReference",
+        typeName: { type: "Identifier", name: "Constraint" },
+        typeArguments: null,
+      },
+    });
+    expect(decoded.body[1].expression).toMatchObject({
+      type: "TSTypeAssertion",
+      typeAnnotation: { type: "TSNumberKeyword" },
+      expression: { type: "Identifier", name: "input" },
+    });
+  });
+
   it("bounds recovery patterns that temporarily wrap expression nodes", () => {
     const source = "value";
     const tape = new HandcraftedTape();

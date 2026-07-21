@@ -225,6 +225,7 @@ impl NodeTag {
     pub const TS_ENUM_BODY: Self = Self(557);
     pub const TS_INTERFACE_HERITAGE: Self = Self(558);
     pub const TS_NULL_KEYWORD: Self = Self(559);
+    pub const TS_TYPE_ASSERTION: Self = Self(560);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {

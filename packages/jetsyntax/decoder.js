@@ -125,6 +125,9 @@ const NODE_SCHEMAS = new Map([
   [525, ["TSTypeAliasDeclaration", ["id", "typeParameters", "typeAnnotation"]]],
   [526, ["TSEnumDeclaration", ["id", "body", "const", "declare"]]],
   [527, ["TSModuleDeclaration", ["id", "body", "declare", "kind"]]],
+  [528, ["TSAsExpression", ["expression", "typeAnnotation"]]],
+  [529, ["TSSatisfiesExpression", ["expression", "typeAnnotation"]]],
+  [530, ["TSNonNullExpression", ["expression"]]],
   [531, ["TSParenthesizedType", ["typeAnnotation"]]],
   [532, ["TSIndexedAccessType", ["objectType", "indexType"]]],
   [533, ["TSTypeOperator", ["operator", "typeAnnotation"]]],
@@ -154,6 +157,7 @@ const NODE_SCHEMAS = new Map([
   [557, ["TSEnumBody", ["members"]]],
   [558, ["TSInterfaceHeritage", ["expression", "typeArguments"]]],
   [559, ["TSNullKeyword", []]],
+  [560, ["TSTypeAssertion", ["typeAnnotation", "expression"]]],
 ]);
 
 const UNSUPPORTED_NODE_TAGS = new Map([
@@ -164,9 +168,6 @@ const UNSUPPORTED_NODE_TAGS = new Map([
   [263, "JSXOpeningFragment"],
   [264, "JSXClosingFragment"],
   [270, "JSXSpreadChild"],
-  [528, "TSAsExpression"],
-  [529, "TSSatisfiesExpression"],
-  [530, "TSNonNullExpression"],
 ]);
 
 const ASSIGNMENT_OPERATORS = [
@@ -731,6 +732,13 @@ export function decodeTape(source, tape, options = {}) {
           declare: boolean(fields[2], tag),
           kind: enumValue(TS_MODULE_KINDS, fields[3], tag),
         };
+      case 528:
+      case 529:
+        return { ...base, expression: fields[0], typeAnnotation: fields[1] };
+      case 530:
+        return { ...base, expression: fields[0] };
+      case 560:
+        return { ...base, typeAnnotation: fields[0], expression: fields[1] };
       case 531:
         return { ...base, typeAnnotation: fields[0] };
       case 532:

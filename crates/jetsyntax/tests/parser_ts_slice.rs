@@ -154,6 +154,141 @@ fn parses_named_typescript_declarations_and_nested_generics() {
 }
 
 #[test]
+fn parses_typescript_expression_wrappers_without_diagnostics() {
+    let cases = [
+        (
+            "as expression",
+            "const value = input as Namespace.Model;",
+            &[NodeTag::TS_AS_EXPRESSION, NodeTag::TS_QUALIFIED_NAME][..],
+        ),
+        (
+            "const assertion",
+            "const value = { state: 'ready' } as const;",
+            &[
+                NodeTag::TS_AS_EXPRESSION,
+                NodeTag::OBJECT_EXPRESSION,
+                NodeTag::TS_TYPE_REFERENCE,
+            ][..],
+        ),
+        (
+            "satisfies expression",
+            "const value = { state: 'ready' } satisfies Model;",
+            &[NodeTag::TS_SATISFIES_EXPRESSION][..],
+        ),
+        (
+            "postfix non-null expression",
+            "const value = optional!.member!;",
+            &[NodeTag::TS_NON_NULL_EXPRESSION, NodeTag::MEMBER_EXPRESSION][..],
+        ),
+        (
+            "angle-bracket type assertion",
+            "const value = <Namespace.Model>input;",
+            &[NodeTag::TS_TYPE_ASSERTION, NodeTag::TS_QUALIFIED_NAME][..],
+        ),
+        (
+            "chained expression wrappers",
+            "const value = input! as Model satisfies Constraint;",
+            &[
+                NodeTag::TS_NON_NULL_EXPRESSION,
+                NodeTag::TS_AS_EXPRESSION,
+                NodeTag::TS_SATISFIES_EXPRESSION,
+            ][..],
+        ),
+    ];
+
+    for (name, source, expected_tags) in cases {
+        assert_clean_with_tags(name, source, expected_tags);
+    }
+
+    let parsed = parse(
+        "const value = input! as Model satisfies Constraint;",
+        typescript_options(),
+    )
+    .expect("parse expression wrappers");
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_AS_EXPRESSION,
+        0,
+        NodeTag::TS_NON_NULL_EXPRESSION,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_AS_EXPRESSION,
+        1,
+        NodeTag::TS_TYPE_REFERENCE,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_SATISFIES_EXPRESSION,
+        0,
+        NodeTag::TS_AS_EXPRESSION,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_SATISFIES_EXPRESSION,
+        1,
+        NodeTag::TS_TYPE_REFERENCE,
+    );
+
+    let parsed = parse("const value = left + right as Model;", typescript_options())
+        .expect("parse assertion after additive expression");
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_AS_EXPRESSION,
+        0,
+        NodeTag::BINARY_EXPRESSION,
+    );
+
+    let parsed = parse("const value = left as Model + right;", typescript_options())
+        .expect("parse assertion before additive expression");
+    assert_child_tag(
+        &parsed,
+        NodeTag::BINARY_EXPRESSION,
+        1,
+        NodeTag::TS_AS_EXPRESSION,
+    );
+
+    let parsed =
+        parse("const value = <number>input;", typescript_options()).expect("parse type assertion");
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_TYPE_ASSERTION,
+        0,
+        NodeTag::TS_NUMBER_KEYWORD,
+    );
+    assert_child_tag(&parsed, NodeTag::TS_TYPE_ASSERTION, 1, NodeTag::IDENTIFIER);
+}
+
+#[test]
+fn keeps_angle_bracket_type_assertions_out_of_tsx() {
+    let parsed = parse(
+        "const value = <number>input;",
+        ParseOptions {
+            language: Language::TypeScriptJsx,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("recoverable TSX parse");
+    assert!(!parsed.diagnostics.is_empty());
+    parsed.tape.validate().expect("valid recovery tape");
+
+    let has_type_assertion = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .any(|value| {
+            matches!(
+                value,
+                TapeValue::Node {
+                    tag: NodeTag::TS_TYPE_ASSERTION,
+                    ..
+                }
+            )
+        });
+    assert!(!has_type_assertion);
+}
+
+#[test]
 fn malformed_typescript_declarations_recover_to_valid_tapes() {
     for source in [
         "type Missing = ;",
