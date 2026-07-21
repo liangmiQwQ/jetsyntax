@@ -698,6 +698,7 @@ impl TapeBuilder {
         }
     }
 
+    #[inline]
     fn push_record(&mut self, words: &[u32]) -> Result<ValueRef, TapeError> {
         self.ensure_record_capacity(words.len())?;
         let record_id = self.take_record_id()?;
