@@ -566,6 +566,47 @@ describe("decodeTape", () => {
     ]);
   });
 
+  it("decodes TypeScript import-equals records", () => {
+    const source = "import A = B.C; import type a = require(\"a\");";
+    const tape = new HandcraftedTape();
+    const alias = tape.node(2, 7, 8, [tape.string("A")]);
+    const namespace = tape.node(2, 11, 12, [tape.string("B")]);
+    const member = tape.node(2, 13, 14, [tape.string("C")]);
+    const qualified = tape.node(514, 11, 14, [namespace, member]);
+    const internal = tape.node(563, 0, 15, [alias, qualified, tape.integer(0)]);
+    const typeAlias = tape.node(2, 28, 29, [tape.string("a")]);
+    const literal = tape.node(4, 40, 43, [tape.string("\"a\""), tape.integer(1)]);
+    const external = tape.node(564, 32, 44, [literal]);
+    const typeImport = tape.node(563, 16, 45, [typeAlias, external, tape.integer(1)]);
+    const program = tape.node(1, 0, source.length, [
+      tape.list([internal, typeImport]),
+      tape.integer(1),
+    ]);
+
+    const decoded = decodeTape(source, tape.finish(program));
+    expect(decoded.body).toMatchObject([
+      {
+        type: "TSImportEqualsDeclaration",
+        importKind: "value",
+        id: { type: "Identifier", name: "A" },
+        moduleReference: {
+          type: "TSQualifiedName",
+          left: { type: "Identifier", name: "B" },
+          right: { type: "Identifier", name: "C" },
+        },
+      },
+      {
+        type: "TSImportEqualsDeclaration",
+        importKind: "type",
+        id: { type: "Identifier", name: "a" },
+        moduleReference: {
+          type: "TSExternalModuleReference",
+          expression: { type: "Literal", value: "a", raw: "\"a\"" },
+        },
+      },
+    ]);
+  });
+
   it("bounds recovery patterns that temporarily wrap expression nodes", () => {
     const source = "value";
     const tape = new HandcraftedTape();

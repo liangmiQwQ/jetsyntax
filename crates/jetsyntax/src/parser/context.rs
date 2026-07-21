@@ -224,6 +224,7 @@ pub enum BindingKind {
     Parameter,
     Lexical,
     Import,
+    ImportEquals,
     Type,
 }
 
@@ -240,6 +241,10 @@ impl BindingKind {
         matches!(self, Self::Var | Self::Function)
             && matches!(other, Self::Var | Self::Function | Self::Parameter)
             || matches!(self, Self::Parameter) && matches!(other, Self::Var | Self::Function)
+            || matches!(
+                (self, other),
+                (Self::Var, Self::ImportEquals) | (Self::ImportEquals, Self::Var)
+            )
     }
 }
 
@@ -449,7 +454,11 @@ impl<'s> ParserContext<'s> {
                     }
                 })
         } else {
-            self.scopes[target].value_bindings.get(name).copied()
+            self.scopes[target]
+                .value_bindings
+                .get(name)
+                .copied()
+                .filter(|binding| !kind.can_merge_with(binding.kind))
         };
         if let Some(previous) = conflict {
             self.push_diagnostic(
@@ -473,6 +482,12 @@ impl<'s> ParserContext<'s> {
             name,
         });
         true
+    }
+
+    pub(crate) fn in_type_scope(&self) -> bool {
+        self.scopes
+            .iter()
+            .any(|scope| scope.kind == ScopeKind::Type)
     }
 
     pub(crate) fn current_restricted_parameter_binding(&self) -> Option<Span> {

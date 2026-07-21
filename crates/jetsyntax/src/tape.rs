@@ -241,6 +241,8 @@ impl NodeTag {
     pub const TS_TYPE_ASSERTION: Self = Self(560);
     pub const TS_EXPORT_ASSIGNMENT: Self = Self(561);
     pub const TS_NAMESPACE_EXPORT_DECLARATION: Self = Self(562);
+    pub const TS_IMPORT_EQUALS_DECLARATION: Self = Self(563);
+    pub const TS_EXTERNAL_MODULE_REFERENCE: Self = Self(564);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {

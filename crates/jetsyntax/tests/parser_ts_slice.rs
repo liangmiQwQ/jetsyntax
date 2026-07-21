@@ -353,6 +353,148 @@ fn keeps_angle_bracket_type_assertions_out_of_tsx() {
 }
 
 #[test]
+fn parses_typescript_import_equals_declarations() {
+    let source = [
+        "import Alias = Namespace.Deep.Member;",
+        "import external = require(\"package\");",
+        "import type types = require(\"types\");",
+        "import type = require(\"type-name\");",
+        "export import Public = Namespace.Member;",
+        "export import type PublicTypes = require(\"public-types\");",
+        "namespace Local { import Inner = Namespace.Member; }",
+        "import type\nAcrossLines = require(\"line-break\");",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse import aliases");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid tape");
+
+    assert_eq!(NodeTag::TS_IMPORT_EQUALS_DECLARATION.get(), 563);
+    assert_eq!(NodeTag::TS_EXTERNAL_MODULE_REFERENCE.get(), 564);
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_IMPORT_EQUALS_DECLARATION,
+        0,
+        NodeTag::IDENTIFIER,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_IMPORT_EQUALS_DECLARATION,
+        1,
+        NodeTag::TS_QUALIFIED_NAME,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_IMPORT_EQUALS_DECLARATION,
+        1,
+        NodeTag::TS_EXTERNAL_MODULE_REFERENCE,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_EXTERNAL_MODULE_REFERENCE,
+        0,
+        NodeTag::LITERAL,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::EXPORT_NAMED_DECLARATION,
+        0,
+        NodeTag::TS_IMPORT_EQUALS_DECLARATION,
+    );
+    assert_list_child_tag(
+        &parsed,
+        NodeTag::TS_MODULE_BLOCK,
+        0,
+        NodeTag::TS_IMPORT_EQUALS_DECLARATION,
+    );
+    assert_node_field_count(&parsed, NodeTag::TS_IMPORT_EQUALS_DECLARATION, 3);
+    assert_node_field_count(&parsed, NodeTag::TS_EXTERNAL_MODULE_REFERENCE, 1);
+}
+
+#[test]
+fn distinguishes_import_equals_contextual_tokens_and_bindings() {
+    let source = [
+        "namespace M {}",
+        "import alias = M;",
+        "var alias;",
+        "var reverse;",
+        "import reverse = M;",
+        "import type from \"ordinary\";",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse contextual import aliases");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid tape");
+    assert_clean_with_tags(
+        "type identifier alias",
+        "import type = require(\"type-name\");",
+        &[
+            NodeTag::TS_IMPORT_EQUALS_DECLARATION,
+            NodeTag::TS_EXTERNAL_MODULE_REFERENCE,
+        ],
+    );
+    assert_clean_with_tags(
+        "ordinary type default import",
+        "import type from \"ordinary\";",
+        &[
+            NodeTag::IMPORT_DECLARATION,
+            NodeTag::IMPORT_DEFAULT_SPECIFIER,
+        ],
+    );
+}
+
+#[test]
+fn malformed_import_equals_declarations_recover_to_valid_tapes() {
+    for source in [
+        "import Alias = ;",
+        "import Alias = require(name);",
+        "import Alias = require(\"a\", \"b\");",
+        "import Alias = require(\"a\";",
+        "import Alias = r\\u0065quire(\"a\");",
+        "import \\u0074ype Alias = require(\"a\");",
+        "import type Alias = Namespace.Member;",
+        "namespace Local { import Alias = require(\"a\"); }",
+    ] {
+        let parsed = parse(source, typescript_options())
+            .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid recovery tape");
+    }
+
+    let parsed = parse("import Alias = Namespace.Member;", ParseOptions::default())
+        .expect("recoverable JavaScript parse");
+    assert!(!parsed.diagnostics.is_empty());
+    parsed
+        .tape
+        .validate()
+        .expect("valid JavaScript recovery tape");
+    assert!(
+        node_fields(&parsed, NodeTag::TS_IMPORT_EQUALS_DECLARATION)
+            .next()
+            .is_none()
+    );
+
+    let parsed = parse(
+        "import Alias = Namespace.Member;",
+        ParseOptions {
+            source_kind: jetsyntax::SourceKind::Script,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recoverable script parse");
+    assert!(!parsed.diagnostics.is_empty());
+    parsed.tape.validate().expect("valid script recovery tape");
+}
+
+#[test]
 fn malformed_typescript_declarations_recover_to_valid_tapes() {
     for source in [
         "type Missing = ;",

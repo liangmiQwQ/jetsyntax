@@ -172,6 +172,8 @@ for (
     [560, ["TSTypeAssertion", ["typeAnnotation", "expression"]]],
     [561, ["TSExportAssignment", ["expression"]]],
     [562, ["TSNamespaceExportDeclaration", ["id"]]],
+    [563, ["TSImportEqualsDeclaration", ["id", "moduleReference", "importKind"]]],
+    [564, ["TSExternalModuleReference", ["expression"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -984,6 +986,14 @@ function decodeTapeInternal(source, tape, options, trusted) {
         return node;
       case 562:
         node.id = fields[0];
+        return node;
+      case 563:
+        node.id = fields[0];
+        node.moduleReference = fields[1];
+        node.importKind = enumValue(IMPORT_EXPORT_KINDS, fields[2], tag);
+        return node;
+      case 564:
+        node.expression = fields[0];
         return node;
       case 531:
         node.typeAnnotation = fields[0];

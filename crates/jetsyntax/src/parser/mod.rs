@@ -696,6 +696,8 @@ impl<'s> Parser<'s> {
         )
     }
 
+    // Import alternatives share the consumed keyword and declaration-placement diagnostics.
+    #[allow(clippy::too_many_lines)]
     fn parse_import_declaration(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Import).start;
         if self.eat(TokenKind::LeftParen).is_some() {
@@ -722,6 +724,21 @@ impl<'s> Parser<'s> {
             self.error(
                 Span::new(start, start.saturating_add(6)),
                 "import declarations are only allowed at the top level",
+            );
+        }
+        if let Some(type_only) = self.import_equals_type_only(self.current) {
+            if self.options.source_kind == SourceKind::Script && self.options.semantic_errors {
+                self.error(
+                    Span::new(start, start.saturating_add(6)),
+                    "import declarations require module source type",
+                );
+            }
+            return self.parse_import_equals_declaration(start, type_only);
+        }
+        if self.context.in_type_scope() {
+            self.error(
+                Span::new(start, start.saturating_add(6)),
+                "import declarations in a namespace cannot reference a module",
             );
         }
 
@@ -787,6 +804,129 @@ impl<'s> Parser<'s> {
         )
     }
 
+    fn parse_import_equals_declaration(
+        &mut self,
+        start: u32,
+        type_only: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        if type_only {
+            self.expect(TokenKind::Type);
+        }
+        let id = self.parse_binding_identifier(if type_only {
+            BindingKind::Type
+        } else {
+            BindingKind::ImportEquals
+        })?;
+        self.expect(TokenKind::Eq);
+
+        let external = if self.current.kind == TokenKind::Require && !self.current.flags.escaped() {
+            let mut lookahead = Lexer::new(self.source);
+            lookahead.set_position(self.current.end as usize);
+            lookahead.next_token().kind == TokenKind::LeftParen
+        } else {
+            false
+        };
+        let module_reference = if external {
+            let reference = self.parse_external_module_reference()?;
+            if self.context.in_type_scope() {
+                self.error(
+                    reference.span,
+                    "import declarations in a namespace cannot reference a module",
+                );
+            }
+            reference
+        } else {
+            let reference = self.parse_import_equals_entity_name()?;
+            if type_only {
+                self.error(
+                    reference.span,
+                    "a type-only import alias must reference an external module",
+                );
+            }
+            reference
+        };
+        let end = self.consume_semicolon();
+        let import_kind = self.tape.push_u32(u32::from(type_only))?;
+        self.node(
+            NodeTag::TS_IMPORT_EQUALS_DECLARATION,
+            Span::new(start, end),
+            &[id.value(), module_reference.value(), import_kind],
+        )
+    }
+
+    fn parse_import_equals_entity_name(&mut self) -> Result<ParsedNode, ParseError> {
+        if !Self::is_type_reference_name(self.current.kind) {
+            let span = self.current_span();
+            self.error(span, "expected an import alias module reference");
+            let name = self.tape.push_string("<invalid>")?;
+            return self.node(NodeTag::IDENTIFIER, span, &[name]);
+        }
+        let mut name = self.parse_type_identifier()?;
+        while self.eat(TokenKind::Dot).is_some() {
+            let right = self.parse_type_identifier()?;
+            name = self.node(
+                NodeTag::TS_QUALIFIED_NAME,
+                Span::new(name.span.start, right.span.end),
+                &[name.value(), right.value()],
+            )?;
+        }
+        Ok(name)
+    }
+
+    fn parse_external_module_reference(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Require).start;
+        self.expect(TokenKind::LeftParen);
+
+        let expression = if self.current.kind == TokenKind::String {
+            self.parse_literal()?
+        } else {
+            let span = self.current_span();
+            self.error(span, "external module reference requires a string literal");
+            if matches!(
+                self.current.kind,
+                TokenKind::Comma | TokenKind::RightParen | TokenKind::Semicolon | TokenKind::Eof
+            ) {
+                let name = self.tape.push_string("<invalid>")?;
+                self.node(NodeTag::IDENTIFIER, span, &[name])?
+            } else {
+                self.parse_assignment_expression(true)?
+            }
+        };
+
+        if self.current.kind == TokenKind::Comma {
+            self.error(
+                self.current_span(),
+                "external module reference accepts exactly one argument",
+            );
+            // Recovery cannot build discarded AST nodes because every tape record needs one parent.
+            let mut depth = 0_u32;
+            while self.current.kind != TokenKind::Eof {
+                match self.current.kind {
+                    TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::LeftBrace => {
+                        depth = depth.saturating_add(1);
+                    }
+                    TokenKind::RightParen | TokenKind::Semicolon if depth == 0 => break,
+                    TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace => {
+                        depth = depth.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+                self.bump();
+            }
+        }
+        let end = if let Some(right_paren) = self.eat(TokenKind::RightParen) {
+            right_paren.end
+        } else {
+            self.expect(TokenKind::RightParen);
+            self.current.start.max(expression.span.end)
+        };
+        self.node(
+            NodeTag::TS_EXTERNAL_MODULE_REFERENCE,
+            Span::new(start, end),
+            &[expression.value()],
+        )
+    }
+
     // Export alternatives share state and recovery rules, so keeping the grammar branch local is
     // easier to audit than distributing it across helpers.
     #[allow(clippy::too_many_lines)]
@@ -820,6 +960,27 @@ impl<'s> Parser<'s> {
                 NodeTag::TS_NAMESPACE_EXPORT_DECLARATION,
                 Span::new(start, end),
                 &[id.value()],
+            );
+        }
+        if self.options.language.is_typescript()
+            && self.current.kind == TokenKind::Import
+            && self.looks_like_export_import_equals()
+        {
+            let declaration = self.parse_import_declaration()?;
+            let specifiers = self.tape.push_list(&[])?;
+            let source = self.tape.push_null()?;
+            let attributes = self.tape.push_list(&[])?;
+            let export_kind = self.tape.push_u32(0)?;
+            return self.node(
+                NodeTag::EXPORT_NAMED_DECLARATION,
+                Span::new(start, declaration.span.end),
+                &[
+                    declaration.value(),
+                    specifiers,
+                    source,
+                    attributes,
+                    export_kind,
+                ],
             );
         }
         if self.eat(TokenKind::Default).is_some() {
@@ -3630,6 +3791,34 @@ impl<'s> Parser<'s> {
         lookahead.set_position(self.current.end as usize);
         let token = lookahead.next_token();
         token.kind == kind && !token.flags.line_break_before() && !token.flags.escaped()
+    }
+
+    fn import_equals_type_only(&self, first: Token) -> Option<bool> {
+        if !self.options.language.is_typescript() || !Self::is_identifier_name(first.kind) {
+            return None;
+        }
+        // `type` remains an alias name when immediately followed by `=`.
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(first.end as usize);
+        let next = lookahead.next_token();
+        if next.kind == TokenKind::Eq {
+            return Some(false);
+        }
+        if first.kind == TokenKind::Type
+            && !first.flags.escaped()
+            && Self::is_identifier_name(next.kind)
+            && lookahead.next_token().kind == TokenKind::Eq
+        {
+            return Some(true);
+        }
+        None
+    }
+
+    fn looks_like_export_import_equals(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        self.import_equals_type_only(lookahead.next_token())
+            .is_some()
     }
 
     fn current_accessor_kind(&self, allow_private: bool) -> Option<AccessorKind> {

@@ -12,6 +12,69 @@ describe("parse", () => {
     expect(result.program.body).toHaveLength(1);
   });
 
+  it("returns Babel-compatible TypeScript import-equals nodes", () => {
+    const source = [
+      "import Alias = Namespace.Deep;",
+      "import external = require(\"package\");",
+      "import type types = require(\"types\");",
+      "export import Public = Namespace.Member;",
+      "export import type PublicTypes = require(\"public-types\");",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      {
+        type: "TSImportEqualsDeclaration",
+        importKind: "value",
+        id: { type: "Identifier", name: "Alias" },
+        moduleReference: {
+          type: "TSQualifiedName",
+          left: { type: "Identifier", name: "Namespace" },
+          right: { type: "Identifier", name: "Deep" },
+        },
+      },
+      {
+        type: "TSImportEqualsDeclaration",
+        importKind: "value",
+        id: { type: "Identifier", name: "external" },
+        moduleReference: {
+          type: "TSExternalModuleReference",
+          expression: { type: "Literal", value: "package", raw: "\"package\"" },
+        },
+      },
+      {
+        type: "TSImportEqualsDeclaration",
+        importKind: "type",
+        id: { type: "Identifier", name: "types" },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "value",
+        source: null,
+        specifiers: [],
+        attributes: [],
+        declaration: {
+          type: "TSImportEqualsDeclaration",
+          importKind: "value",
+          id: { type: "Identifier", name: "Public" },
+        },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        declaration: {
+          type: "TSImportEqualsDeclaration",
+          importKind: "type",
+          id: { type: "Identifier", name: "PublicTypes" },
+          moduleReference: {
+            type: "TSExternalModuleReference",
+            expression: { type: "Literal", value: "public-types" },
+          },
+        },
+      },
+    ]);
+  });
+
   it("materializes AST output containing braced Unicode identifier escapes", () => {
     const result = parse("<\\u{2F804}></\\u{2F804}>", { lang: "jsx", semanticErrors: true });
 
