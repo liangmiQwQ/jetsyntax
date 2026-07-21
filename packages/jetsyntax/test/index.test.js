@@ -75,6 +75,74 @@ describe("parse", () => {
     ]);
   });
 
+  it("isolates lexical bindings across every for-loop form", () => {
+    const source = [
+      "let index = 0;",
+      "for (let index = 0; index < 1; index++) { for (let index = 0; index < 1; index++) {} }",
+      "for (let index = 0; index < 1; index++) {}",
+      "const key = 'outer';",
+      "for (const [key] in first) {}",
+      "for (const [key] in second) {}",
+      "const value = 'outer';",
+      "for (const { value } of first) {}",
+      "for (const { value } of second) {}",
+      "for (let blockValue = 0; false;) { function blockValue() {} }",
+      "async function consume() {",
+      "  for await (const value of first) {}",
+      "  for await (const value of second) {}",
+      "}",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const topLevelLoops = result.program.body.filter(node => node.type.startsWith("For"));
+    expect(topLevelLoops.map(node => node.type)).toEqual([
+      "ForStatement",
+      "ForStatement",
+      "ForInStatement",
+      "ForInStatement",
+      "ForOfStatement",
+      "ForOfStatement",
+      "ForStatement",
+    ]);
+    expect(topLevelLoops[2].left.declarations[0].id.type).toBe("ArrayPattern");
+    expect(topLevelLoops[4].left.declarations[0].id.type).toBe("ObjectPattern");
+    const asynchronousLoops = result.program.body.at(-1).body.body;
+    expect(asynchronousLoops).toMatchObject([
+      { type: "ForOfStatement", await: true },
+      { type: "ForOfStatement", await: true },
+    ]);
+    expect(
+      parse("'use strict'; for (let value = 0; false;) { function value() {} }").diagnostics,
+    ).toEqual([]);
+    expect(
+      parse("{ function value() {} function value() {} }", { sourceType: "script" }).diagnostics,
+    ).toEqual([]);
+  });
+
+  it("retains lexical for-head conflicts and restores the scope after recovery", () => {
+    for (
+      const source of [
+        "for (let value = 0, value = 1; false;) {}",
+        "for (let value = 0; false;) { var value; }",
+        "{ let value; function value() {} }",
+        "'use strict'; { function value() {} function value() {} }",
+        "try {} catch (value) { function value() {} }",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true });
+
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+
+    const recovered = parse("for (let leaked = 0; false;) { const = 1; } let leaked;", {
+      semanticErrors: true,
+    });
+    expect(recovered.diagnostics).not.toEqual([]);
+    expect(recovered.diagnostics).not.toContain("duplicate binding `leaked`");
+  });
+
   it("materializes AST output containing braced Unicode identifier escapes", () => {
     const result = parse("<\\u{2F804}></\\u{2F804}>", { lang: "jsx", semanticErrors: true });
 

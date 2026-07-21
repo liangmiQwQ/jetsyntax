@@ -181,6 +181,84 @@ fn parser_should_accept_every_statement_family() {
     assert_clean_cases(&cases);
 }
 
+/// Lexical loop-head bindings are isolated from surrounding and sibling loop scopes.
+#[test]
+fn parser_should_isolate_lexical_for_head_bindings() {
+    let cases = [
+        GrammarCase::script(
+            "classic, sequential, outer, and nested",
+            "let index = 0; for (let index = 0; index < 1; index++) { for (let index = 0; index < 1; index++) {} } for (let index = 0; index < 1; index++) {}",
+            &[NodeTag::FOR_STATEMENT],
+        ),
+        GrammarCase::script(
+            "for-in destructuring",
+            "const key = 'outer'; for (const [key] in first) {} for (const [key] in second) {}",
+            &[NodeTag::FOR_IN_STATEMENT, NodeTag::ARRAY_PATTERN],
+        ),
+        GrammarCase::script(
+            "for-of destructuring",
+            "const value = 'outer'; for (const { value } of first) {} for (const { value } of second) {}",
+            &[NodeTag::FOR_OF_STATEMENT, NodeTag::OBJECT_PATTERN],
+        ),
+        GrammarCase::script(
+            "for-await-of",
+            "async function consume() { for await (const value of first) {} for await (const value of second) {} }",
+            &[NodeTag::FUNCTION_DECLARATION, NodeTag::FOR_OF_STATEMENT],
+        ),
+        GrammarCase::script(
+            "block function shadowing",
+            "for (let value = 0; false;) { function value() {} }",
+            &[NodeTag::FOR_STATEMENT, NodeTag::FUNCTION_DECLARATION],
+        ),
+        GrammarCase::module(
+            "strict block function shadowing",
+            "for (let value = 0; false;) { function value() {} }",
+            &[NodeTag::FOR_STATEMENT, NodeTag::FUNCTION_DECLARATION],
+        ),
+        GrammarCase::script(
+            "sloppy block function redeclaration",
+            "{ function value() {} function value() {} }",
+            &[NodeTag::BLOCK_STATEMENT, NodeTag::FUNCTION_DECLARATION],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
+/// Loop-head, same-block, and catch conflicts remain diagnostics.
+#[test]
+fn parser_should_diagnose_lexical_for_head_conflicts() {
+    let cases = [
+        GrammarCase::script(
+            "duplicate head",
+            "for (let value = 0, value = 1; false;) {}",
+            &[NodeTag::FOR_STATEMENT],
+        ),
+        GrammarCase::script(
+            "body var conflict",
+            "for (let value = 0; false;) { var value; }",
+            &[NodeTag::FOR_STATEMENT],
+        ),
+        GrammarCase::script(
+            "same-block function conflict",
+            "{ let value; function value() {} }",
+            &[NodeTag::BLOCK_STATEMENT, NodeTag::FUNCTION_DECLARATION],
+        ),
+        GrammarCase::module(
+            "strict block function redeclaration",
+            "{ function value() {} function value() {} }",
+            &[NodeTag::BLOCK_STATEMENT, NodeTag::FUNCTION_DECLARATION],
+        ),
+        GrammarCase::script(
+            "catch parameter and block function conflict",
+            "try {} catch (value) { function value() {} }",
+            &[NodeTag::TRY_STATEMENT, NodeTag::FUNCTION_DECLARATION],
+        ),
+    ];
+
+    assert_diagnostic_cases(&cases, true);
+}
+
 /// Functions, classes, and modules cover declarations and expressions that introduce grammar context.
 #[test]
 fn parser_should_accept_functions_classes_and_modules() {

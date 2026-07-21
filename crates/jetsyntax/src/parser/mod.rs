@@ -341,7 +341,8 @@ impl<'s> Parser<'s> {
         let generator = self.eat(TokenKind::Star).is_some();
         let id = if Self::is_identifier_name(self.current.kind) {
             Some(if declaration {
-                self.parse_binding_identifier(BindingKind::Function)?
+                let declaration_binding = self.context.function_declaration_binding_kind();
+                self.parse_binding_identifier(declaration_binding)?
             } else {
                 self.parse_identifier()?
             })
@@ -1459,6 +1460,22 @@ impl<'s> Parser<'s> {
         let start = self.take().start;
         let asynchronous = self.eat(TokenKind::Await).is_some();
         self.expect(TokenKind::LeftParen);
+        let lexical_scope = matches!(self.current.kind, TokenKind::Let | TokenKind::Const);
+        if lexical_scope {
+            self.context.enter_scope(ScopeKind::Block);
+        }
+        let statement = self.parse_for_statement_with_head(start, asynchronous);
+        if lexical_scope {
+            let _ = self.context.leave_scope();
+        }
+        statement
+    }
+
+    fn parse_for_statement_with_head(
+        &mut self,
+        start: u32,
+        asynchronous: bool,
+    ) -> Result<ParsedNode, ParseError> {
         let mut expression_init = None;
         let init = if matches!(
             self.current.kind,

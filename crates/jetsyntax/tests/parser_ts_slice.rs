@@ -154,6 +154,26 @@ fn parses_named_typescript_declarations_and_nested_generics() {
 }
 
 #[test]
+fn keeps_type_bindings_separate_from_parent_value_scopes() {
+    let source = "function convert(value) { type value = number; } try {} catch (error) { type error = unknown; }";
+    let parsed = parse(
+        source,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse separate type and value bindings");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid type-binding tape");
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_TYPE_ALIAS_DECLARATION).count(),
+        2
+    );
+}
+
+#[test]
 fn parses_block_function_return_annotations() {
     let source = [
         "function convert(value: Input): Namespace.Output { return value; }",

@@ -263,6 +263,7 @@ pub enum ScopeKind {
 pub enum BindingKind {
     Var,
     Function,
+    BlockFunction,
     Parameter,
     Lexical,
     Import,
@@ -482,13 +483,20 @@ impl<'s> ParserContext<'s> {
         };
 
         let body_parameter_conflict = (self.grammar.early_errors()
-            && kind == BindingKind::Lexical
+            && matches!(kind, BindingKind::Lexical | BindingKind::BlockFunction)
             && target > 0
             && self.scopes[target].kind == ScopeKind::Block
             && self.scopes[target - 1].kind == ScopeKind::Function)
             .then(|| self.scopes[target - 1].value_bindings.get(name).copied())
             .flatten()
             .filter(|binding| binding.kind == BindingKind::Parameter);
+        let catch_parameter_conflict = (self.grammar.early_errors()
+            && matches!(kind, BindingKind::Lexical | BindingKind::BlockFunction)
+            && target > 0
+            && self.scopes[target].kind == ScopeKind::Block
+            && self.scopes[target - 1].kind == ScopeKind::Catch)
+            .then(|| self.scopes[target - 1].value_bindings.get(name).copied())
+            .flatten();
         let conflict = if kind.is_type() {
             self.scopes[target].type_bindings.get(name).copied()
         } else if kind.is_var_scoped() {
@@ -508,9 +516,17 @@ impl<'s> ParserContext<'s> {
                 .value_bindings
                 .get(name)
                 .copied()
-                .filter(|binding| !kind.can_merge_with(binding.kind))
+                .filter(|binding| {
+                    !kind.can_merge_with(binding.kind)
+                        && (self.grammar.strict()
+                            || !matches!(
+                                (kind, binding.kind),
+                                (BindingKind::BlockFunction, BindingKind::BlockFunction)
+                            ))
+                })
         }
-        .or(body_parameter_conflict);
+        .or(body_parameter_conflict)
+        .or(catch_parameter_conflict);
         if let Some(previous) = conflict {
             self.push_diagnostic(
                 Diagnostic::error(span, format!("duplicate binding `{name}`"))
@@ -539,6 +555,17 @@ impl<'s> ParserContext<'s> {
         self.scopes
             .iter()
             .any(|scope| scope.kind == ScopeKind::Type)
+    }
+
+    pub(crate) fn function_declaration_binding_kind(&self) -> BindingKind {
+        let mut scopes = self.scopes.iter().rev();
+        let current = scopes.next().map(|scope| scope.kind);
+        let parent = scopes.next().map(|scope| scope.kind);
+        if current == Some(ScopeKind::Block) && parent != Some(ScopeKind::Function) {
+            BindingKind::BlockFunction
+        } else {
+            BindingKind::Function
+        }
     }
 
     pub(crate) fn current_restricted_parameter_binding(&self) -> Option<Span> {
