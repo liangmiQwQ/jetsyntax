@@ -4,7 +4,7 @@ mod context;
 
 pub use context::{Diagnostic, Severity};
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, iter::Peekable, str::Chars};
 
 use crate::{
     Language, ParseOptions, SourceKind,
@@ -83,6 +83,27 @@ struct ParsedPropertyName {
     key: ParsedNode,
     computed: bool,
     shorthand: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ClassAccessorKind {
+    Get,
+    Set,
+}
+
+impl ClassAccessorKind {
+    const fn method_kind(self) -> u32 {
+        match self {
+            Self::Get => 1,
+            Self::Set => 2,
+        }
+    }
+}
+
+struct ParsedParameterList {
+    value: ValueRef,
+    count: usize,
+    has_rest: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -318,7 +339,7 @@ impl<'s> Parser<'s> {
                 .context
                 .declare_binding(name, BindingKind::Lexical, id.span);
         }
-        let params = self.parse_parameter_list()?;
+        let params = self.parse_parameter_list()?.value;
         self.expect(TokenKind::RightParen);
         let body = self.parse_block_statement()?;
         self.leave_function_context(previous_grammar);
@@ -340,10 +361,12 @@ impl<'s> Parser<'s> {
         )
     }
 
-    fn parse_parameter_list(&mut self) -> Result<ValueRef, ParseError> {
+    fn parse_parameter_list(&mut self) -> Result<ParsedParameterList, ParseError> {
         let mut params = Vec::new();
+        let mut has_rest = false;
         while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
             let parameter = if self.eat(TokenKind::Ellipsis).is_some() {
+                has_rest = true;
                 let argument = self.parse_binding_pattern(BindingKind::Parameter)?;
                 self.parse_binding_rest_element(argument)?
             } else {
@@ -354,7 +377,11 @@ impl<'s> Parser<'s> {
                 break;
             }
         }
-        Ok(self.tape.push_list(&params)?)
+        Ok(ParsedParameterList {
+            count: params.len(),
+            value: self.tape.push_list(&params)?,
+            has_rest,
+        })
     }
 
     fn enter_function_context(&mut self, generator: bool, asynchronous: bool) -> GrammarContext {
@@ -383,10 +410,24 @@ impl<'s> Parser<'s> {
         start: u32,
         generator: bool,
         asynchronous: bool,
+        accessor: Option<ClassAccessorKind>,
     ) -> Result<ParsedNode, ParseError> {
         self.expect(TokenKind::LeftParen);
         let previous_grammar = self.enter_function_context(generator, asynchronous);
+        if accessor.is_some() {
+            self.context
+                .set_grammar(self.context.grammar().with_accessor(true));
+        }
         let params = self.parse_parameter_list()?;
+        if accessor == Some(ClassAccessorKind::Get) && params.count != 0 {
+            self.error(self.current_span(), "class getter must not have parameters");
+        }
+        if accessor == Some(ClassAccessorKind::Set) && (params.count != 1 || params.has_rest) {
+            self.error(
+                self.current_span(),
+                "class setter must have exactly one non-rest parameter",
+            );
+        }
         self.expect(TokenKind::RightParen);
         let body = self.parse_block_statement()?;
         self.leave_function_context(previous_grammar);
@@ -396,7 +437,7 @@ impl<'s> Parser<'s> {
         self.node(
             NodeTag::FUNCTION_EXPRESSION,
             Span::new(start, body.span.end),
-            &[id, params, body.value(), generator, asynchronous],
+            &[id, params.value, body.value(), generator, asynchronous],
         )
     }
 
@@ -418,8 +459,12 @@ impl<'s> Parser<'s> {
         let body_start = self.expect(TokenKind::LeftBrace).start;
         self.context.enter_scope(ScopeKind::Class);
         let previous_grammar = self.context.grammar();
-        self.context
-            .set_grammar(previous_grammar.with_class(true).with_strict(true));
+        self.context.set_grammar(
+            previous_grammar
+                .with_class(true)
+                .with_strict(true)
+                .with_accessor(false),
+        );
         let mut elements = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
             if self.eat(TokenKind::Semicolon).is_some() {
@@ -469,6 +514,12 @@ impl<'s> Parser<'s> {
             false
         };
 
+        if leading_key.is_none()
+            && let Some(accessor) = self.current_class_accessor_kind()
+        {
+            return self.parse_class_accessor(start, is_static, accessor);
+        }
+
         let async_token = if leading_key.is_none() && self.current.kind == TokenKind::Async {
             Some(self.take())
         } else {
@@ -507,7 +558,8 @@ impl<'s> Parser<'s> {
             self.error(key.span, "private name `#constructor` is not allowed");
         }
         if generator || self.current.kind == TokenKind::LeftParen {
-            let function = self.parse_method_function(key.span.start, generator, asynchronous)?;
+            let function =
+                self.parse_method_function(key.span.start, generator, asynchronous, None)?;
             let kind = self.tape.push_u32(0)?;
             let computed = self.tape.push_bool(computed)?;
             let is_static = self.tape.push_bool(is_static)?;
@@ -536,6 +588,36 @@ impl<'s> Parser<'s> {
             NodeTag::PROPERTY_DEFINITION,
             Span::new(start, end),
             &[key.value(), value, computed, is_static, type_annotation],
+        )
+    }
+
+    fn parse_class_accessor(
+        &mut self,
+        start: u32,
+        is_static: bool,
+        accessor: ClassAccessorKind,
+    ) -> Result<ParsedNode, ParseError> {
+        self.bump();
+        let property_name = self.parse_property_name(true)?;
+        let key = property_name.key;
+        let computed = property_name.computed;
+        if !computed && !is_static && self.static_property_name_matches(key.span, "constructor") {
+            self.error(key.span, "class constructor cannot be an accessor");
+        }
+        if !computed && is_static && self.static_property_name_matches(key.span, "prototype") {
+            self.error(
+                key.span,
+                "static class accessor cannot be named `prototype`",
+            );
+        }
+        let function = self.parse_method_function(key.span.start, false, false, Some(accessor))?;
+        let kind = self.tape.push_u32(accessor.method_kind())?;
+        let computed = self.tape.push_bool(computed)?;
+        let is_static = self.tape.push_bool(is_static)?;
+        self.node(
+            NodeTag::METHOD_DEFINITION,
+            Span::new(start, function.span.end),
+            &[key.value(), function.value(), kind, computed, is_static],
         )
     }
 
@@ -1537,6 +1619,12 @@ impl<'s> Parser<'s> {
             }
             TokenKind::Super => {
                 let token = self.take();
+                if self.context.grammar().accessor() && self.current.kind == TokenKind::LeftParen {
+                    self.error(
+                        Self::token_span(token),
+                        "direct super calls are not allowed in class accessors",
+                    );
+                }
                 self.node(NodeTag::SUPER, Self::token_span(token), &[])
             }
             TokenKind::Function => self.parse_function(false, false),
@@ -1855,12 +1943,13 @@ impl<'s> Parser<'s> {
                 let computed = property_name.computed;
                 let (value, method, shorthand) = if generator {
                     let method_patterns = self.assignment_pattern_checkpoint();
-                    let value = self.parse_method_function(key.span.start, true, asynchronous)?;
+                    let value =
+                        self.parse_method_function(key.span.start, true, asynchronous, None)?;
                     self.rollback_assignment_patterns(method_patterns);
                     (value, true, false)
                 } else if self.current.kind == TokenKind::LeftParen {
                     let method_patterns = self.assignment_pattern_checkpoint();
-                    let value = self.parse_method_function(key.span.start, false, false)?;
+                    let value = self.parse_method_function(key.span.start, false, false, None)?;
                     self.rollback_assignment_patterns(method_patterns);
                     (value, true, false)
                 } else if self.eat(TokenKind::Colon).is_some() {
@@ -3356,6 +3445,36 @@ impl<'s> Parser<'s> {
         token.kind == kind && !token.flags.line_break_before() && !token.flags.escaped()
     }
 
+    fn current_class_accessor_kind(&self) -> Option<ClassAccessorKind> {
+        if self.current.flags.escaped() {
+            return None;
+        }
+        let accessor = match self.current.kind {
+            TokenKind::Get => ClassAccessorKind::Get,
+            TokenKind::Set => ClassAccessorKind::Set,
+            _ => return None,
+        };
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let next = lookahead.next_token().kind;
+        (matches!(
+            next,
+            TokenKind::LeftBracket | TokenKind::String | TokenKind::Number | TokenKind::BigInt
+        ) || Self::is_member_identifier_name(next))
+        .then_some(accessor)
+    }
+
+    fn static_property_name_matches(&self, span: Span, expected: &str) -> bool {
+        let raw = self.source_text(span);
+        if raw == expected {
+            return true;
+        }
+        if !raw.starts_with(['\'', '"']) && !raw.contains('\\') {
+            return false;
+        }
+        decode_static_property_name(raw).is_some_and(|name| name == expected)
+    }
+
     fn source_text(&self, span: Span) -> &'s str {
         self.source
             .get(span.start as usize..span.end as usize)
@@ -3475,6 +3594,81 @@ impl<'s> Parser<'s> {
                     | TokenKind::Yield
             )
     }
+}
+
+fn decode_static_property_name(raw: &str) -> Option<String> {
+    let string_literal = raw.starts_with(['\'', '"']);
+    let content =
+        if string_literal && raw.len() >= 2 && raw.as_bytes().last() == raw.as_bytes().first() {
+            &raw[1..raw.len() - 1]
+        } else {
+            raw
+        };
+    let mut input = content.chars().peekable();
+    let mut decoded = String::with_capacity(content.len());
+    while let Some(character) = input.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        let escape = input.next()?;
+        match escape {
+            'u' => decoded.push(decode_unicode_escape(&mut input)?),
+            'x' if string_literal => decoded.push(decode_fixed_hex_escape(&mut input, 2)?),
+            '\n' if string_literal => {}
+            '\r' if string_literal => {
+                let _ = input.next_if_eq(&'\n');
+            }
+            'b' if string_literal => decoded.push('\u{0008}'),
+            'f' if string_literal => decoded.push('\u{000c}'),
+            'n' if string_literal => decoded.push('\n'),
+            'r' if string_literal => decoded.push('\r'),
+            't' if string_literal => decoded.push('\t'),
+            'v' if string_literal => decoded.push('\u{000b}'),
+            '0' if string_literal => decoded.push('\0'),
+            escaped if string_literal => decoded.push(escaped),
+            _ => return None,
+        }
+    }
+    Some(decoded)
+}
+
+fn decode_unicode_escape(input: &mut Peekable<Chars<'_>>) -> Option<char> {
+    let value = if input.next_if_eq(&'{').is_some() {
+        let mut value = 0_u32;
+        let mut digits = 0_u8;
+        loop {
+            let character = input.next()?;
+            if character == '}' {
+                break;
+            }
+            value = value
+                .checked_mul(16)?
+                .checked_add(character.to_digit(16)?)?;
+            digits = digits.checked_add(1)?;
+            if digits > 6 {
+                return None;
+            }
+        }
+        (digits > 0).then_some(value)?
+    } else {
+        decode_fixed_hex_value(input, 4)?
+    };
+    char::from_u32(value)
+}
+
+fn decode_fixed_hex_escape(input: &mut Peekable<Chars<'_>>, digits: u8) -> Option<char> {
+    char::from_u32(decode_fixed_hex_value(input, digits)?)
+}
+
+fn decode_fixed_hex_value(input: &mut Peekable<Chars<'_>>, digits: u8) -> Option<u32> {
+    let mut value = 0_u32;
+    for _ in 0..digits {
+        value = value
+            .checked_mul(16)?
+            .checked_add(input.next()?.to_digit(16)?)?;
+    }
+    Some(value)
 }
 
 #[cfg(test)]

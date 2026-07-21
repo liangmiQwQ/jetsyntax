@@ -857,6 +857,144 @@ fn parser_should_accept_object_and_class_generator_methods() {
     assert_clean_cases(&cases);
 }
 
+/// Public class accessors reuse method functions while preserving ordinary `get` and `set` names.
+#[test]
+fn parser_should_accept_public_class_accessors() {
+    let cases = [
+        GrammarCase::script(
+            "public class accessors",
+            "class Accessors { get value() { return this._value; } set value({ next } = fallback) { this._value = next; } static get [key]() { return value; } static set \"named\"(value) {} get static() {} static get static() {} }",
+            &[
+                NodeTag::CLASS_DECLARATION,
+                NodeTag::METHOD_DEFINITION,
+                NodeTag::FUNCTION_EXPRESSION,
+                NodeTag::ASSIGNMENT_PATTERN,
+                NodeTag::OBJECT_PATTERN,
+            ],
+        ),
+        GrammarCase::script(
+            "ordinary get and set members",
+            "class Names { get() {} set(value) {} get; set = value; static get() {} static set(value) {} }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::PROPERTY_DEFINITION],
+        ),
+        GrammarCase::script(
+            "computed special accessor names",
+            "class Special { get ['constructor']() {} set ['constructor'](value) {} static get ['prototype']() {} static set ['prototype'](value) {} }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "accessor super property and nested constructor",
+            "class Outer extends Base { get inherited() { return super.value; } set inherited(value) { super.value = value; } get Nested() { return class Inner extends Base { constructor() { super(); } }; } }",
+            &[
+                NodeTag::METHOD_DEFINITION,
+                NodeTag::MEMBER_EXPRESSION,
+                NodeTag::CLASS_EXPRESSION,
+            ],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
+/// Accessor arity and noncomputed class special-name restrictions are early errors.
+#[test]
+fn parser_should_diagnose_public_class_accessor_early_errors() {
+    let cases = [
+        GrammarCase::script(
+            "getter parameter",
+            "class C { get value(parameter) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "setter without parameter",
+            "class C { set value() {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "setter with two parameters",
+            "class C { set value(first, second) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "setter rest parameter",
+            "class C { set value(...values) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "getter constructor",
+            "class C { get constructor() {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "quoted setter constructor",
+            "class C { set 'constructor'(value) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "escaped quoted getter constructor",
+            "class C { get \"constr\\u0075ctor\"() {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "escaped identifier setter constructor",
+            "class C { set constr\\u0075ctor(value) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "static getter prototype",
+            "class C { static get prototype() {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "quoted static setter prototype",
+            "class C { static set 'prototype'(value) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "escaped static getter prototype",
+            "class C { static get prot\\u006ftype() {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "direct super in getter",
+            "class C extends Base { get value() { super(); } }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "direct super in static setter",
+            "class C extends Base { static set value(next) { super(); } }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "strict with in getter",
+            "class C { get value() { with (object) statement; } }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::WITH_STATEMENT],
+        ),
+        GrammarCase::script(
+            "strict delete in setter",
+            "class C { set value(next) { delete identifier; } }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::UNARY_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "escaped get introducer",
+            "class C { g\\u0065t value() {} }",
+            &[NodeTag::PROPERTY_DEFINITION, NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "escaped set introducer",
+            "class C { s\\u0065t value(next) {} }",
+            &[NodeTag::PROPERTY_DEFINITION, NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "private getter remains unsupported",
+            "class C { get #value() {} }",
+            &[NodeTag::PROPERTY_DEFINITION, NodeTag::METHOD_DEFINITION],
+        ),
+    ];
+
+    assert_diagnostic_cases(&cases, true);
+}
+
 /// Generator methods retain binding and constructor early errors.
 #[test]
 fn parser_should_diagnose_generator_method_early_errors() {

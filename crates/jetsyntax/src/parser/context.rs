@@ -14,6 +14,7 @@ const ALLOW_IN: u16 = 1 << 6;
 const ALLOW_AWAIT: u16 = 1 << 7;
 const ALLOW_YIELD: u16 = 1 << 8;
 const AMBIENT: u16 = 1 << 9;
+const ACCESSOR: u16 = 1 << 10;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GrammarContext(u16);
@@ -82,6 +83,11 @@ impl GrammarContext {
     }
 
     #[must_use]
+    pub(crate) const fn accessor(self) -> bool {
+        self.has(ACCESSOR)
+    }
+
+    #[must_use]
     pub(crate) const fn with_strict(self, enabled: bool) -> Self {
         self.with(STRICT, enabled)
     }
@@ -129,6 +135,11 @@ impl GrammarContext {
     #[must_use]
     pub(crate) const fn with_ambient(self, enabled: bool) -> Self {
         self.with(AMBIENT, enabled)
+    }
+
+    #[must_use]
+    pub(crate) const fn with_accessor(self, enabled: bool) -> Self {
+        self.with(ACCESSOR, enabled)
     }
 
     const fn has(self, flag: u16) -> bool {

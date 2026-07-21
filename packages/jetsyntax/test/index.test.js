@@ -276,6 +276,94 @@ describe("parse", () => {
     });
   });
 
+  it("materializes public class accessors and preserves get/set member ambiguities", () => {
+    const source = [
+      "class Accessors {",
+      "  get value() { return this._value; }",
+      "  set value({ next } = fallback) { this._value = next; }",
+      "  static get [key]() { return value; }",
+      "  static set 'named'(value) {}",
+      "  get() {}",
+      "  set(value) {}",
+      "  get;",
+      "  set = value;",
+      "  get static() {}",
+      "  static get static() {}",
+      "}",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const members = result.program.body[0].body.body;
+    expect(members).toMatchObject([
+      {
+        type: "MethodDefinition",
+        kind: "get",
+        key: { type: "Identifier", name: "value" },
+        computed: false,
+        static: false,
+        value: { type: "FunctionExpression", params: [], generator: false, async: false },
+      },
+      {
+        type: "MethodDefinition",
+        kind: "set",
+        key: { type: "Identifier", name: "value" },
+        computed: false,
+        static: false,
+        value: {
+          type: "FunctionExpression",
+          params: [{ type: "AssignmentPattern", left: { type: "ObjectPattern" } }],
+          generator: false,
+          async: false,
+        },
+      },
+      { type: "MethodDefinition", kind: "get", computed: true, static: true },
+      {
+        type: "MethodDefinition",
+        kind: "set",
+        key: { type: "Literal", value: "named" },
+        computed: false,
+        static: true,
+      },
+      { type: "MethodDefinition", kind: "method", key: { name: "get" } },
+      { type: "MethodDefinition", kind: "method", key: { name: "set" } },
+      { type: "PropertyDefinition", key: { name: "get" } },
+      { type: "PropertyDefinition", key: { name: "set" } },
+      { type: "MethodDefinition", kind: "get", key: { name: "static" }, static: false },
+      { type: "MethodDefinition", kind: "get", key: { name: "static" }, static: true },
+    ]);
+  });
+
+  it("diagnoses public class accessor early errors and unsupported introducers", () => {
+    const sources = [
+      "class C { get value(parameter) {} }",
+      "class C { set value() {} }",
+      "class C { set value(first, second) {} }",
+      "class C { set value(...values) {} }",
+      "class C { get constructor() {} }",
+      "class C { set 'constructor'(value) {} }",
+      "class C { get \"constr\\u0075ctor\"() {} }",
+      "class C { set constr\\u0075ctor(value) {} }",
+      "class C { static get prototype() {} }",
+      "class C { static set 'prototype'(value) {} }",
+      "class C { static get prot\\u006ftype() {} }",
+      "class C extends Base { get value() { super(); } }",
+      "class C extends Base { static set value(next) { super(); } }",
+      "class C { get value() { with (object) statement; } }",
+      "class C { set value(next) { delete identifier; } }",
+      "class C { g\\u0065t value() {} }",
+      "class C { s\\u0065t value(next) {} }",
+      "class C { get #value() {} }",
+    ];
+
+    for (const source of sources) {
+      const result = parse(source, { semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.panicked, source).toBe(false);
+      expect(result.program.type, source).toBe("Program");
+    }
+  });
+
   it("materializes property names across objects, patterns, and classes", () => {
     const source = [
       "const object = { [key]: value, return: keyword, 0: numeric, 1n: bigint, shorthand, [method]() {} };",
