@@ -56,7 +56,12 @@ impl From<TapeError> for ParseError {
     }
 }
 
-/// Parse source directly into JetSyntax's owned postfix tape.
+/// Parse source directly into `JetSyntax`'s owned postfix tape.
+///
+/// # Errors
+///
+/// Returns [`ParseError::SourceTooLarge`] when the source cannot be represented by the wire
+/// format, or [`ParseError::Tape`] when the output tape exceeds its representable limits.
 pub fn parse(source: &str, options: ParseOptions) -> Result<ParseResult, ParseError> {
     let source_len = u32::try_from(source.len()).map_err(|_| ParseError::SourceTooLarge)?;
     Parser::new(source, source_len, options).parse_program()
@@ -175,7 +180,7 @@ impl<'s> Parser<'s> {
 
     fn parse_empty_statement(&mut self) -> Result<ParsedNode, ParseError> {
         let token = self.take();
-        self.node(NodeTag::EMPTY_STATEMENT, self.token_span(token), &[])
+        self.node(NodeTag::EMPTY_STATEMENT, Self::token_span(token), &[])
     }
 
     fn parse_debugger_statement(&mut self) -> Result<ParsedNode, ParseError> {
@@ -207,7 +212,6 @@ impl<'s> Parser<'s> {
     ) -> Result<ParsedNode, ParseError> {
         let keyword = self.take();
         let (kind, binding_kind) = match keyword.kind {
-            TokenKind::Var => (0, BindingKind::Var),
             TokenKind::Let => (1, BindingKind::Lexical),
             TokenKind::Const => (2, BindingKind::Lexical),
             _ => (0, BindingKind::Var),
@@ -251,7 +255,7 @@ impl<'s> Parser<'s> {
     ) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Function).start;
         let generator = self.eat(TokenKind::Star).is_some();
-        let id = if self.is_identifier_name(self.current.kind) {
+        let id = if Self::is_identifier_name(self.current.kind) {
             self.parse_binding_identifier(BindingKind::Function)?
                 .value()
         } else {
@@ -310,7 +314,7 @@ impl<'s> Parser<'s> {
 
     fn parse_class(&mut self, declaration: bool) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Class).start;
-        let id = if self.is_identifier_name(self.current.kind) {
+        let id = if Self::is_identifier_name(self.current.kind) {
             self.parse_binding_identifier(BindingKind::Lexical)?.value()
         } else {
             if declaration {
@@ -377,7 +381,11 @@ impl<'s> Parser<'s> {
                 .unwrap_or_default();
             let _ = self.context.declare_private(name_text, name_span);
             let name = self.tape.push_source_slice(name_span)?;
-            self.node(NodeTag::PRIVATE_IDENTIFIER, self.token_span(token), &[name])?
+            self.node(
+                NodeTag::PRIVATE_IDENTIFIER,
+                Self::token_span(token),
+                &[name],
+            )?
         } else if matches!(self.current.kind, TokenKind::String | TokenKind::Number) {
             self.parse_literal()?
         } else {
@@ -456,10 +464,8 @@ impl<'s> Parser<'s> {
         }
 
         let mut specifiers = Vec::new();
-        let source = if self.current.kind == TokenKind::String {
-            self.parse_literal()?
-        } else {
-            if self.is_identifier_name(self.current.kind) {
+        if self.current.kind != TokenKind::String {
+            if Self::is_identifier_name(self.current.kind) {
                 let local = self.parse_binding_identifier(BindingKind::Import)?;
                 specifiers.push(
                     self.node(
@@ -506,8 +512,8 @@ impl<'s> Parser<'s> {
                 self.expect(TokenKind::RightBrace);
             }
             self.expect(TokenKind::From);
-            self.parse_literal()?
-        };
+        }
+        let source = self.parse_literal()?;
         let end = self.consume_semicolon();
         let specifiers = self.tape.push_list(&specifiers)?;
         let attributes = self.tape.push_list(&[])?;
@@ -519,6 +525,9 @@ impl<'s> Parser<'s> {
         )
     }
 
+    // Export alternatives share state and recovery rules, so keeping the grammar branch local is
+    // easier to audit than distributing it across helpers.
+    #[allow(clippy::too_many_lines)]
     fn parse_export_declaration(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Export).start;
         if self.eat(TokenKind::Default).is_some() {
@@ -634,7 +643,7 @@ impl<'s> Parser<'s> {
         let keyword = self.take();
         if self.function_depth == 0 && !self.options.allow_return_outside_function {
             self.error(
-                self.token_span(keyword),
+                Self::token_span(keyword),
                 "return is only valid inside a function",
             );
         }
@@ -881,7 +890,7 @@ impl<'s> Parser<'s> {
     fn parse_jump_statement(&mut self, is_continue: bool) -> Result<ParsedNode, ParseError> {
         let keyword = self.take();
         let label_name = if !self.current.flags.line_break_before()
-            && self.is_identifier_name(self.current.kind)
+            && Self::is_identifier_name(self.current.kind)
         {
             self.source
                 .get(self.current.start as usize..self.current.end as usize)
@@ -895,7 +904,7 @@ impl<'s> Parser<'s> {
         };
         if !resolved {
             self.error(
-                self.token_span(keyword),
+                Self::token_span(keyword),
                 if is_continue {
                     "continue does not target an enclosing loop"
                 } else {
@@ -1035,13 +1044,13 @@ impl<'s> Parser<'s> {
         if self.eat(TokenKind::Arrow).is_some() {
             let params = self.tape.push_list(&[left.value()])?;
             let expression_body = self.current.kind != TokenKind::LeftBrace;
-            let body = if !expression_body {
+            let body = if expression_body {
+                self.parse_assignment_expression(allow_in)?
+            } else {
                 self.function_depth = self.function_depth.saturating_add(1);
                 let body = self.parse_block_statement()?;
                 self.function_depth = self.function_depth.saturating_sub(1);
                 body
-            } else {
-                self.parse_assignment_expression(allow_in)?
             };
             let asynchronous = self.tape.push_bool(false)?;
             let expression = self.tape.push_bool(expression_body)?;
@@ -1106,10 +1115,7 @@ impl<'s> Parser<'s> {
         allow_in: bool,
     ) -> Result<ParsedNode, ParseError> {
         let mut left = self.parse_unary_expression()?;
-        loop {
-            let Some(binding) = binary_binding(self.current.kind, allow_in) else {
-                break;
-            };
+        while let Some(binding) = binary_binding(self.current.kind, allow_in) {
             if binding.left < minimum {
                 break;
             }
@@ -1197,6 +1203,8 @@ impl<'s> Parser<'s> {
         self.parse_postfix_expression()
     }
 
+    // Postfix operations must stay in precedence order within one left-folding dispatch loop.
+    #[allow(clippy::too_many_lines)]
     fn parse_postfix_expression(&mut self) -> Result<ParsedNode, ParseError> {
         let mut expression = self.parse_primary_expression()?;
         let mut is_chain = false;
@@ -1305,7 +1313,7 @@ impl<'s> Parser<'s> {
 
     fn parse_primary_expression(&mut self) -> Result<ParsedNode, ParseError> {
         match self.current.kind {
-            kind if self.is_identifier_name(kind) => self.parse_identifier(),
+            kind if Self::is_identifier_name(kind) => self.parse_identifier(),
             TokenKind::Number
             | TokenKind::BigInt
             | TokenKind::String
@@ -1318,11 +1326,11 @@ impl<'s> Parser<'s> {
             TokenKind::Slash | TokenKind::SlashEq => self.parse_regexp_literal(),
             TokenKind::This => {
                 let token = self.take();
-                self.node(NodeTag::THIS_EXPRESSION, self.token_span(token), &[])
+                self.node(NodeTag::THIS_EXPRESSION, Self::token_span(token), &[])
             }
             TokenKind::Super => {
                 let token = self.take();
-                self.node(NodeTag::SUPER, self.token_span(token), &[])
+                self.node(NodeTag::SUPER, Self::token_span(token), &[])
             }
             TokenKind::Function => self.parse_function(false, false),
             TokenKind::Class => self.parse_class(false),
@@ -1336,6 +1344,8 @@ impl<'s> Parser<'s> {
         }
     }
 
+    // JSX opening, child, and closing modes coordinate lexer state in one grammar routine.
+    #[allow(clippy::too_many_lines)]
     fn parse_jsx_element(&mut self, nested: bool) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Lt).start;
         let opening_name = self.parse_jsx_name()?;
@@ -1420,9 +1430,9 @@ impl<'s> Parser<'s> {
                 TokenKind::JsxText => {
                     let text = self.current;
                     if text.start != text.end {
-                        let value = self.tape.push_source_slice(self.token_span(text))?;
+                        let value = self.tape.push_source_slice(Self::token_span(text))?;
                         children.push(
-                            self.node(NodeTag::JSX_TEXT, self.token_span(text), &[value])?
+                            self.node(NodeTag::JSX_TEXT, Self::token_span(text), &[value])?
                                 .value(),
                         );
                     }
@@ -1510,11 +1520,11 @@ impl<'s> Parser<'s> {
 
     fn parse_jsx_name(&mut self) -> Result<ParsedNode, ParseError> {
         let token = self.take();
-        if !self.is_identifier_name(token.kind) {
-            self.error(self.token_span(token), "expected a JSX name");
+        if !Self::is_identifier_name(token.kind) {
+            self.error(Self::token_span(token), "expected a JSX name");
         }
-        let name = self.tape.push_source_slice(self.token_span(token))?;
-        self.node(NodeTag::JSX_IDENTIFIER, self.token_span(token), &[name])
+        let name = self.tape.push_source_slice(Self::token_span(token))?;
+        self.node(NodeTag::JSX_IDENTIFIER, Self::token_span(token), &[name])
     }
 
     fn advance_after_jsx_greater(&mut self, jsx_child_mode: bool) {
@@ -1662,7 +1672,7 @@ impl<'s> Parser<'s> {
         let import = self.take();
         if self.eat(TokenKind::Dot).is_some() {
             let property = self.parse_identifier()?;
-            let meta = self.identifier_from_span(self.token_span(import))?;
+            let meta = self.identifier_from_span(Self::token_span(import))?;
             return self.node(
                 NodeTag::META_PROPERTY,
                 Span::new(import.start, property.span.end),
@@ -1707,12 +1717,12 @@ impl<'s> Parser<'s> {
         let mut expressions = Vec::new();
         if first.kind == TokenKind::NoSubstitutionTemplate {
             self.bump();
-            let raw = self.tape.push_source_slice(self.token_span(first))?;
+            let raw = self.tape.push_source_slice(Self::token_span(first))?;
             let tail = self.tape.push_bool(true)?;
             quasis.push(
                 self.node(
                     NodeTag::TEMPLATE_ELEMENT,
-                    self.token_span(first),
+                    Self::token_span(first),
                     &[raw, tail],
                 )?
                 .value(),
@@ -1721,18 +1731,18 @@ impl<'s> Parser<'s> {
             let expressions = self.tape.push_list(&expressions)?;
             return self.node(
                 NodeTag::TEMPLATE_LITERAL,
-                self.token_span(first),
+                Self::token_span(first),
                 &[quasis, expressions],
             );
         }
 
         self.bump();
-        let raw = self.tape.push_source_slice(self.token_span(first))?;
+        let raw = self.tape.push_source_slice(Self::token_span(first))?;
         let tail = self.tape.push_bool(false)?;
         quasis.push(
             self.node(
                 NodeTag::TEMPLATE_ELEMENT,
-                self.token_span(first),
+                Self::token_span(first),
                 &[raw, tail],
             )?
             .value(),
@@ -1749,12 +1759,12 @@ impl<'s> Parser<'s> {
             let segment = self.lexer.resume_template(right_brace);
             end = segment.end;
             let is_tail = segment.kind == TokenKind::TemplateTail;
-            let raw = self.tape.push_source_slice(self.token_span(segment))?;
+            let raw = self.tape.push_source_slice(Self::token_span(segment))?;
             let tail = self.tape.push_bool(is_tail)?;
             quasis.push(
                 self.node(
                     NodeTag::TEMPLATE_ELEMENT,
-                    self.token_span(segment),
+                    Self::token_span(segment),
                     &[raw, tail],
                 )?
                 .value(),
@@ -1776,9 +1786,8 @@ impl<'s> Parser<'s> {
 
     fn parse_literal(&mut self) -> Result<ParsedNode, ParseError> {
         let token = self.take();
-        let raw = self.tape.push_source_slice(self.token_span(token))?;
+        let raw = self.tape.push_source_slice(Self::token_span(token))?;
         let kind = self.tape.push_u32(match token.kind {
-            TokenKind::Number => 0,
             TokenKind::String => 1,
             TokenKind::True | TokenKind::False => 2,
             TokenKind::Null => 3,
@@ -1786,25 +1795,25 @@ impl<'s> Parser<'s> {
             TokenKind::NoSubstitutionTemplate => 5,
             _ => 0,
         })?;
-        self.node(NodeTag::LITERAL, self.token_span(token), &[raw, kind])
+        self.node(NodeTag::LITERAL, Self::token_span(token), &[raw, kind])
     }
 
     fn parse_regexp_literal(&mut self) -> Result<ParsedNode, ParseError> {
         let slash = self.current;
         let token = self.lexer.scan_regexp(slash);
         self.current = self.lexer.next_token();
-        let raw = self.tape.push_source_slice(self.token_span(token))?;
+        let raw = self.tape.push_source_slice(Self::token_span(token))?;
         let kind = self.tape.push_u32(6)?;
-        self.node(NodeTag::LITERAL, self.token_span(token), &[raw, kind])
+        self.node(NodeTag::LITERAL, Self::token_span(token), &[raw, kind])
     }
 
     fn parse_identifier(&mut self) -> Result<ParsedNode, ParseError> {
         let token = self.take();
-        if !self.is_identifier_name(token.kind) {
-            self.error(self.token_span(token), "expected an identifier");
+        if !Self::is_identifier_name(token.kind) {
+            self.error(Self::token_span(token), "expected an identifier");
         }
-        let name = self.tape.push_source_slice(self.token_span(token))?;
-        self.node(NodeTag::IDENTIFIER, self.token_span(token), &[name])
+        let name = self.tape.push_source_slice(Self::token_span(token))?;
+        self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name])
     }
 
     fn identifier_from_span(&mut self, span: Span) -> Result<ParsedNode, ParseError> {
@@ -1817,8 +1826,8 @@ impl<'s> Parser<'s> {
         binding_kind: BindingKind,
     ) -> Result<ParsedNode, ParseError> {
         let token = self.take();
-        if !self.is_identifier_name(token.kind) {
-            self.error(self.token_span(token), "expected a binding identifier");
+        if !Self::is_identifier_name(token.kind) {
+            self.error(Self::token_span(token), "expected a binding identifier");
         }
         let name_text = self
             .source
@@ -1826,8 +1835,8 @@ impl<'s> Parser<'s> {
             .unwrap_or_default();
         let _ = self
             .context
-            .declare_binding(name_text, binding_kind, self.token_span(token));
-        let name = self.tape.push_source_slice(self.token_span(token))?;
+            .declare_binding(name_text, binding_kind, Self::token_span(token));
+        let name = self.tape.push_source_slice(Self::token_span(token))?;
         if self.options.language.is_typescript() && self.eat(TokenKind::Colon).is_some() {
             let annotation = self.parse_type_annotation()?;
             let optional = self.tape.push_bool(false)?;
@@ -1837,9 +1846,11 @@ impl<'s> Parser<'s> {
                 &[name, annotation.value(), optional],
             );
         }
-        self.node(NodeTag::IDENTIFIER, self.token_span(token), &[name])
+        self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name])
     }
 
+    // Array and object pattern recovery is mutually recursive and benefits from staying adjacent.
+    #[allow(clippy::too_many_lines)]
     fn parse_binding_pattern(
         &mut self,
         binding_kind: BindingKind,
@@ -1989,9 +2000,9 @@ impl<'s> Parser<'s> {
 
     fn invalid_expression(&mut self) -> Result<ParsedNode, ParseError> {
         let token = self.take();
-        self.error(self.token_span(token), "expected an expression");
+        self.error(Self::token_span(token), "expected an expression");
         let name = self.tape.push_string("<invalid>")?;
-        self.node(NodeTag::IDENTIFIER, self.token_span(token), &[name])
+        self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name])
     }
 
     fn node(
@@ -2048,11 +2059,11 @@ impl<'s> Parser<'s> {
         self.current.start.max(fallback)
     }
 
-    fn current_span(&self) -> Span {
-        self.token_span(self.current)
+    const fn current_span(&self) -> Span {
+        Self::token_span(self.current)
     }
 
-    const fn token_span(&self, token: Token) -> Span {
+    const fn token_span(token: Token) -> Span {
         Span::new(token.start, token.end)
     }
 
@@ -2077,7 +2088,7 @@ impl<'s> Parser<'s> {
             })
     }
 
-    const fn is_identifier_name(&self, kind: TokenKind) -> bool {
+    const fn is_identifier_name(kind: TokenKind) -> bool {
         matches!(
             kind,
             TokenKind::Identifier

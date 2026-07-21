@@ -1,6 +1,6 @@
 //! Experimental, independently implemented JavaScript, TypeScript, JSX, and TSX parser.
 //!
-//! JetSyntax emits a compact postfix tape while parsing. The native Rust API owns that tape, and
+//! `JetSyntax` emits a compact postfix tape while parsing. The native Rust API owns that tape, and
 //! language bindings decode the same stable wire format without depending on Rust struct layout.
 
 pub mod lexer;

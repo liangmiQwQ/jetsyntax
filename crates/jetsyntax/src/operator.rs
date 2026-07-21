@@ -4,7 +4,7 @@ use crate::lexer::TokenKind;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub(crate) enum BinaryOperator {
+pub enum BinaryOperator {
     Eq,
     NotEq,
     StrictEq,
@@ -33,7 +33,7 @@ pub(crate) enum BinaryOperator {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct BinaryBinding {
+pub struct BinaryBinding {
     pub operator: BinaryOperator,
     pub left: u8,
     pub right: u8,
@@ -42,7 +42,7 @@ pub(crate) struct BinaryBinding {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub(crate) enum AssignmentOperator {
+pub enum AssignmentOperator {
     Assign,
     Add,
     Subtract,
@@ -63,7 +63,7 @@ pub(crate) enum AssignmentOperator {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub(crate) enum UnaryOperator {
+pub enum UnaryOperator {
     Minus,
     Plus,
     LogicalNot,
@@ -75,12 +75,12 @@ pub(crate) enum UnaryOperator {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub(crate) enum UpdateOperator {
+pub enum UpdateOperator {
     Increment,
     Decrement,
 }
 
-pub(crate) const fn binary_binding(kind: TokenKind, allow_in: bool) -> Option<BinaryBinding> {
+pub const fn binary_binding(kind: TokenKind, allow_in: bool) -> Option<BinaryBinding> {
     let (operator, precedence, right_associative, logical) = match kind {
         TokenKind::PipePipe => (BinaryOperator::LogicalOr, 1, false, true),
         TokenKind::QuestionQuestion => (BinaryOperator::Nullish, 1, false, true),
@@ -119,7 +119,7 @@ pub(crate) const fn binary_binding(kind: TokenKind, allow_in: bool) -> Option<Bi
     })
 }
 
-pub(crate) const fn assignment_operator(kind: TokenKind) -> Option<AssignmentOperator> {
+pub const fn assignment_operator(kind: TokenKind) -> Option<AssignmentOperator> {
     match kind {
         TokenKind::Eq => Some(AssignmentOperator::Assign),
         TokenKind::PlusEq => Some(AssignmentOperator::Add),
@@ -141,7 +141,7 @@ pub(crate) const fn assignment_operator(kind: TokenKind) -> Option<AssignmentOpe
     }
 }
 
-pub(crate) const fn unary_operator(kind: TokenKind) -> Option<UnaryOperator> {
+pub const fn unary_operator(kind: TokenKind) -> Option<UnaryOperator> {
     match kind {
         TokenKind::Minus => Some(UnaryOperator::Minus),
         TokenKind::Plus => Some(UnaryOperator::Plus),
@@ -154,7 +154,7 @@ pub(crate) const fn unary_operator(kind: TokenKind) -> Option<UnaryOperator> {
     }
 }
 
-pub(crate) const fn update_operator(kind: TokenKind) -> Option<UpdateOperator> {
+pub const fn update_operator(kind: TokenKind) -> Option<UpdateOperator> {
     match kind {
         TokenKind::PlusPlus => Some(UpdateOperator::Increment),
         TokenKind::MinusMinus => Some(UpdateOperator::Decrement),

@@ -93,7 +93,7 @@ fn lexer_should_recognize_every_punctuator() {
 
 /// Reserved words and contextual JavaScript/TypeScript words retain distinct token kinds.
 ///
-/// Spec: keyword recognition applies only to an exact, unescaped IdentifierName spelling.
+/// Spec: keyword recognition applies only to an exact, unescaped `IdentifierName` spelling.
 #[test]
 fn lexer_should_recognize_keywords_and_contextual_typescript_words() {
     let cases = [
@@ -189,7 +189,7 @@ fn lexer_should_recognize_keywords_and_contextual_typescript_words() {
     assert!(escaped.errors().is_empty(), "{:?}", escaped.errors());
 }
 
-/// Numeric literals cover every radix, decimal form, BigInt, and metadata flag.
+/// Numeric literals cover every radix, decimal form, `BigInt`, and metadata flag.
 ///
 /// Spec: separators occur only between digits, while fractions, exponents, and legacy octal
 /// spelling affect the literal's permitted suffixes.
@@ -339,7 +339,7 @@ fn lexer_should_recognize_unicode_identifiers_and_escapes() {
 
 /// Private identifiers accept the same Unicode starts and escapes as ordinary identifiers.
 ///
-/// Spec: the code point after `#` is an IdentifierStart or Unicode escape, not an ASCII-only name.
+/// Spec: the code point after `#` is an `IdentifierStart` or Unicode escape, not an ASCII-only name.
 #[test]
 fn lexer_should_recognize_unicode_private_identifiers() {
     for source in ["#π", r"#\u0061"] {
@@ -380,7 +380,7 @@ fn lexer_should_track_line_breaks_across_whitespace_and_comments() {
 
 /// Unicode line and paragraph separators terminate line comments and count inside block comments.
 ///
-/// Spec: LF, CR, LS, and PS are all ECMAScript LineTerminator code points in comment trivia.
+/// Spec: LF, CR, LS, and PS are all ECMAScript `LineTerminator` code points in comment trivia.
 #[test]
 fn lexer_should_track_unicode_line_terminators_inside_comments() {
     for source in [

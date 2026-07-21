@@ -1,4 +1,4 @@
-//! On-demand ECMAScript lexer used by the JetSyntax parser.
+//! On-demand ECMAScript lexer used by the `JetSyntax` parser.
 //!
 //! The lexer does not allocate a token buffer. The parser keeps one lookahead token and asks for
 //! another only when it commits to a grammar branch. Regular expressions and template continuations
@@ -17,6 +17,11 @@ impl Token {
     #[must_use]
     pub const fn len(self) -> u32 {
         self.end - self.start
+    }
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.start == self.end
     }
 }
 
@@ -231,7 +236,7 @@ pub struct Lexer<'s> {
 impl<'s> Lexer<'s> {
     /// Create a lexer. Sources larger than four GiB are rejected by the parser API before this.
     #[must_use]
-    pub fn new(source: &'s str) -> Self {
+    pub const fn new(source: &'s str) -> Self {
         Self {
             source,
             bytes: source.as_bytes(),
@@ -259,6 +264,8 @@ impl<'s> Lexer<'s> {
         &self.source[token.start as usize..token.end as usize]
     }
 
+    // Keeping punctuator dispatch contiguous makes longest-match ordering auditable.
+    #[allow(clippy::too_many_lines)]
     pub fn next_token(&mut self) -> Token {
         let line_break = self.skip_trivia();
         let start = self.position;
@@ -424,7 +431,7 @@ impl<'s> Lexer<'s> {
         Token {
             kind: TokenKind::RegExp,
             start: slash.start,
-            end: self.position as u32,
+            end: wire_offset(self.position),
             flags: slash.flags,
         }
     }
@@ -491,11 +498,12 @@ impl<'s> Lexer<'s> {
     }
 
     fn skip_trivia(&mut self) -> bool {
-        let mut line_break = false;
-        if self.position == 0 && self.bytes.starts_with(b"#!") {
+        let mut line_break = if self.position == 0 && self.bytes.starts_with(b"#!") {
             self.skip_line_comment();
-            line_break = true;
-        }
+            true
+        } else {
+            false
+        };
         loop {
             match self.bytes.get(self.position).copied() {
                 Some(b' ' | b'\t' | 0x0B | 0x0C) => self.position += 1,
@@ -574,10 +582,7 @@ impl<'s> Lexer<'s> {
             self.position += 1;
         }
         let mut first = true;
-        loop {
-            let Some(&byte) = self.bytes.get(self.position) else {
-                break;
-            };
+        while let Some(&byte) = self.bytes.get(self.position) {
             if (first && is_ascii_identifier_start(byte))
                 || (!first && is_ascii_identifier_continue(byte))
             {
@@ -911,11 +916,11 @@ impl<'s> Lexer<'s> {
         self.bytes.get(self.position + offset).copied()
     }
 
-    fn one(&mut self, kind: TokenKind) -> TokenKind {
+    const fn one(&mut self, kind: TokenKind) -> TokenKind {
         self.advance(1, kind)
     }
 
-    fn advance(&mut self, count: usize, kind: TokenKind) -> TokenKind {
+    const fn advance(&mut self, count: usize, kind: TokenKind) -> TokenKind {
         self.position += count;
         kind
     }
@@ -923,19 +928,25 @@ impl<'s> Lexer<'s> {
     fn token(&self, kind: TokenKind, start: usize, flags: TokenFlags) -> Token {
         Token {
             kind,
-            start: start as u32,
-            end: self.position as u32,
+            start: wire_offset(start),
+            end: wire_offset(self.position),
             flags,
         }
     }
 
     fn error(&mut self, start: usize, end: usize, message: &'static str) {
         self.errors.push(LexError {
-            start: start as u32,
-            end: end as u32,
+            start: wire_offset(start),
+            end: wire_offset(end),
             message,
         });
     }
+}
+
+/// The parser rejects sources beyond the wire format's `u32` limit. Saturation keeps direct lexer
+/// use bounded as well, without silently wrapping offsets for an oversized standalone input.
+fn wire_offset(offset: usize) -> u32 {
+    u32::try_from(offset).unwrap_or(u32::MAX)
 }
 
 impl Token {

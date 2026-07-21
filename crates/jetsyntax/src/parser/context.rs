@@ -16,7 +16,7 @@ const ALLOW_YIELD: u16 = 1 << 8;
 const AMBIENT: u16 = 1 << 9;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct GrammarContext(u16);
+pub struct GrammarContext(u16);
 
 impl GrammarContext {
     #[must_use]
@@ -172,13 +172,13 @@ impl Diagnostic {
     }
 
     #[must_use]
-    pub fn with_related(mut self, span: Span) -> Self {
+    pub const fn with_related(mut self, span: Span) -> Self {
         self.related = Some(span);
         self
     }
 
     #[must_use]
-    pub fn with_expected(mut self, expected: TokenKind, found: TokenKind) -> Self {
+    pub const fn with_expected(mut self, expected: TokenKind, found: TokenKind) -> Self {
         self.expected = Some(expected);
         self.found = Some(found);
         self
@@ -197,7 +197,7 @@ impl Diagnostic {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ScopeKind {
+pub enum ScopeKind {
     Program,
     Function,
     Block,
@@ -207,7 +207,7 @@ pub(crate) enum ScopeKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BindingKind {
+pub enum BindingKind {
     Var,
     Function,
     Parameter,
@@ -233,7 +233,7 @@ impl BindingKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LabelKind {
+pub enum LabelKind {
     Statement,
     Loop,
     Switch,
@@ -250,7 +250,7 @@ impl LabelKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ContextCheckpoint {
+pub struct ContextCheckpoint {
     mutation_len: usize,
     diagnostic_len: usize,
     checkpoint_depth: usize,
@@ -272,7 +272,7 @@ struct Scope<'s> {
     private_uses: Vec<(&'s str, Span)>,
 }
 
-impl<'s> Scope<'s> {
+impl Scope<'_> {
     fn new(kind: ScopeKind) -> Self {
         Self {
             kind,
@@ -320,7 +320,7 @@ enum Mutation<'s> {
 }
 
 #[derive(Debug)]
-pub(crate) struct ParserContext<'s> {
+pub struct ParserContext<'s> {
     grammar: GrammarContext,
     scopes: Vec<Scope<'s>>,
     labels: Vec<Label<'s>>,
@@ -605,9 +605,11 @@ impl<'s> ParserContext<'s> {
             .iter()
             .rev()
             .take_while(|label| label.function_depth == function_depth)
-            .any(|label| match name {
-                Some(name) => label.name == Some(name) && accepts(label.kind),
-                None => accepts(label.kind),
+            .any(|label| {
+                name.map_or_else(
+                    || accepts(label.kind),
+                    |name| label.name == Some(name) && accepts(label.kind),
+                )
             })
     }
 
