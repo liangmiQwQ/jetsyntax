@@ -9,6 +9,7 @@ import { loadTest262 } from "./official/test262.mjs";
 import { loadTypeScript } from "./official/typescript.mjs";
 
 const loaders = { babel: loadBabel, test262: loadTest262, typescript: loadTypeScript };
+const workspaceRoot = resolve(import.meta.dirname, "../..");
 const arguments_ = parseArguments(process.argv.slice(2));
 const refs = JSON.parse(await readFile(new URL("./official-refs.json", import.meta.url), "utf8"));
 const definition = refs[arguments_.suite];
@@ -26,7 +27,7 @@ if (
   throw new Error(`invalid shard ${shardIndex}/${shardTotal}`);
 }
 
-const loaded = await loaders[arguments_.suite](resolve(arguments_.root));
+const loaded = await loaders[arguments_.suite](resolve(workspaceRoot, arguments_.root));
 assertInventory(loaded.inventory, definition.inventory, arguments_.suite);
 
 const failures = [];
@@ -86,6 +87,7 @@ const report = {
   failures,
 };
 const reportPath = resolve(
+  workspaceRoot,
   process.env.CONFORMANCE_REPORT ?? `reports/official-${arguments_.suite}-${shardIndex}.json`,
 );
 await mkdir(dirname(reportPath), { recursive: true });

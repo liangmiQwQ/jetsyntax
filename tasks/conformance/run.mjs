@@ -17,7 +17,11 @@ const suites = [
 ];
 
 const arguments_ = parseArguments(process.argv.slice(2));
-const suiteRoot = resolve(arguments_.suite ?? process.env.JETSYNTAX_SUITE ?? "vendor/parser-test-suite");
+const workspaceRoot = resolve(import.meta.dirname, "../..");
+const suiteRoot = resolve(
+  workspaceRoot,
+  arguments_.suite ?? process.env.JETSYNTAX_SUITE ?? "vendor/parser-test-suite",
+);
 const shardIndex = Number(process.env.SHARD_INDEX ?? 0);
 const shardTotal = Number(process.env.SHARD_TOTAL ?? 1);
 const failures = [];
@@ -100,7 +104,10 @@ const report = {
   },
   failures,
 };
-const reportPath = resolve(process.env.CONFORMANCE_REPORT ?? `reports/conformance-${shardIndex}.json`);
+const reportPath = resolve(
+  workspaceRoot,
+  process.env.CONFORMANCE_REPORT ?? `reports/conformance-${shardIndex}.json`,
+);
 await mkdir(dirname(reportPath), { recursive: true });
 await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify({ ...report, failures: failures.slice(0, 20) }, null, 2));

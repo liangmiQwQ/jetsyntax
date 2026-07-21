@@ -61,7 +61,9 @@ jobs:
           cache-key: conformance-${{ matrix.shard }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm test:conformance -- --suite parser-test-suite
+      - run: >-
+          pnpm test:conformance -- --suite
+          ${{ github.workspace }}/parser-test-suite
         env:
           CONFORMANCE_REPORT: ${{ github.workspace }}/reports/conformance-${{ matrix.shard }}.json
           SHARD_INDEX: ${{ matrix.shard }}
@@ -114,7 +116,11 @@ jobs:
           cache-key: official-${{ matrix.suite }}-${{ matrix.shard }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm --filter @jetsyntax/conformance test:official -- --suite ${{ matrix.suite }} --root official-suite/${{ matrix.root }} --ref ${{ matrix.ref }}
+      - run: >-
+          pnpm --filter @jetsyntax/conformance test:official --
+          --suite ${{ matrix.suite }}
+          --root ${{ github.workspace }}/official-suite/${{ matrix.root }}
+          --ref ${{ matrix.ref }}
         env:
           CONFORMANCE_REPORT: ${{ github.workspace }}/reports/official-${{ matrix.suite }}-${{ matrix.shard }}.json
           SHARD_INDEX: ${{ matrix.shard }}
