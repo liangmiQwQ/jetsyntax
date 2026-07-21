@@ -58,6 +58,8 @@ const INLINE_U32_MASK: u32 = 0x0FFF_FFFF;
 
 const MAX_INITIAL_WORD_CAPACITY: usize = 16 * 1024 * 1024;
 const MAX_INITIAL_RECORD_CAPACITY: usize = 4 * 1024 * 1024;
+const INITIAL_WORD_CAPACITY_NUMERATOR: usize = 17;
+const INITIAL_WORD_CAPACITY_DENOMINATOR: usize = 16;
 
 const KIND_NODE: u32 = 1;
 const KIND_LIST: u32 = 2;
@@ -397,8 +399,10 @@ impl TapeBuilder {
 
     fn with_mode(source_bytes: u32, mode: BuilderMode) -> Self {
         let source_len = source_bytes as usize;
+        let estimated_words = source_len.saturating_mul(INITIAL_WORD_CAPACITY_NUMERATOR)
+            / INITIAL_WORD_CAPACITY_DENOMINATOR;
         let mut words =
-            Vec::with_capacity(HEADER_WORDS + source_len.min(MAX_INITIAL_WORD_CAPACITY));
+            Vec::with_capacity(HEADER_WORDS + estimated_words.min(MAX_INITIAL_WORD_CAPACITY));
         words.resize(HEADER_WORDS, 0);
         Self {
             mode,
