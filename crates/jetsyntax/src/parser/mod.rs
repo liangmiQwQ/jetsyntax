@@ -358,6 +358,7 @@ impl<'s> Parser<'s> {
             self.context
                 .grammar()
                 .with_allow_super(false)
+                .with_allow_super_call(false)
                 .with_parameters(true),
         );
         if !declaration && let Some(id) = id {
@@ -627,6 +628,26 @@ impl<'s> Parser<'s> {
         )
     }
 
+    fn parse_method_function_with_super_call(
+        &mut self,
+        start: u32,
+        generator: bool,
+        asynchronous: bool,
+        accessor: Option<AccessorKind>,
+        allow_super_call: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let previous = self.context.grammar().allow_super_call();
+        self.context.set_grammar(
+            self.context
+                .grammar()
+                .with_allow_super_call(allow_super_call),
+        );
+        let function = self.parse_method_function(start, generator, asynchronous, accessor);
+        self.context
+            .set_grammar(self.context.grammar().with_allow_super_call(previous));
+        function
+    }
+
     fn parse_class(&mut self, declaration: bool) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Class).start;
         let id = if Self::is_identifier_name(self.current.kind) {
@@ -650,7 +671,8 @@ impl<'s> Parser<'s> {
                 .with_class(true)
                 .with_strict(true)
                 .with_accessor(false)
-                .with_allow_super(true),
+                .with_allow_super(true)
+                .with_allow_super_call(false),
         );
         let mut elements = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
@@ -712,16 +734,24 @@ impl<'s> Parser<'s> {
         } else {
             None
         };
-        let generator = self.current.kind == TokenKind::Star
-            && async_token.is_none_or(|_| !self.current.flags.line_break_before());
-        let asynchronous = generator && async_token.is_some();
+        let async_modifier = async_token.is_some_and(|token| {
+            !token.flags.escaped()
+                && !self.current.flags.line_break_before()
+                && (self.current.kind == TokenKind::Star
+                    || Self::is_property_name_start(self.current.kind, true))
+        });
+        let generator =
+            self.current.kind == TokenKind::Star && async_token.is_none_or(|_| async_modifier);
+        let asynchronous = async_modifier;
         if generator {
             self.bump();
-        } else if let Some(token) = async_token {
+        } else if let Some(token) = async_token
+            && !asynchronous
+        {
             leading_key = Some(self.identifier_from_span(Self::token_span(token))?);
         }
 
-        let property_name = if generator {
+        let property_name = if generator || asynchronous {
             self.parse_property_name(true)?
         } else if let Some(key) = leading_key {
             ParsedPropertyName {
@@ -735,22 +765,13 @@ impl<'s> Parser<'s> {
         let key = property_name.key;
         let computed = property_name.computed;
 
-        if generator && !is_static && !computed && self.source_text(key.span) == "constructor" {
-            self.error(key.span, "class constructor cannot be a generator method");
-        }
-        if generator && is_static && !computed && self.source_text(key.span) == "prototype" {
-            self.error(key.span, "static class method cannot be named `prototype`");
-        }
-        if generator || self.current.kind == TokenKind::LeftParen {
-            let function =
-                self.parse_method_function(key.span.start, generator, asynchronous, None)?;
-            let kind = self.tape.push_u32(0)?;
-            let computed = self.tape.push_bool(computed)?;
-            let is_static = self.tape.push_bool(is_static)?;
-            return self.node(
-                NodeTag::METHOD_DEFINITION,
-                Span::new(start, function.span.end),
-                &[key.value(), function.value(), kind, computed, is_static],
+        if generator || asynchronous || self.current.kind == TokenKind::LeftParen {
+            return self.parse_class_method_definition(
+                start,
+                &property_name,
+                is_static,
+                generator,
+                asynchronous,
             );
         }
 
@@ -772,6 +793,52 @@ impl<'s> Parser<'s> {
             NodeTag::PROPERTY_DEFINITION,
             Span::new(start, end),
             &[key.value(), value, computed, is_static, type_annotation],
+        )
+    }
+
+    fn parse_class_method_definition(
+        &mut self,
+        start: u32,
+        property_name: &ParsedPropertyName,
+        is_static: bool,
+        generator: bool,
+        asynchronous: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let key = property_name.key;
+        let computed = property_name.computed;
+        if (generator || asynchronous)
+            && !is_static
+            && !computed
+            && self.static_property_name_matches(key.span, "constructor")
+        {
+            self.error(key.span, "class constructor cannot be async or a generator");
+        }
+        if (generator || asynchronous)
+            && is_static
+            && !computed
+            && self.static_property_name_matches(key.span, "prototype")
+        {
+            self.error(key.span, "static class method cannot be named `prototype`");
+        }
+        let allow_super_call = !is_static
+            && !computed
+            && !generator
+            && !asynchronous
+            && self.static_property_name_matches(key.span, "constructor");
+        let function = self.parse_method_function_with_super_call(
+            key.span.start,
+            generator,
+            asynchronous,
+            None,
+            allow_super_call,
+        )?;
+        let kind = self.tape.push_u32(0)?;
+        let computed = self.tape.push_bool(computed)?;
+        let is_static = self.tape.push_bool(is_static)?;
+        self.node(
+            NodeTag::METHOD_DEFINITION,
+            Span::new(start, function.span.end),
+            &[key.value(), function.value(), kind, computed, is_static],
         )
     }
 
@@ -824,7 +891,13 @@ impl<'s> Parser<'s> {
                 "static class accessor cannot be named `prototype`",
             );
         }
-        let function = self.parse_method_function(key.span.start, false, false, Some(accessor))?;
+        let function = self.parse_method_function_with_super_call(
+            key.span.start,
+            false,
+            false,
+            Some(accessor),
+            false,
+        )?;
         let kind = self.tape.push_u32(accessor.method_kind())?;
         let computed = self.tape.push_bool(computed)?;
         let is_static = self.tape.push_bool(is_static)?;
@@ -2077,10 +2150,14 @@ impl<'s> Parser<'s> {
                         "super is only allowed in methods and derived constructors",
                     );
                 }
-                if self.context.grammar().accessor() && self.current.kind == TokenKind::LeftParen {
+                if self.current.kind == TokenKind::LeftParen
+                    && (self.context.grammar().accessor()
+                        || self.reports_ecmascript_early_errors()
+                            && !self.context.grammar().allow_super_call())
+                {
                     self.error(
                         Self::token_span(token),
-                        "direct super calls are not allowed in accessors",
+                        "direct super calls are only allowed in class constructors",
                     );
                 }
                 self.node(NodeTag::SUPER, Self::token_span(token), &[])
@@ -2397,13 +2474,19 @@ impl<'s> Parser<'s> {
                 } else {
                     None
                 };
+                let async_modifier = async_token.is_some_and(|token| {
+                    !token.flags.escaped()
+                        && !self.current.flags.line_break_before()
+                        && (self.current.kind == TokenKind::Star
+                            || Self::is_property_name_start(self.current.kind, false))
+                });
                 let generator = self.current.kind == TokenKind::Star
-                    && async_token.is_none_or(|_| !self.current.flags.line_break_before());
-                let asynchronous = generator && async_token.is_some();
+                    && async_token.is_none_or(|_| async_modifier);
+                let asynchronous = async_modifier;
                 if generator {
                     self.bump();
                 }
-                let property_name = if generator {
+                let property_name = if generator || asynchronous {
                     self.parse_property_name(false)?
                 } else if let Some(token) = async_token {
                     ParsedPropertyName {
@@ -2416,15 +2499,26 @@ impl<'s> Parser<'s> {
                 };
                 let key = property_name.key;
                 let computed = property_name.computed;
-                let (value, method, shorthand) = if generator {
+                let (value, method, shorthand) = if generator || asynchronous {
                     let method_patterns = self.assignment_pattern_checkpoint();
-                    let value =
-                        self.parse_method_function(key.span.start, true, asynchronous, None)?;
+                    let value = self.parse_method_function_with_super_call(
+                        key.span.start,
+                        generator,
+                        asynchronous,
+                        None,
+                        false,
+                    )?;
                     self.rollback_assignment_patterns(method_patterns);
                     (value, true, false)
                 } else if self.current.kind == TokenKind::LeftParen {
                     let method_patterns = self.assignment_pattern_checkpoint();
-                    let value = self.parse_method_function(key.span.start, false, false, None)?;
+                    let value = self.parse_method_function_with_super_call(
+                        key.span.start,
+                        false,
+                        false,
+                        None,
+                        false,
+                    )?;
                     self.rollback_assignment_patterns(method_patterns);
                     (value, true, false)
                 } else if self.eat(TokenKind::Colon).is_some() {
@@ -2493,8 +2587,13 @@ impl<'s> Parser<'s> {
         self.bump();
         let property_name = self.parse_property_name(false)?;
         let method_patterns = self.assignment_pattern_checkpoint();
-        let function =
-            self.parse_method_function(property_name.key.span.start, false, false, Some(accessor))?;
+        let function = self.parse_method_function_with_super_call(
+            property_name.key.span.start,
+            false,
+            false,
+            Some(accessor),
+            false,
+        )?;
         self.rollback_assignment_patterns(method_patterns);
         let kind = self.tape.push_u32(accessor.method_kind())?;
         let method = self.tape.push_bool(false)?;
@@ -4174,6 +4273,15 @@ impl<'s> Parser<'s> {
         // Only trivia after `)` participates in the arrow's no-LineTerminator restriction.
         let arrow = lookahead.next_token();
         arrow.kind == TokenKind::Arrow && !arrow.flags.line_break_before()
+    }
+
+    const fn is_property_name_start(kind: TokenKind, allow_private: bool) -> bool {
+        allow_private && matches!(kind, TokenKind::PrivateIdentifier)
+            || matches!(
+                kind,
+                TokenKind::LeftBracket | TokenKind::String | TokenKind::Number | TokenKind::BigInt
+            )
+            || Self::is_member_identifier_name(kind)
     }
 
     const fn is_identifier_name(kind: TokenKind) -> bool {

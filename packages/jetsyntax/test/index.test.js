@@ -492,6 +492,97 @@ describe("parse", () => {
     });
   });
 
+  it("materializes object and class async methods", () => {
+    const source = [
+      "const methods = { async plain(value) { await load(value); }, async [key]() {}, async 'named'() {}, async() {} };",
+      "class Methods { async plain(value) { await load(value); } static async [key]() {} async #private() {} static async #privateStatic() {} async() {} }",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const objectMethods = result.program.body[0].declarations[0].init.properties;
+    for (const method of objectMethods.slice(0, 3)) {
+      expect(method).toMatchObject({
+        type: "Property",
+        method: true,
+        value: { type: "FunctionExpression", async: true, generator: false },
+      });
+    }
+    expect(source.slice(objectMethods[0].start, objectMethods[0].end)).toBe(
+      "async plain(value) { await load(value); }",
+    );
+    expect(objectMethods[1]).toMatchObject({ computed: true, key: { name: "key" } });
+    expect(objectMethods[2].key).toMatchObject({ type: "Literal", value: "named" });
+    expect(objectMethods[3]).toMatchObject({
+      key: { type: "Identifier", name: "async" },
+      value: { async: false, generator: false },
+    });
+
+    const classMethods = result.program.body[1].body.body;
+    for (const method of classMethods.slice(0, 4)) {
+      expect(method).toMatchObject({
+        type: "MethodDefinition",
+        value: { type: "FunctionExpression", async: true, generator: false },
+      });
+    }
+    expect(source.slice(classMethods[1].start, classMethods[1].end)).toBe(
+      "static async [key]() {}",
+    );
+    expect(classMethods[1]).toMatchObject({ static: true, computed: true });
+    expect(classMethods[2].key).toMatchObject({ type: "PrivateIdentifier", name: "private" });
+    expect(classMethods[3]).toMatchObject({
+      static: true,
+      key: { type: "PrivateIdentifier", name: "privateStatic" },
+    });
+    expect(classMethods[4]).toMatchObject({
+      key: { type: "Identifier", name: "async" },
+      value: { async: false, generator: false },
+    });
+  });
+
+  it("keeps escaped and line-broken async method introducers separate", () => {
+    const clean = parse("class Methods { async\nplain() {} \\u0061sync() {} }", {
+      semanticErrors: true,
+    });
+    expect(clean.diagnostics).toEqual([]);
+    expect(clean.program.body[0].body.body).toMatchObject([
+      { type: "PropertyDefinition", key: { name: "async" } },
+      { type: "MethodDefinition", value: { async: false } },
+      { type: "MethodDefinition", value: { async: false } },
+    ]);
+
+    for (
+      const source of [
+        "class Methods { \\u0061sync method() {} }",
+        "const methods = { async\nmethod() {} };",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
+  it("diagnoses async method early errors", () => {
+    for (
+      const source of [
+        "const methods = { async invalid(await) {} };",
+        "class Methods { async invalid() { var \\u0061wait; } }",
+        "class Methods { static async invalid() { void \\u0061wait; } }",
+        "const methods = { async invalid(value = fallback) { 'use strict'; } };",
+        "class Methods { async invalid(...values,) {} }",
+        "const methods = { async invalid(value, value) {} };",
+        "const methods = { async invalid() { super(); } };",
+        "class Methods extends Base { async invalid() { return function() { return super.value; }; } }",
+        "class Outer extends Base { constructor() { class Inner { static { super(); } } } }",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
   it("materializes public class accessors and preserves get/set member ambiguities", () => {
     const source = [
       "class Accessors {",

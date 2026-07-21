@@ -1015,6 +1015,118 @@ fn parser_should_accept_object_and_class_generator_methods() {
     assert_clean_cases(&cases);
 }
 
+/// Async ordinary methods preserve public, private, computed, and static method forms.
+#[test]
+fn parser_should_accept_object_and_class_async_methods() {
+    let cases = [
+        GrammarCase::script(
+            "object async methods",
+            "const methods = { async plain(value) { await load(value); }, async [key]() {}, async 'named'() {}, async() {} };",
+            &[
+                NodeTag::OBJECT_EXPRESSION,
+                NodeTag::PROPERTY,
+                NodeTag::FUNCTION_EXPRESSION,
+                NodeTag::AWAIT_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
+            "class async methods",
+            "class Methods { async plain(value) { await load(value); } static async [key]() {} async #private() {} static async #privateStatic() {} async() {} }",
+            &[
+                NodeTag::CLASS_DECLARATION,
+                NodeTag::METHOD_DEFINITION,
+                NodeTag::FUNCTION_EXPRESSION,
+                NodeTag::PRIVATE_IDENTIFIER,
+                NodeTag::AWAIT_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
+            "line-broken and escaped async keys",
+            "class Methods { async\nplain() {} \\u0061sync() {} }",
+            &[NodeTag::PROPERTY_DEFINITION, NodeTag::METHOD_DEFINITION],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
+/// Escaped or line-broken `async` tokens do not introduce async methods.
+#[test]
+fn parser_should_respect_async_method_introducer_boundaries() {
+    let cases = [
+        GrammarCase::script(
+            "escaped class async modifier",
+            "class Methods { \\u0061sync method() {} }",
+            &[NodeTag::PROPERTY_DEFINITION, NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "line-broken object async modifier",
+            "const methods = { async\nmethod() {} };",
+            &[NodeTag::OBJECT_EXPRESSION, NodeTag::PROPERTY],
+        ),
+    ];
+
+    assert_diagnostic_cases(&cases, true);
+}
+
+/// Async methods retain contextual, parameter-list, and nested-function early errors.
+#[test]
+fn parser_should_diagnose_async_method_early_errors() {
+    let cases = [
+        GrammarCase::script(
+            "await parameter name",
+            "const methods = { async invalid(await) {} };",
+            &[NodeTag::PROPERTY, NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "escaped await binding",
+            "class Methods { async invalid() { var \\u0061wait; } }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "escaped await reference",
+            "class Methods { static async invalid() { void \\u0061wait; } }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::UNARY_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "non-simple strict parameters",
+            "const methods = { async invalid(value = fallback) { 'use strict'; } };",
+            &[NodeTag::PROPERTY, NodeTag::ASSIGNMENT_PATTERN],
+        ),
+        GrammarCase::script(
+            "rest trailing comma",
+            "class Methods { async invalid(...values,) {} }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::REST_ELEMENT],
+        ),
+        GrammarCase::script(
+            "duplicate parameters",
+            "const methods = { async invalid(value, value) {} };",
+            &[NodeTag::PROPERTY, NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "direct super call",
+            "const methods = { async invalid() { super(); } };",
+            &[NodeTag::PROPERTY, NodeTag::SUPER],
+        ),
+        GrammarCase::script(
+            "nested ordinary function super",
+            "class Methods extends Base { async invalid() { return function() { return super.value; }; } }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::SUPER],
+        ),
+        GrammarCase::script(
+            "nested class static block super call",
+            "class Outer extends Base { constructor() { class Inner { static { super(); } } } }",
+            &[
+                NodeTag::CLASS_DECLARATION,
+                NodeTag::STATIC_BLOCK,
+                NodeTag::SUPER,
+            ],
+        ),
+    ];
+
+    assert_diagnostic_cases(&cases, true);
+}
+
 /// Public class accessors reuse method functions while preserving ordinary `get` and `set` names.
 #[test]
 fn parser_should_accept_public_class_accessors() {

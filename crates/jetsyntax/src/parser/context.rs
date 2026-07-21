@@ -18,6 +18,7 @@ const ACCESSOR: u16 = 1 << 10;
 const PARAMETERS: u16 = 1 << 11;
 const ALLOW_SUPER: u16 = 1 << 12;
 const EARLY_ERRORS: u16 = 1 << 13;
+const ALLOW_SUPER_CALL: u16 = 1 << 14;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GrammarContext(u16);
@@ -109,6 +110,11 @@ impl GrammarContext {
     }
 
     #[must_use]
+    pub(crate) const fn allow_super_call(self) -> bool {
+        self.has(ALLOW_SUPER_CALL)
+    }
+
+    #[must_use]
     pub(crate) const fn with_strict(self, enabled: bool) -> Self {
         self.with(STRICT, enabled)
     }
@@ -171,6 +177,11 @@ impl GrammarContext {
     #[must_use]
     pub(crate) const fn with_allow_super(self, enabled: bool) -> Self {
         self.with(ALLOW_SUPER, enabled)
+    }
+
+    #[must_use]
+    pub(crate) const fn with_allow_super_call(self, enabled: bool) -> Self {
+        self.with(ALLOW_SUPER_CALL, enabled)
     }
 
     const fn has(self, flag: u16) -> bool {
@@ -886,7 +897,8 @@ mod tests {
             .with_function(true)
             .with_allow_in(false)
             .with_allow_yield(true)
-            .with_ambient(true);
+            .with_ambient(true)
+            .with_allow_super_call(true);
 
         assert_eq!(std::mem::size_of::<GrammarContext>(), 2);
         assert!(grammar.strict());
@@ -899,6 +911,7 @@ mod tests {
         assert!(grammar.allow_await());
         assert!(grammar.allow_yield());
         assert!(grammar.ambient());
+        assert!(grammar.allow_super_call());
     }
 
     #[test]
