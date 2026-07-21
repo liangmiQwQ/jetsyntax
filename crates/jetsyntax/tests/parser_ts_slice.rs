@@ -271,6 +271,135 @@ fn limits_function_return_annotations_to_supported_typescript_bodies() {
 }
 
 #[test]
+fn parses_method_return_annotations_without_widening_plain_method_records() {
+    let source = [
+        "class Service {",
+        "  method(): Namespace.Output {}",
+        "  static [key](): Promise<Result> {}",
+        "  #private(): Hidden {}",
+        "  *values(): Iterable<Result> {}",
+        "  async load(): Promise<Result> {}",
+        "  get value(): Result {}",
+        "  get #secret(): Hidden {}",
+        "  set value(next): void {}",
+        "  plain() {}",
+        "}",
+        "const service = {",
+        "  method(): Result {},",
+        "  [key](): Result {},",
+        "  *values(): Iterable<Result> {},",
+        "  async load(): Promise<Result> {},",
+        "  get value(): Result {},",
+        "  set value(next): void {},",
+        "  plain() {},",
+        "};",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse method return annotations");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid method annotation tape");
+
+    let methods = node_fields(&parsed, NodeTag::FUNCTION_EXPRESSION).collect::<Vec<_>>();
+    assert_eq!(methods.len(), 16);
+    assert_eq!(
+        methods.iter().filter(|fields| fields.len() == 6).count(),
+        14
+    );
+    assert_eq!(methods.iter().filter(|fields| fields.len() == 5).count(), 2);
+
+    for fields in methods.iter().filter(|fields| fields.len() == 6) {
+        assert!(matches!(
+            parsed.tape.value_at(fields[5]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::TS_TYPE_ANNOTATION,
+                ..
+            })
+        ));
+    }
+    let TapeValue::Node { span, .. } = parsed
+        .tape
+        .value_at(methods[0][5])
+        .expect("method return annotation")
+    else {
+        panic!("method return annotation is not a node");
+    };
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        ": Namespace.Output"
+    );
+}
+
+#[test]
+fn diagnoses_unsupported_method_return_forms_and_setter_semantics() {
+    for source in [
+        "class C { predicate(value): value is string {} }",
+        "class C { assertion(value): asserts value {} }",
+        "class C { overload(): string; }",
+        "class C { constructor(): string {} }",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recoverable method parse");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid recovery tape");
+    }
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "class C { method(): string {} }",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recoverable JavaScript method parse");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid JavaScript recovery tape");
+    }
+
+    let source =
+        "class C { set value(next): void {} } const object = { set value(next): void {} };";
+    let syntax_only = parse(source, typescript_options()).expect("syntax-only setter parse");
+    assert!(syntax_only.diagnostics.is_empty());
+    assert!(
+        node_fields(&syntax_only, NodeTag::FUNCTION_EXPRESSION).all(|fields| fields.len() == 6)
+    );
+
+    let semantic = parse(
+        source,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("semantic setter parse");
+    assert_eq!(semantic.diagnostics.len(), 2, "{:#?}", semantic.diagnostics);
+    assert!(node_fields(&semantic, NodeTag::FUNCTION_EXPRESSION).all(|fields| fields.len() == 6));
+}
+
+#[test]
+fn requires_super_to_continue_as_a_call_or_property() {
+    let invalid = parse(
+        "class C extends Base { method(): void { super; } }",
+        typescript_options(),
+    )
+    .expect("recoverable bare-super parse");
+    assert!(!invalid.diagnostics.is_empty());
+    invalid.tape.validate().expect("valid bare-super tape");
+
+    let valid = parse(
+        "class C extends Base { constructor() { super(); } method() { super.value; super[key]; } }",
+        typescript_options(),
+    )
+    .expect("parse valid super continuations");
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+}
+
+#[test]
 fn parses_typescript_export_assignment_and_namespace_export() {
     let source = "export = Namespace.factory; export as namespace JetSyntax;";
     assert_clean_with_tags(

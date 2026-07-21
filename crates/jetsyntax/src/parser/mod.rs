@@ -599,6 +599,21 @@ impl<'s> Parser<'s> {
         }
         self.diagnose_rest_parameter_trailing_comma(&params);
         self.expect(TokenKind::RightParen);
+        // Only canonical constructors enable direct super calls, and their return annotations remain unsupported.
+        let return_type = if self.context.grammar().allow_super_call() {
+            None
+        } else {
+            self.parse_function_return_type()?
+        };
+        if return_type.is_some()
+            && accessor == Some(AccessorKind::Set)
+            && self.options.semantic_errors
+        {
+            self.error(
+                self.current_span(),
+                "setter cannot have a return type annotation",
+            );
+        }
         let has_use_strict = self.current.kind == TokenKind::LeftBrace
             && has_use_strict_directive(self.source, self.current.end as usize);
         if has_use_strict && !params.simple {
@@ -621,11 +636,28 @@ impl<'s> Parser<'s> {
         let id = self.tape.push_null()?;
         let generator = self.tape.push_bool(generator)?;
         let asynchronous = self.tape.push_bool(asynchronous)?;
-        self.node(
-            NodeTag::FUNCTION_EXPRESSION,
-            Span::new(start, body.span.end),
-            &[id, params.value, body.value(), generator, asynchronous],
-        )
+        let span = Span::new(start, body.span.end);
+        // The five-field form remains the unannotated hot path shared with JavaScript methods.
+        if let Some(return_type) = return_type {
+            self.node(
+                NodeTag::FUNCTION_EXPRESSION,
+                span,
+                &[
+                    id,
+                    params.value,
+                    body.value(),
+                    generator,
+                    asynchronous,
+                    return_type,
+                ],
+            )
+        } else {
+            self.node(
+                NodeTag::FUNCTION_EXPRESSION,
+                span,
+                &[id, params.value, body.value(), generator, asynchronous],
+            )
+        }
     }
 
     fn parse_method_function_with_super_call(
@@ -2144,6 +2176,15 @@ impl<'s> Parser<'s> {
             }
             TokenKind::Super => {
                 let token = self.take();
+                if !matches!(
+                    self.current.kind,
+                    TokenKind::LeftParen | TokenKind::Dot | TokenKind::LeftBracket
+                ) {
+                    self.error(
+                        Self::token_span(token),
+                        "super must be followed by a call or property access",
+                    );
+                }
                 if self.reports_ecmascript_early_errors() && !self.context.grammar().allow_super() {
                     self.error(
                         Self::token_span(token),

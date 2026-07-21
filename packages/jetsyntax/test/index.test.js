@@ -384,6 +384,96 @@ describe("parse", () => {
     }
   });
 
+  it("materializes TypeScript method return annotations", () => {
+    const source = [
+      "class Service {",
+      "  method(): Namespace.Output {}",
+      "  static [key](): Promise<Result> {}",
+      "  #private(): Hidden {}",
+      "  *values(): Iterable<Result> {}",
+      "  async load(): Promise<Result> {}",
+      "  get value(): Result {}",
+      "  get #secret(): Hidden {}",
+      "  plain() {}",
+      "}",
+      "const object = { method(): Result {}, get value(): Result {}, plain() {} };",
+    ].join("\n");
+    const result = parse(source, { lang: "ts" });
+
+    expect(result.diagnostics).toEqual([]);
+    const classMethods = result.program.body[0].body.body;
+    const objectMethods = result.program.body[1].declarations[0].init.properties;
+    for (const method of [...classMethods.slice(0, 7), ...objectMethods.slice(0, 2)]) {
+      expect(method.value.returnType).toMatchObject({
+        type: "TSTypeAnnotation",
+        typeAnnotation: { type: expect.stringMatching(/^TS/) },
+      });
+    }
+    expect(source.slice(classMethods[0].value.returnType.start, classMethods[0].value.returnType.end)).toBe(
+      ": Namespace.Output",
+    );
+    expect(classMethods[0].value).toMatchObject({ async: false, generator: false });
+    expect(classMethods[3].value).toMatchObject({ generator: true });
+    expect(classMethods[4].value).toMatchObject({ async: true });
+    expect(classMethods[7].value).not.toHaveProperty("returnType");
+    expect(objectMethods[2].value).not.toHaveProperty("returnType");
+  });
+
+  it("keeps unsupported method return forms diagnostic", () => {
+    for (
+      const [source, options] of [
+        ["class C { predicate(value): value is string {} }", { lang: "ts" }],
+        ["class C { assertion(value): asserts value {} }", { lang: "ts" }],
+        ["class C { overload(): string; }", { lang: "ts" }],
+        ["class C { constructor(): string {} }", { lang: "ts" }],
+        ["class C { method(): string {} }", { lang: "js" }],
+        ["class C { method(): string {} }", { lang: "jsx" }],
+      ]
+    ) {
+      const result = parse(source, options);
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
+  it("diagnoses typed setters only when semantic errors are enabled", () => {
+    const source = [
+      "class C { set value(next): void {} }",
+      "const object = { set value(next): void {} };",
+    ].join("\n");
+    const syntaxOnly = parse(source, { lang: "ts" });
+    const semantic = parse(source, { lang: "ts", semanticErrors: true });
+
+    expect(syntaxOnly.diagnostics).toEqual([]);
+    const syntaxOnlySetters = [
+      syntaxOnly.program.body[0].body.body[0].value,
+      syntaxOnly.program.body[1].declarations[0].init.properties[0].value,
+    ];
+    for (const setter of syntaxOnlySetters) {
+      expect(setter.returnType).toMatchObject({
+        type: "TSTypeAnnotation",
+        typeAnnotation: { type: "TSVoidKeyword" },
+      });
+    }
+    expect(semantic.diagnostics).not.toEqual([]);
+    expect(semantic.program.body[0].body.body[0].value.returnType).toMatchObject({ type: "TSTypeAnnotation" });
+    expect(semantic.program.body[1].declarations[0].init.properties[0].value.returnType).toMatchObject({
+      type: "TSTypeAnnotation",
+    });
+  });
+
+  it("requires super to continue as a call or property", () => {
+    const invalid = parse("class C extends Base { method(): void { super; } }", { lang: "ts" });
+    const valid = parse(
+      "class C extends Base { constructor() { super(); } method() { super.value; super[key]; } }",
+      { lang: "ts" },
+    );
+
+    expect(invalid.diagnostics).not.toEqual([]);
+    expect(invalid.program.type).toBe("Program");
+    expect(valid.diagnostics).toEqual([]);
+  });
+
   it("does not join exported async functions across a line break", () => {
     const named = parse("export async/*\n*/function split() {}");
     expect(named.diagnostics).not.toEqual([]);
