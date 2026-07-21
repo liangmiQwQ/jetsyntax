@@ -2689,10 +2689,11 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_identifier_reference(&mut self) -> Result<ParsedNode, ParseError> {
-        let span = self.current_span();
+        let token = self.current;
+        let span = Self::token_span(token);
         if self.reports_ecmascript_early_errors()
             && self.context.grammar().async_function()
-            && self.static_property_name_matches(span, "await")
+            && self.identifier_name_matches(span, "await", token.flags.escaped())
         {
             self.error(
                 span,
@@ -2701,14 +2702,16 @@ impl<'s> Parser<'s> {
         }
         if self.reports_ecmascript_early_errors()
             && self.context.grammar().generator()
-            && self.static_property_name_matches(span, "yield")
+            && self.identifier_name_matches(span, "yield", token.flags.escaped())
         {
             self.error(
                 span,
                 "yield cannot be used as an identifier in a generator function",
             );
         }
-        if self.context.grammar().strict() && self.is_strict_reserved_identifier(span) {
+        if self.context.grammar().strict()
+            && self.is_strict_reserved_identifier(span, token.flags.escaped())
+        {
             self.error(
                 span,
                 "strict mode reserved word cannot be used as an identifier",
@@ -2809,8 +2812,10 @@ impl<'s> Parser<'s> {
         binding_kind: BindingKind,
     ) -> Result<ParsedNode, ParseError> {
         let token = self.take();
+        let span = Self::token_span(token);
+        let escaped = token.flags.escaped();
         if !Self::is_identifier_name(token.kind) {
-            self.error(Self::token_span(token), "expected a binding identifier");
+            self.error(span, "expected a binding identifier");
         }
         let name_text = self
             .source
@@ -2818,35 +2823,24 @@ impl<'s> Parser<'s> {
             .unwrap_or_default();
         if self.reports_ecmascript_early_errors()
             && self.context.grammar().async_function()
-            && self.static_property_name_matches(Self::token_span(token), "await")
+            && self.identifier_name_matches(span, "await", escaped)
         {
-            self.error(
-                Self::token_span(token),
-                "await cannot be bound in an async function",
-            );
+            self.error(span, "await cannot be bound in an async function");
         }
         if self.reports_ecmascript_early_errors()
             && self.context.grammar().generator()
-            && self.static_property_name_matches(Self::token_span(token), "yield")
+            && self.identifier_name_matches(span, "yield", escaped)
         {
-            self.error(
-                Self::token_span(token),
-                "yield cannot be bound in a generator function",
-            );
+            self.error(span, "yield cannot be bound in a generator function");
         }
         if self.context.grammar().strict()
             && (matches!(name_text, "eval" | "arguments")
-                || self.is_strict_reserved_identifier(Self::token_span(token)))
+                || self.is_strict_reserved_identifier(span, escaped))
         {
-            self.error(
-                Self::token_span(token),
-                "identifier cannot be bound in strict mode",
-            );
+            self.error(span, "identifier cannot be bound in strict mode");
         }
-        let _ = self
-            .context
-            .declare_binding(name_text, binding_kind, Self::token_span(token));
-        let name = self.tape.push_source_slice(Self::token_span(token))?;
+        let _ = self.context.declare_binding(name_text, binding_kind, span);
+        let name = self.tape.push_source_slice(span)?;
         if self.options.language.is_typescript() && self.eat(TokenKind::Colon).is_some() {
             let annotation = self.parse_type_annotation()?;
             let optional = self.tape.push_bool(false)?;
@@ -2856,7 +2850,7 @@ impl<'s> Parser<'s> {
                 &[name, annotation.value(), optional],
             );
         }
-        self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name])
+        self.node(NodeTag::IDENTIFIER, span, &[name])
     }
 
     // Array and object pattern recovery is mutually recursive and benefits from staying adjacent.
@@ -3006,7 +3000,7 @@ impl<'s> Parser<'s> {
             .unwrap_or_default();
         if self.context.grammar().strict()
             && (matches!(name_text, "eval" | "arguments")
-                || self.is_strict_reserved_identifier(span))
+                || self.is_strict_reserved_identifier(span, name_text.contains('\\')))
         {
             self.error(span, "identifier cannot be bound in strict mode");
         }
@@ -4089,9 +4083,17 @@ impl<'s> Parser<'s> {
         decode_static_property_name(raw).is_some_and(|name| name == expected)
     }
 
-    fn is_strict_reserved_identifier(&self, span: Span) -> bool {
+    fn identifier_name_matches(&self, span: Span, expected: &str, escaped: bool) -> bool {
         let raw = self.source_text(span);
-        if !raw.contains('\\') {
+        if !escaped {
+            return raw == expected;
+        }
+        decode_static_property_name(raw).is_some_and(|name| name == expected)
+    }
+
+    fn is_strict_reserved_identifier(&self, span: Span, escaped: bool) -> bool {
+        let raw = self.source_text(span);
+        if !escaped {
             return matches!(
                 raw,
                 "implements"

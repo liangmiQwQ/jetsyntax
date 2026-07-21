@@ -1527,6 +1527,42 @@ fn parser_should_diagnose_strict_reserved_identifier_references() {
     allowed.tape.validate().expect("valid allowed tape");
 }
 
+/// Direct bindings reuse lexer escape metadata while object shorthands retain span-based checks.
+#[test]
+fn parser_should_diagnose_strict_reserved_bindings_with_and_without_escapes() {
+    let options = ParseOptions {
+        language: Language::JavaScript,
+        source_kind: SourceKind::Module,
+        semantic_errors: true,
+        ..ParseOptions::default()
+    };
+    for source in [
+        "let implements;",
+        "let impl\\u0065ments;",
+        "const { static } = source;",
+        "const { st\\u0061tic } = source;",
+    ] {
+        let parsed = parse(source, options).expect(source);
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect(source);
+    }
+
+    for source in [
+        "let ordinary;",
+        "let ord\\u0069nary;",
+        "const { ordinary } = source;",
+        "const { ord\\u0069nary } = source;",
+    ] {
+        let parsed = parse(source, options).expect(source);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect(source);
+    }
+}
+
 /// Generator methods retain binding and constructor early errors.
 #[test]
 fn parser_should_diagnose_generator_method_early_errors() {
