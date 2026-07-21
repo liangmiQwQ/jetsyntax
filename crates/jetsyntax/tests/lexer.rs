@@ -504,6 +504,87 @@ fn lexer_should_track_line_breaks_across_whitespace_and_comments() {
     }
 }
 
+/// ASCII space runs retain token spans and compose with every other trivia family.
+///
+/// Spec: whitespace and comments are omitted before tokenization, while only line terminators set
+/// the next token's line-break flag.
+#[test]
+fn lexer_should_skip_ascii_space_runs_before_other_trivia() {
+    let cases = [
+        ("   \tvalue", false),
+        ("   \u{b}value", false),
+        ("   \u{c}value", false),
+        ("   \nvalue", true),
+        ("   \rvalue", true),
+        ("   \r\nvalue", true),
+        ("   // comment\nvalue", true),
+        ("   /* same line */value", false),
+        ("   /* first\nsecond */value", true),
+        ("   \u{a0}value", false),
+        ("   \u{2003}value", false),
+        ("   \u{2028}value", true),
+        ("   \u{2029}value", true),
+    ];
+
+    for (source, expected_line_break) in cases {
+        let mut lexer = Lexer::new(source);
+        let token = lexer.next_token();
+        let start = source.len() - "value".len();
+        assert_eq!(token.kind, TokenKind::Identifier, "{source:?}");
+        assert_eq!(token.start as usize, start, "{source:?}");
+        assert_eq!(token.end as usize, source.len(), "{source:?}");
+        assert_eq!(lexer.source_text(token), "value", "{source:?}");
+        assert_eq!(
+            token.flags.line_break_before(),
+            expected_line_break,
+            "{source:?}"
+        );
+        assert!(
+            lexer.errors().is_empty(),
+            "{source:?}: {:?}",
+            lexer.errors()
+        );
+    }
+}
+
+/// Long ASCII space runs stop at exact byte boundaries, including at end of input.
+///
+/// Spec: skipped trivia does not widen the following token or create diagnostics at EOF.
+#[test]
+fn lexer_should_bound_long_ascii_space_runs() {
+    let spaces = " ".repeat(16_384);
+    let source = format!("{spaces}\u{3c0}");
+    let mut lexer = Lexer::new(&source);
+    let identifier = lexer.next_token();
+    assert_eq!(identifier.kind, TokenKind::Identifier);
+    assert_eq!(identifier.start as usize, spaces.len());
+    assert_eq!(identifier.end as usize, source.len());
+    assert_eq!(lexer.source_text(identifier), "\u{3c0}");
+    assert!(!identifier.flags.line_break_before());
+    assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+    assert!(lexer.errors().is_empty(), "{:?}", lexer.errors());
+
+    let mut eof_lexer = Lexer::new(&spaces);
+    let eof = eof_lexer.next_token();
+    assert_eq!(eof.kind, TokenKind::Eof);
+    assert_eq!(eof.start as usize, spaces.len());
+    assert_eq!(eof.end as usize, spaces.len());
+    assert!(!eof.flags.line_break_before());
+    assert!(eof_lexer.errors().is_empty());
+
+    let recovery_source = "   /* unterminated";
+    let mut recovery_lexer = Lexer::new(recovery_source);
+    let recovery = recovery_lexer.next_token();
+    assert_eq!(recovery.kind, TokenKind::Eof);
+    assert_eq!(recovery.start as usize, recovery_source.len());
+    assert_eq!(recovery_lexer.errors().len(), 1);
+    assert_eq!(recovery_lexer.errors()[0].start, 3);
+    assert_eq!(
+        recovery_lexer.errors()[0].end as usize,
+        recovery_source.len()
+    );
+}
+
 /// Unicode line and paragraph separators terminate line comments and count inside block comments.
 ///
 /// Spec: LF, CR, LS, and PS are all ECMAScript `LineTerminator` code points in comment trivia.

@@ -505,8 +505,11 @@ impl<'s> Lexer<'s> {
             false
         };
         loop {
+            while self.position < self.bytes.len() && self.bytes[self.position] == b' ' {
+                self.position += 1;
+            }
             match self.bytes.get(self.position).copied() {
-                Some(b' ' | b'\t' | 0x0B | 0x0C) => self.position += 1,
+                Some(b'\t' | 0x0B | 0x0C) => self.position += 1,
                 Some(b'\n') => {
                     self.position += 1;
                     line_break = true;
