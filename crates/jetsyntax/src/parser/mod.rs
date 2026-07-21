@@ -2793,6 +2793,7 @@ impl<'s> Parser<'s> {
                 properties.push(property.value());
             } else {
                 let property_start = self.current.start;
+                let property_name_escaped = self.current.flags.escaped();
                 let async_token = if self.current.kind == TokenKind::Async {
                     Some(self.take())
                 } else {
@@ -2849,7 +2850,12 @@ impl<'s> Parser<'s> {
                     let value = self.parse_assignment_expression(true)?;
                     (value, false, false, self.last_assignment_target)
                 } else {
-                    if !property_name.shorthand {
+                    if property_name.shorthand {
+                        self.report_identifier_reference_early_errors(
+                            key.span,
+                            property_name_escaped,
+                        );
+                    } else {
                         self.error(key.span, "property name requires `:` or method parameters");
                     }
                     let mut value = self.identifier_from_span(key.span)?;
@@ -3143,28 +3149,9 @@ impl<'s> Parser<'s> {
     fn parse_identifier_reference(&mut self) -> Result<ParsedNode, ParseError> {
         let token = self.current;
         let span = Self::token_span(token);
-        let await_reserved = self.context.grammar().async_function()
-            || self.context.grammar().module()
-            || self.context.grammar().class() && !self.context.grammar().function();
-        if self.reports_ecmascript_early_errors()
-            && await_reserved
-            && self.identifier_name_matches(span, "await", token.flags.escaped())
-        {
-            self.error(
-                span,
-                "await cannot be used as an identifier in an async function",
-            );
-        }
-        if self.reports_ecmascript_early_errors()
-            && self.context.grammar().generator()
-            && self.identifier_name_matches(span, "yield", token.flags.escaped())
-        {
-            self.error(
-                span,
-                "yield cannot be used as an identifier in a generator function",
-            );
-        }
-        if self.context.grammar().strict()
+        self.report_identifier_reference_early_errors(span, token.flags.escaped());
+        if !self.reports_ecmascript_early_errors()
+            && self.context.grammar().strict()
             && self.is_strict_reserved_identifier(span, token.flags.escaped())
         {
             self.error(
@@ -3183,6 +3170,38 @@ impl<'s> Parser<'s> {
             self.last_assignment_target = AssignmentTargetType::RestrictedIdentifier;
         }
         Ok(identifier)
+    }
+
+    fn report_identifier_reference_early_errors(&mut self, span: Span, escaped: bool) {
+        if !self.reports_ecmascript_early_errors() {
+            return;
+        }
+        if self.is_escaped_reserved_identifier(span, escaped) {
+            self.error(span, "reserved word cannot be used as an identifier");
+        }
+        let await_reserved = self.context.grammar().async_function()
+            || self.context.grammar().module()
+            || self.context.grammar().class() && !self.context.grammar().function();
+        if await_reserved && self.identifier_name_matches(span, "await", escaped) {
+            self.error(
+                span,
+                "await cannot be used as an identifier in an async function",
+            );
+        }
+        if self.context.grammar().generator()
+            && self.identifier_name_matches(span, "yield", escaped)
+        {
+            self.error(
+                span,
+                "yield cannot be used as an identifier in a generator function",
+            );
+        }
+        if self.context.grammar().strict() && self.is_strict_reserved_identifier(span, escaped) {
+            self.error(
+                span,
+                "strict mode reserved word cannot be used as an identifier",
+            );
+        }
     }
 
     fn parse_member_property(&mut self) -> Result<ParsedNode, ParseError> {
@@ -3304,6 +3323,11 @@ impl<'s> Parser<'s> {
         let await_reserved = self.context.grammar().async_function()
             || self.context.grammar().module()
             || self.context.grammar().class() && !self.context.grammar().function();
+        if self.reports_ecmascript_early_errors()
+            && self.is_escaped_reserved_identifier(span, escaped)
+        {
+            self.error(span, "reserved word cannot be used as a binding identifier");
+        }
         if self.reports_ecmascript_early_errors()
             && await_reserved
             && self.identifier_name_matches(span, "await", escaped)
@@ -3504,9 +3528,15 @@ impl<'s> Parser<'s> {
             .source
             .get(span.start as usize..span.end as usize)
             .unwrap_or_default();
+        let escaped = name_text.contains('\\');
+        if self.reports_ecmascript_early_errors()
+            && self.is_escaped_reserved_identifier(span, escaped)
+        {
+            self.error(span, "reserved word cannot be used as a binding identifier");
+        }
         if self.context.grammar().strict()
             && (matches!(name_text, "eval" | "arguments")
-                || self.is_strict_reserved_identifier(span, name_text.contains('\\')))
+                || self.is_strict_reserved_identifier(span, escaped))
         {
             self.error(span, "identifier cannot be bound in strict mode");
         }
@@ -4631,6 +4661,52 @@ impl<'s> Parser<'s> {
             return raw == expected;
         }
         decode_static_property_name(raw).is_some_and(|name| name == expected)
+    }
+
+    fn is_escaped_reserved_identifier(&self, span: Span, escaped: bool) -> bool {
+        // Escaped keywords stay lexer identifiers so legal IdentifierName positions can accept them.
+        escaped
+            && decode_static_property_name(self.source_text(span)).is_some_and(|name| {
+                matches!(
+                    name.as_str(),
+                    "break"
+                        | "case"
+                        | "catch"
+                        | "class"
+                        | "const"
+                        | "continue"
+                        | "debugger"
+                        | "default"
+                        | "delete"
+                        | "do"
+                        | "else"
+                        | "enum"
+                        | "export"
+                        | "extends"
+                        | "false"
+                        | "finally"
+                        | "for"
+                        | "function"
+                        | "if"
+                        | "import"
+                        | "in"
+                        | "instanceof"
+                        | "new"
+                        | "null"
+                        | "return"
+                        | "super"
+                        | "switch"
+                        | "this"
+                        | "throw"
+                        | "true"
+                        | "try"
+                        | "typeof"
+                        | "var"
+                        | "void"
+                        | "while"
+                        | "with"
+                )
+            })
     }
 
     fn is_strict_reserved_identifier(&self, span: Span, escaped: bool) -> bool {

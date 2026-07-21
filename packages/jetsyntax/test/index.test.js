@@ -188,6 +188,41 @@ describe("parse", () => {
     }
   });
 
+  it("diagnoses escaped reserved identifiers only in reference and binding positions", () => {
+    for (
+      const source of [
+        "br\\u0065ak;",
+        "var br\\u{65}ak;",
+        "tru\\u0065: statement;",
+        "({ br\\u0065ak } = source);",
+        "({ br\\u0065ak }) => {};",
+        "'use strict'; ({ impl\\u0065ments });",
+        "async function f() { ({ aw\\u0061it }); }",
+        "function* f() { ({ yi\\u0065ld }); }",
+        "class C { static field = { await }; }",
+        "function f() { n\\u0065w.target; }",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true, sourceType: "script" });
+
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+
+    const allowed = parse(
+      "const object = { br\\u0065ak: 1 }; object.br\\u0065ak; class C { br\\u0065ak() {} } const { br\\u0065ak: value } = object;",
+      { semanticErrors: true, sourceType: "script" },
+    );
+    expect(allowed.diagnostics).toEqual([]);
+
+    const syntaxOnly = parse("let br\\u0065ak = 1; ({ br\\u0065ak });", {
+      lang: "ts",
+      semanticErrors: false,
+      sourceType: "script",
+    });
+    expect(syntaxOnly.diagnostics).toEqual([]);
+  });
+
   it("materializes AST output containing braced Unicode identifier escapes", () => {
     const result = parse("<\\u{2F804}></\\u{2F804}>", { lang: "jsx", semanticErrors: true });
 

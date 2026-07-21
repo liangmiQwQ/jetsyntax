@@ -1975,6 +1975,59 @@ fn parser_should_diagnose_strict_reserved_bindings_with_and_without_escapes() {
     }
 }
 
+/// Escaped reserved spellings remain lexical identifiers until their reference or binding context
+/// applies ECMAScript early errors.
+#[test]
+fn parser_should_diagnose_escaped_reserved_identifiers_contextually() {
+    let options = ParseOptions {
+        language: Language::JavaScript,
+        source_kind: SourceKind::Script,
+        semantic_errors: true,
+        ..ParseOptions::default()
+    };
+    for source in [
+        "br\\u0065ak;",
+        "var br\\u{65}ak;",
+        "tru\\u0065: statement;",
+        "({ br\\u0065ak } = source);",
+        "({ br\\u0065ak }) => {};",
+        "'use strict'; ({ impl\\u0065ments });",
+        "async function f() { ({ aw\\u0061it }); }",
+        "function* f() { ({ yi\\u0065ld }); }",
+        "class C { static field = { await }; }",
+        "function f() { n\\u0065w.target; }",
+    ] {
+        let parsed = parse(source, options).expect(source);
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect(source);
+    }
+
+    let allowed = parse(
+        "const object = { br\\u0065ak: 1 }; object.br\\u0065ak; class C { br\\u0065ak() {} } const { br\\u0065ak: value } = object;",
+        options,
+    )
+    .expect("allowed escaped IdentifierName positions");
+    assert!(allowed.diagnostics.is_empty(), "{:#?}", allowed.diagnostics);
+    allowed.tape.validate().expect("valid allowed tape");
+
+    let syntax_only = parse(
+        "let br\\u0065ak = 1; ({ br\\u0065ak });",
+        ParseOptions {
+            language: Language::TypeScript,
+            source_kind: SourceKind::Script,
+            semantic_errors: false,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("syntax-only TypeScript parsing");
+    assert!(
+        syntax_only.diagnostics.is_empty(),
+        "{:#?}",
+        syntax_only.diagnostics
+    );
+    syntax_only.tape.validate().expect("valid syntax-only tape");
+}
+
 /// Generator methods retain binding and constructor early errors.
 #[test]
 fn parser_should_diagnose_generator_method_early_errors() {
