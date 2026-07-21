@@ -270,7 +270,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
     throw new Error("JetSyntax zero-copy string-pool decoding requires a little-endian host");
   }
 
-  const sourceOffsets = makeSourceOffsets(source, header.sourceBytes);
+  const sourceOffsets = makeSourceOffsets(source, header.sourceBytes, trusted);
   const poolBytes = new Uint8Array(
     tape.buffer,
     tape.byteOffset + header.recordEnd * Uint32Array.BYTES_PER_ELEMENT,
@@ -1130,13 +1130,15 @@ function requireWords(offset, size, recordEnd) {
   }
 }
 
-function makeSourceOffsets(source, byteLength) {
-  if (source.length === byteLength && !/[^\x00-\x7F]/u.test(source)) return null;
+function makeSourceOffsets(source, byteLength, trusted) {
+  // Native output was built from this source; equal UTF-8 and UTF-16 lengths therefore prove it is ASCII.
+  if (trusted && source.length === byteLength) return null;
 
   const encodedByteLength = new TextEncoder().encode(source).length;
   if (encodedByteLength !== byteLength) {
     throw new Error("source UTF-8 length does not match JetSyntax input");
   }
+  if (source.length === byteLength) return null;
   const utf16 = new Uint32Array(byteLength + 1);
   const boundaries = new Uint8Array(byteLength + 1);
   let byteOffset = 0;

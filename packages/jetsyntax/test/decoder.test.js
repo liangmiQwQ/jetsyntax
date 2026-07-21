@@ -170,6 +170,42 @@ describe("decodeTape", () => {
     );
   });
 
+  it("uses equal UTF-8 and UTF-16 lengths only for ASCII input", () => {
+    for (
+      const [source, ascii] of [
+        ["const answer = 42;", true],
+        ["\u00E9", false],
+        ["\u{1F4A5}", false],
+        ["\uD800", false],
+      ]
+    ) {
+      const byteLength = new TextEncoder().encode(source).length;
+      expect(byteLength === source.length).toBe(ascii);
+
+      const tape = new HandcraftedTape();
+      const body = tape.list([]);
+      const sourceType = tape.integer(0);
+      const program = tape.node(1, 0, byteLength, [body, sourceType]);
+      const encoded = tape.finish(program);
+      const decoded = decodeTape(source, encoded, { range: true });
+
+      expect(decodeTrustedTape(source, encoded, { range: true })).toEqual(decoded);
+      expect(decoded).toMatchObject({ start: 0, end: source.length, range: [0, source.length] });
+    }
+  });
+
+  it("rejects a forged ASCII-length header for non-ASCII input", () => {
+    const source = "\u00E9";
+    const tape = new HandcraftedTape();
+    const body = tape.list([]);
+    const sourceType = tape.integer(0);
+    const program = tape.node(1, 0, source.length, [body, sourceType]);
+
+    expect(() => decodeTape(source, tape.finish(program))).toThrow(
+      "source UTF-8 length does not match JetSyntax input",
+    );
+  });
+
   it("decodes the emitted JSX schema", () => {
     const source = "<x />";
     const tape = new HandcraftedTape();
