@@ -168,6 +168,26 @@ describe("parse", () => {
     ]);
   });
 
+  it("diagnoses direct import call new callees while preserving recovered ESTree", () => {
+    const recovered = parse("new import(\"package\").then;");
+
+    expect(recovered.diagnostics).not.toEqual([]);
+    expect(recovered.program.body[0].expression).toMatchObject({
+      type: "NewExpression",
+      callee: {
+        type: "MemberExpression",
+        object: {
+          type: "ImportExpression",
+          source: { type: "Literal", value: "package" },
+        },
+      },
+    });
+
+    for (const source of ["new (import('package'));", "new import.meta();"]) {
+      expect(parse(source, { sourceType: "module" }).diagnostics, source).toEqual([]);
+    }
+  });
+
   it("materializes AST output containing braced Unicode identifier escapes", () => {
     const result = parse("<\\u{2F804}></\\u{2F804}>", { lang: "jsx", semanticErrors: true });
 

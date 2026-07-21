@@ -505,6 +505,44 @@ fn parser_should_accept_zero_parameter_arrow_functions() {
     assert_clean_cases(&cases);
 }
 
+/// Import calls need parentheses before they can be used as `new` callees.
+#[test]
+fn parser_should_restrict_import_call_new_callees() {
+    assert_clean_cases(&[
+        GrammarCase::script(
+            "covered import call",
+            "new (import('package'));",
+            &[NodeTag::NEW_EXPRESSION, NodeTag::IMPORT_EXPRESSION],
+        ),
+        GrammarCase::module(
+            "import metadata",
+            "new import.meta();",
+            &[NodeTag::NEW_EXPRESSION, NodeTag::META_PROPERTY],
+        ),
+    ]);
+
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script(
+                "direct import call",
+                "new import('package');",
+                &[NodeTag::NEW_EXPRESSION, NodeTag::IMPORT_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "direct import call property",
+                "new import('package').then;",
+                &[NodeTag::NEW_EXPRESSION, NodeTag::IMPORT_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "direct import call trivia",
+                "new import/* comment */\n('package');",
+                &[NodeTag::NEW_EXPRESSION, NodeTag::IMPORT_EXPRESSION],
+            ),
+        ],
+        false,
+    );
+}
+
 /// Line terminators before `=>` stay invalid, and truncated bodies retain a recoverable tape.
 #[test]
 fn parser_should_recover_invalid_zero_parameter_arrow_functions() {

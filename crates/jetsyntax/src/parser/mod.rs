@@ -2892,7 +2892,20 @@ impl<'s> Parser<'s> {
                 &[meta.value(), property.value()],
             );
         }
+        let direct_import_call = if self.current.kind == TokenKind::Import {
+            let mut lookahead = Lexer::new(self.source);
+            lookahead.set_position(self.current.end as usize);
+            lookahead.next_token().kind == TokenKind::LeftParen
+        } else {
+            false
+        };
         let callee = self.parse_postfix_expression_until_call(true)?;
+        if direct_import_call {
+            self.error(
+                callee.span,
+                "import calls cannot be used directly as new callees",
+            );
+        }
         let arguments = if self.eat(TokenKind::LeftParen).is_some() {
             let arguments = self.parse_argument_list()?;
             self.expect(TokenKind::RightParen);
