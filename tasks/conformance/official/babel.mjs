@@ -76,7 +76,7 @@ export async function loadBabel(root) {
           source: await readSource(join(taskRoot, input)),
           options: {
             allowReturnOutsideFunction: options.allowReturnOutsideFunction === true,
-            lang: languageFor(input, pluginNames),
+            lang: languageFor(input, options.plugins ?? []),
             preserveParens: true,
             semanticErrors: true,
             sourceType: options.sourceType ?? "script",
@@ -125,8 +125,11 @@ function extensionReasons(input, options, pluginNames) {
 
 function languageFor(input, plugins) {
   const extension = extname(input).toLowerCase();
-  const typescript = plugins.includes("typescript") || [".ts", ".tsx", ".mts", ".cts"].includes(extension);
-  const jsx = plugins.includes("jsx") || extension === ".jsx" || extension === ".tsx";
+  const pluginNames = plugins.map((plugin) => String(Array.isArray(plugin) ? plugin[0] : plugin));
+  const typescript = pluginNames.includes("typescript") || [".ts", ".tsx", ".mts", ".cts"].includes(extension);
+  const dts = plugins.some((plugin) => Array.isArray(plugin) && plugin[0] === "typescript" && plugin[1]?.dts === true);
+  const jsx = pluginNames.includes("jsx") || extension === ".jsx" || extension === ".tsx";
+  if (dts) return "dts";
   if (typescript) return jsx ? "tsx" : "ts";
   return jsx ? "jsx" : "js";
 }

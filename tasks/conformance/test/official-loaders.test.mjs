@@ -34,18 +34,28 @@ test("official loaders preserve suite outcomes and explicit exclusions", async (
   await babelFixture(babelRoot, "core/syntax/recovery", "let value = ;", { output: { errors: ["SyntaxError"] } });
   await babelFixture(babelRoot, "core/syntax/fatal", "let value = ;", { options: { throws: "Unexpected token" } });
   await babelFixture(babelRoot, "core/syntax/.disabled", "let value = 1;", { output: {} });
+  await babelFixture(babelRoot, "typescript/dts/implementation", "function foo(): any {}", {
+    options: { plugins: [["typescript", { dts: true }]] },
+    output: { errors: ["A function implementation cannot be declared in an ambient context."] },
+  });
+  await babelFixture(babelRoot, "typescript/syntax/function", "function foo(): any {}", {
+    options: { plugins: ["typescript"] },
+    output: {},
+  });
   await write(join(babelRoot, "core/syntax/nested/child"), "input.js", "let value = 1;");
   const babel = await loadBabel(babelRoot);
   assert.deepEqual(babel.inventory, {
-    enabledFixtures: 4,
+    enabledFixtures: 6,
     upstreamDisabled: 1,
     upstreamUndiscovered: 1,
-    clean: 2,
+    clean: 3,
     fatal: 1,
-    recovery: 1,
-    executions: 4,
+    recovery: 2,
+    executions: 6,
   });
   assert.equal(babel.extensions.unsupportedReasons["plugin:flow"], 1);
+  assert.equal(babel.cases.find((testCase) => testCase.id.includes("typescript/dts"))?.options.lang, "dts");
+  assert.equal(babel.cases.find((testCase) => testCase.id.includes("typescript/syntax"))?.options.lang, "ts");
 
   const typeScriptRoot = join(root, "typescript", "tests", "cases", "compiler");
   await write(
