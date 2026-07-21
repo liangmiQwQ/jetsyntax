@@ -56,6 +56,9 @@ const NODE_FLAGS_MASK: u32 = 0x00FF_0000;
 const NODE_TAG_MASK: u32 = 0x0000_FFFF;
 const INLINE_U32_MASK: u32 = 0x0FFF_FFFF;
 
+const MAX_INITIAL_WORD_CAPACITY: usize = 16 * 1024 * 1024;
+const MAX_INITIAL_RECORD_CAPACITY: usize = 4 * 1024 * 1024;
+
 const KIND_NODE: u32 = 1;
 const KIND_LIST: u32 = 2;
 const KIND_NULL: u32 = 3;
@@ -368,13 +371,17 @@ pub struct TapeBuilder {
 impl TapeBuilder {
     #[must_use]
     pub fn new(source_bytes: u32) -> Self {
+        let source_len = source_bytes as usize;
+        let mut words =
+            Vec::with_capacity(HEADER_WORDS + source_len.min(MAX_INITIAL_WORD_CAPACITY));
+        words.resize(HEADER_WORDS, 0);
         Self {
             id: NEXT_BUILDER_ID.fetch_add(1, Ordering::Relaxed),
             next_record_id: 1,
             source_bytes,
-            words: vec![0; HEADER_WORDS],
+            words,
             string_pool: Vec::new(),
-            records: Vec::new(),
+            records: Vec::with_capacity((source_len / 4).min(MAX_INITIAL_RECORD_CAPACITY)),
             node_count: 0,
         }
     }
