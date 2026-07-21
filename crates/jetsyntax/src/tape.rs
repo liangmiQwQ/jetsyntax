@@ -196,6 +196,35 @@ impl NodeTag {
     pub const TS_AS_EXPRESSION: Self = Self(528);
     pub const TS_SATISFIES_EXPRESSION: Self = Self(529);
     pub const TS_NON_NULL_EXPRESSION: Self = Self(530);
+    pub const TS_PARENTHESIZED_TYPE: Self = Self(531);
+    pub const TS_INDEXED_ACCESS_TYPE: Self = Self(532);
+    pub const TS_TYPE_OPERATOR: Self = Self(533);
+    pub const TS_TYPE_PARAMETER: Self = Self(534);
+    pub const TS_PROPERTY_SIGNATURE: Self = Self(535);
+    pub const TS_METHOD_SIGNATURE: Self = Self(536);
+    pub const TS_ENUM_MEMBER: Self = Self(537);
+    pub const TS_NAMED_TUPLE_MEMBER: Self = Self(538);
+    pub const TS_INTERFACE_BODY: Self = Self(539);
+    pub const TS_MODULE_BLOCK: Self = Self(540);
+    pub const TS_TYPE_PARAMETER_DECLARATION: Self = Self(541);
+    pub const TS_TYPE_PARAMETER_INSTANTIATION: Self = Self(542);
+    pub const TS_ANY_KEYWORD: Self = Self(543);
+    pub const TS_BIGINT_KEYWORD: Self = Self(544);
+    pub const TS_BOOLEAN_KEYWORD: Self = Self(545);
+    pub const TS_INTRINSIC_KEYWORD: Self = Self(546);
+    pub const TS_NEVER_KEYWORD: Self = Self(547);
+    pub const TS_NUMBER_KEYWORD: Self = Self(548);
+    pub const TS_OBJECT_KEYWORD: Self = Self(549);
+    pub const TS_STRING_KEYWORD: Self = Self(550);
+    pub const TS_SYMBOL_KEYWORD: Self = Self(551);
+    pub const TS_THIS_TYPE: Self = Self(552);
+    pub const TS_UNDEFINED_KEYWORD: Self = Self(553);
+    pub const TS_UNKNOWN_KEYWORD: Self = Self(554);
+    pub const TS_VOID_KEYWORD: Self = Self(555);
+    pub const TS_INFER_TYPE: Self = Self(556);
+    pub const TS_ENUM_BODY: Self = Self(557);
+    pub const TS_INTERFACE_HERITAGE: Self = Self(558);
+    pub const TS_NULL_KEYWORD: Self = Self(559);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {

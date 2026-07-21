@@ -110,8 +110,50 @@ const NODE_SCHEMAS = new Map([
   [268, ["JSXEmptyExpression", []]],
   [269, ["JSXText", ["raw"]]],
   [512, ["TSTypeAnnotation", ["typeAnnotation"]]],
-  [513, ["TSTypeReference", ["typeName", "typeParameters"]]],
+  [513, ["TSTypeReference", ["typeName", "typeArguments"]]],
   [514, ["TSQualifiedName", ["left", "right"]]],
+  [515, ["TSUnionType", ["types"]]],
+  [516, ["TSIntersectionType", ["types"]]],
+  [517, ["TSLiteralType", ["literal"]]],
+  [518, ["TSArrayType", ["elementType"]]],
+  [519, ["TSTupleType", ["elementTypes"]]],
+  [520, ["TSFunctionType", ["typeParameters", "params", "returnType"]]],
+  [521, ["TSConditionalType", ["checkType", "extendsType", "trueType", "falseType"]]],
+  [522, ["TSMappedType", ["key", "constraint", "nameType", "typeAnnotation", "readonly", "optional"]]],
+  [523, ["TSTypeLiteral", ["members"]]],
+  [524, ["TSInterfaceDeclaration", ["id", "typeParameters", "extends", "body"]]],
+  [525, ["TSTypeAliasDeclaration", ["id", "typeParameters", "typeAnnotation"]]],
+  [526, ["TSEnumDeclaration", ["id", "body", "const", "declare"]]],
+  [527, ["TSModuleDeclaration", ["id", "body", "declare", "kind"]]],
+  [531, ["TSParenthesizedType", ["typeAnnotation"]]],
+  [532, ["TSIndexedAccessType", ["objectType", "indexType"]]],
+  [533, ["TSTypeOperator", ["operator", "typeAnnotation"]]],
+  [534, ["TSTypeParameter", ["name", "const", "in", "out", "constraint", "default"]]],
+  [535, ["TSPropertySignature", ["key", "typeAnnotation", "computed", "optional", "readonly"]]],
+  [536, ["TSMethodSignature", ["key", "typeParameters", "params", "returnType", "computed", "optional"]]],
+  [537, ["TSEnumMember", ["id", "initializer"]]],
+  [538, ["TSNamedTupleMember", ["label", "elementType", "optional"]]],
+  [539, ["TSInterfaceBody", ["body"]]],
+  [540, ["TSModuleBlock", ["body"]]],
+  [541, ["TSTypeParameterDeclaration", ["params"]]],
+  [542, ["TSTypeParameterInstantiation", ["params"]]],
+  [543, ["TSAnyKeyword", []]],
+  [544, ["TSBigIntKeyword", []]],
+  [545, ["TSBooleanKeyword", []]],
+  [546, ["TSIntrinsicKeyword", []]],
+  [547, ["TSNeverKeyword", []]],
+  [548, ["TSNumberKeyword", []]],
+  [549, ["TSObjectKeyword", []]],
+  [550, ["TSStringKeyword", []]],
+  [551, ["TSSymbolKeyword", []]],
+  [552, ["TSThisType", []]],
+  [553, ["TSUndefinedKeyword", []]],
+  [554, ["TSUnknownKeyword", []]],
+  [555, ["TSVoidKeyword", []]],
+  [556, ["TSInferType", ["typeParameter"]]],
+  [557, ["TSEnumBody", ["members"]]],
+  [558, ["TSInterfaceHeritage", ["expression", "typeArguments"]]],
+  [559, ["TSNullKeyword", []]],
 ]);
 
 const UNSUPPORTED_NODE_TAGS = new Map([
@@ -122,19 +164,6 @@ const UNSUPPORTED_NODE_TAGS = new Map([
   [263, "JSXOpeningFragment"],
   [264, "JSXClosingFragment"],
   [270, "JSXSpreadChild"],
-  [515, "TSUnionType"],
-  [516, "TSIntersectionType"],
-  [517, "TSLiteralType"],
-  [518, "TSArrayType"],
-  [519, "TSTupleType"],
-  [520, "TSFunctionType"],
-  [521, "TSConditionalType"],
-  [522, "TSMappedType"],
-  [523, "TSTypeLiteral"],
-  [524, "TSInterfaceDeclaration"],
-  [525, "TSTypeAliasDeclaration"],
-  [526, "TSEnumDeclaration"],
-  [527, "TSModuleDeclaration"],
   [528, "TSAsExpression"],
   [529, "TSSatisfiesExpression"],
   [530, "TSNonNullExpression"],
@@ -194,6 +223,7 @@ const PROPERTY_KINDS = ["init", "get", "set"];
 const METHOD_KINDS = ["method", "get", "set", "constructor"];
 const IMPORT_EXPORT_KINDS = ["value", "type", "typeof"];
 const SOURCE_TYPES = ["script", "module", "commonjs"];
+const TS_MODULE_KINDS = ["namespace", "module"];
 
 export function decodeTape(source, tape, options = {}) {
   if (!(tape instanceof Uint32Array)) {
@@ -629,9 +659,155 @@ export function decodeTape(source, tape, options = {}) {
       case 512:
         return { ...base, typeAnnotation: fields[0] };
       case 513:
-        return { ...base, typeName: fields[0], typeParameters: fields[1] };
+        return { ...base, typeName: fields[0], typeArguments: fields[1] };
       case 514:
         return { ...base, left: fields[0], right: fields[1] };
+      case 515:
+      case 516:
+        return { ...base, types: array(fields[0], tag) };
+      case 517:
+        return { ...base, literal: fields[0] };
+      case 518:
+        return { ...base, elementType: fields[0] };
+      case 519:
+        return { ...base, elementTypes: array(fields[0], tag) };
+      case 520:
+        return {
+          ...base,
+          typeParameters: fields[0],
+          params: array(fields[1], tag),
+          returnType: fields[2],
+        };
+      case 521:
+        return {
+          ...base,
+          checkType: fields[0],
+          extendsType: fields[1],
+          trueType: fields[2],
+          falseType: fields[3],
+        };
+      case 522:
+        return {
+          ...base,
+          key: fields[0],
+          constraint: fields[1],
+          nameType: fields[2],
+          typeAnnotation: fields[3],
+          ...(fields[4] === null ? {} : { readonly: boolean(fields[4], tag) }),
+          optional: boolean(fields[5], tag),
+        };
+      case 523:
+        return { ...base, members: array(fields[0], tag) };
+      case 524:
+        return {
+          ...base,
+          id: fields[0],
+          typeParameters: fields[1],
+          extends: array(fields[2], tag),
+          body: fields[3],
+          declare: false,
+        };
+      case 525:
+        return {
+          ...base,
+          id: fields[0],
+          typeParameters: fields[1],
+          typeAnnotation: fields[2],
+          declare: false,
+        };
+      case 526:
+        return {
+          ...base,
+          id: fields[0],
+          body: fields[1],
+          const: boolean(fields[2], tag),
+          declare: boolean(fields[3], tag),
+        };
+      case 527:
+        return {
+          ...base,
+          id: fields[0],
+          body: fields[1],
+          declare: boolean(fields[2], tag),
+          kind: enumValue(TS_MODULE_KINDS, fields[3], tag),
+        };
+      case 531:
+        return { ...base, typeAnnotation: fields[0] };
+      case 532:
+        return { ...base, objectType: fields[0], indexType: fields[1] };
+      case 533:
+        return { ...base, operator: string(fields[0], tag), typeAnnotation: fields[1] };
+      case 534:
+        return {
+          ...base,
+          name: fields[0],
+          const: boolean(fields[1], tag),
+          in: boolean(fields[2], tag),
+          out: boolean(fields[3], tag),
+          constraint: fields[4],
+          default: fields[5],
+        };
+      case 535:
+        return {
+          ...base,
+          key: fields[0],
+          typeAnnotation: fields[1],
+          computed: boolean(fields[2], tag),
+          optional: boolean(fields[3], tag),
+          readonly: boolean(fields[4], tag),
+          accessibility: null,
+          static: false,
+        };
+      case 536:
+        return {
+          ...base,
+          key: fields[0],
+          typeParameters: fields[1],
+          params: array(fields[2], tag),
+          returnType: fields[3],
+          computed: boolean(fields[4], tag),
+          optional: boolean(fields[5], tag),
+          kind: "method",
+          accessibility: null,
+          readonly: false,
+          static: false,
+        };
+      case 537:
+        return { ...base, id: fields[0], initializer: fields[1] };
+      case 538:
+        return {
+          ...base,
+          label: fields[0],
+          elementType: fields[1],
+          optional: boolean(fields[2], tag),
+        };
+      case 539:
+      case 540:
+        return { ...base, body: array(fields[0], tag) };
+      case 541:
+      case 542:
+        return { ...base, params: array(fields[0], tag) };
+      case 543:
+      case 544:
+      case 545:
+      case 546:
+      case 547:
+      case 548:
+      case 549:
+      case 550:
+      case 551:
+      case 552:
+      case 553:
+      case 554:
+      case 555:
+      case 559:
+        return base;
+      case 556:
+        return { ...base, typeParameter: fields[0] };
+      case 557:
+        return { ...base, members: array(fields[0], tag) };
+      case 558:
+        return { ...base, expression: fields[0], typeArguments: fields[1] };
       default:
         throw new Error(`missing ESTree decoder for JetSyntax node tag ${tag}`);
     }

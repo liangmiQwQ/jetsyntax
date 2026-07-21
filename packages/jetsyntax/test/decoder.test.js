@@ -198,10 +198,262 @@ describe("decodeTape", () => {
             left: { name: "NS" },
             right: { name: "Type" },
           },
-          typeParameters: null,
+          typeArguments: null,
         },
       },
     });
+  });
+
+  it("decodes compound TypeScript type and declaration records", () => {
+    const tape = new HandcraftedTape();
+    const aliasId = tape.node(2, 0, 0, [tape.string("Shape")]);
+    const typeParameterName = tape.node(2, 0, 0, [tape.string("T")]);
+    const typeParameter = tape.node(534, 0, 0, [
+      typeParameterName,
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.null(),
+      tape.null(),
+    ]);
+    const typeParameters = tape.node(541, 0, 0, [tape.list([typeParameter])]);
+
+    const objectName = tape.node(2, 0, 0, [tape.string("T")]);
+    const objectType = tape.node(513, 0, 0, [objectName, tape.null()]);
+    const indexType = tape.node(548, 0, 0, []);
+    const indexed = tape.node(532, 0, 0, [objectType, indexType]);
+    const operator = tape.node(533, 0, 0, [tape.string("readonly"), indexed]);
+    const parenthesized = tape.node(531, 0, 0, [operator]);
+    const label = tape.node(2, 0, 0, [tape.string("value")]);
+    const tupleMember = tape.node(538, 0, 0, [label, parenthesized, tape.boolean(true)]);
+    const tuple = tape.node(519, 0, 0, [tape.list([tupleMember])]);
+    const propertyAnnotation = tape.node(512, 0, 0, [tuple]);
+    const propertyKey = tape.node(2, 0, 0, [tape.string("items")]);
+    const property = tape.node(535, 0, 0, [
+      propertyKey,
+      propertyAnnotation,
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.boolean(true),
+    ]);
+
+    const returnName = tape.node(2, 0, 0, [tape.string("Promise")]);
+    const argumentName = tape.node(2, 0, 0, [tape.string("T")]);
+    const argumentReference = tape.node(513, 0, 0, [argumentName, tape.null()]);
+    const typeArguments = tape.node(542, 0, 0, [tape.list([argumentReference])]);
+    const returnReference = tape.node(513, 0, 0, [returnName, typeArguments]);
+    const returnType = tape.node(512, 0, 0, [returnReference]);
+    const methodKey = tape.node(2, 0, 0, [tape.string("get")]);
+    const method = tape.node(536, 0, 0, [
+      methodKey,
+      tape.null(),
+      tape.list([]),
+      returnType,
+      tape.boolean(false),
+      tape.boolean(false),
+    ]);
+
+    const inferredName = tape.node(2, 0, 0, [tape.string("Element")]);
+    const inferredParameter = tape.node(534, 0, 0, [
+      inferredName,
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.null(),
+      tape.null(),
+    ]);
+    const inferredType = tape.node(556, 0, 0, [inferredParameter]);
+    const inferredAnnotation = tape.node(512, 0, 0, [inferredType]);
+    const inferredKey = tape.node(2, 0, 0, [tape.string("element")]);
+    const inferredProperty = tape.node(535, 0, 0, [
+      inferredKey,
+      inferredAnnotation,
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.boolean(false),
+    ]);
+    const typeLiteral = tape.node(523, 0, 0, [tape.list([property, method, inferredProperty])]);
+    const alias = tape.node(525, 0, 0, [aliasId, typeParameters, typeLiteral]);
+
+    const interfaceId = tape.node(2, 0, 0, [tape.string("Repository")]);
+    const heritageExpression = tape.node(2, 0, 0, [tape.string("Base")]);
+    const heritage = tape.node(558, 0, 0, [heritageExpression, tape.null()]);
+    const interfaceBody = tape.node(539, 0, 0, [tape.list([])]);
+    const interfaceDeclaration = tape.node(524, 0, 0, [
+      interfaceId,
+      tape.null(),
+      tape.list([heritage]),
+      interfaceBody,
+    ]);
+
+    const outerId = tape.node(2, 0, 0, [tape.string("Library")]);
+    const innerId = tape.node(2, 0, 0, [tape.string("Core")]);
+    const moduleId = tape.node(514, 0, 0, [outerId, innerId]);
+    const moduleBlock = tape.node(540, 0, 0, [tape.list([])]);
+    const moduleDeclaration = tape.node(527, 0, 0, [
+      moduleId,
+      moduleBlock,
+      tape.boolean(false),
+      tape.integer(0),
+    ]);
+
+    const enumId = tape.node(2, 0, 0, [tape.string("Choice")]);
+    const memberId = tape.node(2, 0, 0, [tape.string("First")]);
+    const initializer = tape.node(4, 0, 0, [tape.string("1"), tape.integer(0)]);
+    const enumMember = tape.node(537, 0, 0, [memberId, initializer]);
+    const enumBody = tape.node(557, 0, 0, [tape.list([enumMember])]);
+    const enumDeclaration = tape.node(526, 0, 0, [
+      enumId,
+      enumBody,
+      tape.boolean(true),
+      tape.boolean(false),
+    ]);
+
+    const mappedAliasId = tape.node(2, 0, 0, [tape.string("Mapped")]);
+    const mappedKey = tape.node(2, 0, 0, [tape.string("Key")]);
+    const mappedConstraint = tape.node(550, 0, 0, []);
+    const mappedAnnotation = tape.node(548, 0, 0, []);
+    const mappedType = tape.node(522, 0, 0, [
+      mappedKey,
+      mappedConstraint,
+      tape.null(),
+      mappedAnnotation,
+      tape.boolean(true),
+      tape.boolean(true),
+    ]);
+    const mappedAlias = tape.node(525, 0, 0, [mappedAliasId, tape.null(), mappedType]);
+    const program = tape.node(1, 0, 0, [
+      tape.list([alias, enumDeclaration, interfaceDeclaration, moduleDeclaration, mappedAlias]),
+      tape.integer(1),
+    ]);
+
+    const decoded = decodeTape("", tape.finish(program));
+    expect(decoded.body[0]).toMatchObject({
+      type: "TSTypeAliasDeclaration",
+      declare: false,
+      typeParameters: {
+        type: "TSTypeParameterDeclaration",
+        params: [{ type: "TSTypeParameter", name: { type: "Identifier", name: "T" } }],
+      },
+      typeAnnotation: {
+        type: "TSTypeLiteral",
+        members: [
+          {
+            type: "TSPropertySignature",
+            readonly: true,
+            accessibility: null,
+            static: false,
+            typeAnnotation: {
+              typeAnnotation: {
+                type: "TSTupleType",
+                elementTypes: [
+                  {
+                    type: "TSNamedTupleMember",
+                    optional: true,
+                    elementType: {
+                      type: "TSParenthesizedType",
+                      typeAnnotation: {
+                        type: "TSTypeOperator",
+                        operator: "readonly",
+                        typeAnnotation: { type: "TSIndexedAccessType" },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+          {
+            type: "TSMethodSignature",
+            key: { name: "get" },
+            kind: "method",
+            params: [],
+            accessibility: null,
+            readonly: false,
+            static: false,
+            returnType: {
+              typeAnnotation: {
+                typeArguments: {
+                  type: "TSTypeParameterInstantiation",
+                  params: [{ type: "TSTypeReference", typeName: { name: "T" } }],
+                },
+              },
+            },
+          },
+          {
+            type: "TSPropertySignature",
+            typeAnnotation: {
+              typeAnnotation: {
+                type: "TSInferType",
+                typeParameter: { name: { name: "Element" } },
+              },
+            },
+          },
+        ],
+      },
+    });
+    expect(decoded.body[1]).toMatchObject({
+      type: "TSEnumDeclaration",
+      const: true,
+      body: {
+        type: "TSEnumBody",
+        members: [{ type: "TSEnumMember", id: { name: "First" }, initializer: { value: 1 } }],
+      },
+    });
+    expect(decoded.body[2]).toMatchObject({
+      type: "TSInterfaceDeclaration",
+      declare: false,
+      extends: [{ type: "TSInterfaceHeritage", expression: { name: "Base" } }],
+      body: { type: "TSInterfaceBody", body: [] },
+    });
+    expect(decoded.body[3]).toMatchObject({
+      type: "TSModuleDeclaration",
+      kind: "namespace",
+      id: {
+        type: "TSQualifiedName",
+        left: { name: "Library" },
+        right: { name: "Core" },
+      },
+      body: { type: "TSModuleBlock", body: [] },
+    });
+    expect(decoded.body[4]).toMatchObject({
+      type: "TSTypeAliasDeclaration",
+      typeAnnotation: {
+        type: "TSMappedType",
+        key: { type: "Identifier", name: "Key" },
+        constraint: { type: "TSStringKeyword" },
+        nameType: null,
+        typeAnnotation: { type: "TSNumberKeyword" },
+        readonly: true,
+        optional: true,
+      },
+    });
+  });
+
+  it("omits an absent mapped type readonly modifier", () => {
+    const tape = new HandcraftedTape();
+    const aliasId = tape.node(2, 0, 0, [tape.string("Mapped")]);
+    const mappedKey = tape.node(2, 0, 0, [tape.string("Key")]);
+    const mappedConstraint = tape.node(550, 0, 0, []);
+    const mappedAnnotation = tape.node(548, 0, 0, []);
+    const mappedType = tape.node(522, 0, 0, [
+      mappedKey,
+      mappedConstraint,
+      tape.null(),
+      mappedAnnotation,
+      tape.null(),
+      tape.boolean(false),
+    ]);
+    const alias = tape.node(525, 0, 0, [aliasId, tape.null(), mappedType]);
+    const program = tape.node(1, 0, 0, [tape.list([alias]), tape.integer(1)]);
+
+    const decoded = decodeTape("", tape.finish(program));
+    const typeAnnotation = decoded.body[0].typeAnnotation;
+    expect(typeAnnotation).toMatchObject({
+      type: "TSMappedType",
+      optional: false,
+    });
+    expect(Object.hasOwn(typeAnnotation, "readonly")).toBe(false);
   });
 
   it("bounds recovery patterns that temporarily wrap expression nodes", () => {

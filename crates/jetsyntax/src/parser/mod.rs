@@ -8,7 +8,7 @@ use std::{error::Error, fmt};
 
 use crate::{
     Language, ParseOptions, SourceKind,
-    lexer::{Lexer, Token, TokenKind},
+    lexer::{Lexer, Token, TokenFlags, TokenKind},
     operator::{
         AssignmentOperator, UnaryOperator, UpdateOperator, assignment_operator, binary_binding,
         unary_operator, update_operator,
@@ -151,8 +151,25 @@ impl<'s> Parser<'s> {
         match self.current.kind {
             TokenKind::Semicolon => self.parse_empty_statement(),
             TokenKind::LeftBrace => self.parse_block_statement(),
+            TokenKind::Const
+                if self.options.language.is_typescript() && self.followed_by_word("enum") =>
+            {
+                self.parse_enum_declaration(true)
+            }
             TokenKind::Var | TokenKind::Let | TokenKind::Const => {
                 self.parse_variable_declaration(true)
+            }
+            TokenKind::Type if self.options.language.is_typescript() => {
+                self.parse_type_alias_declaration()
+            }
+            TokenKind::Interface if self.options.language.is_typescript() => {
+                self.parse_interface_declaration()
+            }
+            TokenKind::Enum if self.options.language.is_typescript() => {
+                self.parse_enum_declaration(false)
+            }
+            TokenKind::Namespace | TokenKind::Module if self.options.language.is_typescript() => {
+                self.parse_module_declaration()
             }
             TokenKind::Function => self.parse_function(true, false),
             TokenKind::Async if self.followed_by_word("function") => {
@@ -638,8 +655,25 @@ impl<'s> Parser<'s> {
         }
 
         let declaration = match self.current.kind {
+            TokenKind::Const
+                if self.options.language.is_typescript() && self.followed_by_word("enum") =>
+            {
+                self.parse_enum_declaration(true)?
+            }
             TokenKind::Var | TokenKind::Let | TokenKind::Const => {
                 self.parse_variable_declaration(true)?
+            }
+            TokenKind::Type if self.options.language.is_typescript() => {
+                self.parse_type_alias_declaration()?
+            }
+            TokenKind::Interface if self.options.language.is_typescript() => {
+                self.parse_interface_declaration()?
+            }
+            TokenKind::Enum if self.options.language.is_typescript() => {
+                self.parse_enum_declaration(false)?
+            }
+            TokenKind::Namespace | TokenKind::Module if self.options.language.is_typescript() => {
+                self.parse_module_declaration()?
             }
             TokenKind::Function => self.parse_function(true, false)?,
             TokenKind::Class => self.parse_class(true)?,
@@ -2000,27 +2034,849 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_type_annotation(&mut self) -> Result<ParsedNode, ParseError> {
+        let annotation = self.parse_type()?;
+        self.node(
+            NodeTag::TS_TYPE_ANNOTATION,
+            annotation.span,
+            &[annotation.value()],
+        )
+    }
+
+    fn parse_type(&mut self) -> Result<ParsedNode, ParseError> {
+        let check_type = self.parse_union_type()?;
+        if self.eat(TokenKind::Extends).is_none() {
+            return Ok(check_type);
+        }
+
+        let extends_type = self.parse_union_type()?;
+        self.expect(TokenKind::Question);
+        let true_type = self.parse_type()?;
+        self.expect(TokenKind::Colon);
+        let false_type = self.parse_type()?;
+        self.node(
+            NodeTag::TS_CONDITIONAL_TYPE,
+            Span::new(check_type.span.start, false_type.span.end),
+            &[
+                check_type.value(),
+                extends_type.value(),
+                true_type.value(),
+                false_type.value(),
+            ],
+        )
+    }
+
+    fn parse_union_type(&mut self) -> Result<ParsedNode, ParseError> {
+        let first = self.parse_intersection_type()?;
+        if self.eat(TokenKind::Pipe).is_none() {
+            return Ok(first);
+        }
+
+        let mut types = vec![first.value()];
+        let end = loop {
+            let item = self.parse_intersection_type()?;
+            let item_end = item.span.end;
+            types.push(item.value());
+            if self.eat(TokenKind::Pipe).is_none() {
+                break item_end;
+            }
+        };
+        let types = self.tape.push_list(&types)?;
+        self.node(
+            NodeTag::TS_UNION_TYPE,
+            Span::new(first.span.start, end),
+            &[types],
+        )
+    }
+
+    fn parse_intersection_type(&mut self) -> Result<ParsedNode, ParseError> {
+        let first = self.parse_type_postfix()?;
+        if self.eat(TokenKind::Amp).is_none() {
+            return Ok(first);
+        }
+
+        let mut types = vec![first.value()];
+        let end = loop {
+            let item = self.parse_type_postfix()?;
+            let item_end = item.span.end;
+            types.push(item.value());
+            if self.eat(TokenKind::Amp).is_none() {
+                break item_end;
+            }
+        };
+        let types = self.tape.push_list(&types)?;
+        self.node(
+            NodeTag::TS_INTERSECTION_TYPE,
+            Span::new(first.span.start, end),
+            &[types],
+        )
+    }
+
+    fn parse_type_postfix(&mut self) -> Result<ParsedNode, ParseError> {
+        let mut type_node = if matches!(
+            self.current.kind,
+            TokenKind::Keyof | TokenKind::Readonly | TokenKind::Unique
+        ) {
+            let operator = self.take();
+            let annotation = self.parse_type_postfix()?;
+            let operator_name = self.tape.push_source_slice(Self::token_span(operator))?;
+            self.node(
+                NodeTag::TS_TYPE_OPERATOR,
+                Span::new(operator.start, annotation.span.end),
+                &[operator_name, annotation.value()],
+            )?
+        } else {
+            self.parse_type_primary()?
+        };
+
+        while self.eat(TokenKind::LeftBracket).is_some() {
+            if let Some(right_bracket) = self.eat(TokenKind::RightBracket) {
+                type_node = self.node(
+                    NodeTag::TS_ARRAY_TYPE,
+                    Span::new(type_node.span.start, right_bracket.end),
+                    &[type_node.value()],
+                )?;
+                continue;
+            }
+
+            let index_type = self.parse_type()?;
+            let end = self.expect(TokenKind::RightBracket).end;
+            type_node = self.node(
+                NodeTag::TS_INDEXED_ACCESS_TYPE,
+                Span::new(type_node.span.start, end),
+                &[type_node.value(), index_type.value()],
+            )?;
+        }
+        Ok(type_node)
+    }
+
+    fn parse_type_primary(&mut self) -> Result<ParsedNode, ParseError> {
+        if let Some(tag) = self.current_type_keyword_tag() {
+            let token = self.take();
+            return self.node(tag, Self::token_span(token), &[]);
+        }
+
+        match self.current.kind {
+            TokenKind::String
+            | TokenKind::Number
+            | TokenKind::BigInt
+            | TokenKind::True
+            | TokenKind::False => {
+                let literal = self.parse_literal()?;
+                self.node(NodeTag::TS_LITERAL_TYPE, literal.span, &[literal.value()])
+            }
+            TokenKind::LeftParen if self.looks_like_function_type() => {
+                self.parse_function_type(false)
+            }
+            TokenKind::LeftParen => {
+                let start = self.take().start;
+                let annotation = self.parse_type()?;
+                let end = self.expect(TokenKind::RightParen).end;
+                self.node(
+                    NodeTag::TS_PARENTHESIZED_TYPE,
+                    Span::new(start, end),
+                    &[annotation.value()],
+                )
+            }
+            TokenKind::LeftBracket => self.parse_tuple_type(),
+            TokenKind::LeftBrace => self.parse_type_literal(),
+            TokenKind::Lt => self.parse_function_type(true),
+            TokenKind::Infer => self.parse_infer_type(),
+            kind if Self::is_type_reference_name(kind) => self.parse_type_reference(),
+            _ => self.invalid_type(),
+        }
+    }
+
+    fn parse_infer_type(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Infer).start;
+        let type_parameter = self.parse_type_parameter()?;
+        self.node(
+            NodeTag::TS_INFER_TYPE,
+            Span::new(start, type_parameter.span.end),
+            &[type_parameter.value()],
+        )
+    }
+
+    fn parse_type_reference(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.current.start;
-        let mut type_name = self.parse_identifier()?;
+        let mut type_name = self.parse_type_identifier()?;
         while self.eat(TokenKind::Dot).is_some() {
-            let right = self.parse_identifier()?;
+            let right = self.parse_type_identifier()?;
             type_name = self.node(
                 NodeTag::TS_QUALIFIED_NAME,
                 Span::new(type_name.span.start, right.span.end),
                 &[type_name.value(), right.value()],
             )?;
         }
-        let parameters = self.tape.push_null()?;
-        let reference = self.node(
-            NodeTag::TS_TYPE_REFERENCE,
-            Span::new(start, type_name.span.end),
-            &[type_name.value(), parameters],
-        )?;
+        let (type_arguments, end) = if self.current.kind == TokenKind::Lt {
+            self.parse_type_arguments()?
+        } else {
+            (self.tape.push_null()?, type_name.span.end)
+        };
         self.node(
-            NodeTag::TS_TYPE_ANNOTATION,
-            reference.span,
-            &[reference.value()],
+            NodeTag::TS_TYPE_REFERENCE,
+            Span::new(start, end),
+            &[type_name.value(), type_arguments],
         )
+    }
+
+    fn parse_type_arguments(&mut self) -> Result<(ValueRef, u32), ParseError> {
+        let start = self.expect(TokenKind::Lt).start;
+        let mut arguments = Vec::new();
+        while !self.current_is_type_greater() && self.current.kind != TokenKind::Eof {
+            arguments.push(self.parse_type()?.value());
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let end = self.expect_type_greater();
+        let arguments = self.tape.push_list(&arguments)?;
+        let instantiation = self.node(
+            NodeTag::TS_TYPE_PARAMETER_INSTANTIATION,
+            Span::new(start, end),
+            &[arguments],
+        )?;
+        Ok((instantiation.value(), end))
+    }
+
+    fn parse_type_parameters(&mut self) -> Result<ValueRef, ParseError> {
+        let Some(left_angle) = self.eat(TokenKind::Lt) else {
+            return Ok(self.tape.push_null()?);
+        };
+
+        let mut parameters = Vec::new();
+        while !self.current_is_type_greater() && self.current.kind != TokenKind::Eof {
+            parameters.push(self.parse_type_parameter()?.value());
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let end = self.expect_type_greater();
+        let parameters = self.tape.push_list(&parameters)?;
+        Ok(self
+            .node(
+                NodeTag::TS_TYPE_PARAMETER_DECLARATION,
+                Span::new(left_angle.start, end),
+                &[parameters],
+            )?
+            .value())
+    }
+
+    fn parse_type_parameter(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.current.start;
+        let is_const = self.eat(TokenKind::Const).is_some();
+        let is_in = self.eat(TokenKind::In).is_some();
+        let is_out = self.eat(TokenKind::Out).is_some();
+        let name_token = self.take();
+        if !Self::is_identifier_name(name_token.kind) {
+            self.error(
+                Self::token_span(name_token),
+                "expected a type parameter name",
+            );
+        }
+        let name = self.identifier_from_span(Self::token_span(name_token))?;
+        let constraint = if self.eat(TokenKind::Extends).is_some() {
+            self.parse_type()?.value()
+        } else {
+            self.tape.push_null()?
+        };
+        let default = if self.eat(TokenKind::Eq).is_some() {
+            self.parse_type()?.value()
+        } else {
+            self.tape.push_null()?
+        };
+        let end = self.previous_end(name_token.end);
+        let is_const = self.tape.push_bool(is_const)?;
+        let is_in = self.tape.push_bool(is_in)?;
+        let is_out = self.tape.push_bool(is_out)?;
+        self.node(
+            NodeTag::TS_TYPE_PARAMETER,
+            Span::new(start, end),
+            &[name.value(), is_const, is_in, is_out, constraint, default],
+        )
+    }
+
+    fn parse_function_type(&mut self, generic: bool) -> Result<ParsedNode, ParseError> {
+        let start = self.current.start;
+        let type_parameters = if generic {
+            self.parse_type_parameters()?
+        } else {
+            self.tape.push_null()?
+        };
+        let (parameters, _) = self.parse_type_signature_parameters()?;
+        self.expect(TokenKind::Arrow);
+        let return_type = self.parse_type_annotation()?;
+        self.node(
+            NodeTag::TS_FUNCTION_TYPE,
+            Span::new(start, return_type.span.end),
+            &[type_parameters, parameters, return_type.value()],
+        )
+    }
+
+    fn parse_type_signature_parameters(&mut self) -> Result<(ValueRef, u32), ParseError> {
+        self.expect(TokenKind::LeftParen);
+        let mut parameters = Vec::new();
+        while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
+            let rest = self.eat(TokenKind::Ellipsis);
+            let start = rest.map_or(self.current.start, |token| token.start);
+            let name_token = self.take();
+            if !Self::is_identifier_name(name_token.kind) {
+                self.error(Self::token_span(name_token), "expected a parameter name");
+            }
+            let name = self.tape.push_source_slice(Self::token_span(name_token))?;
+            let optional = self.eat(TokenKind::Question).is_some();
+            let annotation = if self.eat(TokenKind::Colon).is_some() {
+                self.parse_type_annotation()?
+            } else {
+                self.error(self.current_span(), "expected a type annotation");
+                let invalid = self.invalid_type()?;
+                self.node(
+                    NodeTag::TS_TYPE_ANNOTATION,
+                    invalid.span,
+                    &[invalid.value()],
+                )?
+            };
+            let optional = self.tape.push_bool(optional)?;
+            let identifier = self.node(
+                NodeTag::IDENTIFIER,
+                Span::new(name_token.start, annotation.span.end),
+                &[name, annotation.value(), optional],
+            )?;
+            let parameter = if rest.is_some() {
+                self.node(
+                    NodeTag::REST_ELEMENT,
+                    Span::new(start, identifier.span.end),
+                    &[identifier.value()],
+                )?
+            } else {
+                identifier
+            };
+            parameters.push(parameter.value());
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RightParen).end;
+        Ok((self.tape.push_list(&parameters)?, end))
+    }
+
+    fn parse_tuple_type(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.take().start;
+        let mut elements = Vec::new();
+        while !matches!(self.current.kind, TokenKind::RightBracket | TokenKind::Eof) {
+            let rest = self.eat(TokenKind::Ellipsis);
+            let element_start = rest.map_or(self.current.start, |token| token.start);
+            let mut element = if self.looks_like_named_tuple_member() {
+                let label = self.parse_type_identifier()?;
+                let optional = self.eat(TokenKind::Question).is_some();
+                self.expect(TokenKind::Colon);
+                let element_type = self.parse_type()?;
+                let optional = self.tape.push_bool(optional)?;
+                self.node(
+                    NodeTag::TS_NAMED_TUPLE_MEMBER,
+                    Span::new(label.span.start, element_type.span.end),
+                    &[label.value(), element_type.value(), optional],
+                )?
+            } else {
+                self.parse_type()?
+            };
+            if rest.is_some() {
+                element = self.node(
+                    NodeTag::REST_ELEMENT,
+                    Span::new(element_start, element.span.end),
+                    &[element.value()],
+                )?;
+            }
+            elements.push(element.value());
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RightBracket).end;
+        let elements = self.tape.push_list(&elements)?;
+        self.node(NodeTag::TS_TUPLE_TYPE, Span::new(start, end), &[elements])
+    }
+
+    fn parse_type_literal(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::LeftBrace).start;
+        if self.looks_like_mapped_type() {
+            return self.parse_mapped_type(start);
+        }
+        let (members, end) = self.parse_type_members()?;
+        self.node(NodeTag::TS_TYPE_LITERAL, Span::new(start, end), &[members])
+    }
+
+    fn parse_type_members(&mut self) -> Result<(ValueRef, u32), ParseError> {
+        let mut members = Vec::new();
+        while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
+            if matches!(self.current.kind, TokenKind::Semicolon | TokenKind::Comma) {
+                self.bump();
+                continue;
+            }
+            members.push(self.parse_type_member()?.value());
+            if matches!(self.current.kind, TokenKind::Semicolon | TokenKind::Comma) {
+                self.bump();
+            } else if self.current.kind != TokenKind::RightBrace {
+                self.error(self.current_span(), "expected a type member separator");
+            }
+        }
+        let end = self.expect(TokenKind::RightBrace).end;
+        let members = self.tape.push_list(&members)?;
+        Ok((members, end))
+    }
+
+    fn parse_interface_body(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::LeftBrace).start;
+        let (body, end) = self.parse_type_members()?;
+        self.node(NodeTag::TS_INTERFACE_BODY, Span::new(start, end), &[body])
+    }
+
+    fn parse_mapped_type(&mut self, start: u32) -> Result<ParsedNode, ParseError> {
+        let readonly = self.eat(TokenKind::Readonly);
+        self.expect(TokenKind::LeftBracket);
+        let name_token = self.take();
+        if !Self::is_identifier_name(name_token.kind) {
+            self.error(
+                Self::token_span(name_token),
+                "expected a mapped type parameter",
+            );
+        }
+        let key = self.identifier_from_span(Self::token_span(name_token))?;
+        self.expect(TokenKind::In);
+        let constraint = self.parse_type()?;
+        self.expect(TokenKind::RightBracket);
+        let optional = self.eat(TokenKind::Question).is_some();
+        self.expect(TokenKind::Colon);
+        let annotation = self.parse_type()?;
+        let end = self.expect(TokenKind::RightBrace).end;
+        let name_type = self.tape.push_null()?;
+        let readonly = if readonly.is_some() {
+            self.tape.push_bool(true)?
+        } else {
+            self.tape.push_null()?
+        };
+        let optional = self.tape.push_bool(optional)?;
+        self.node(
+            NodeTag::TS_MAPPED_TYPE,
+            Span::new(start, end),
+            &[
+                key.value(),
+                constraint.value(),
+                name_type,
+                annotation.value(),
+                readonly,
+                optional,
+            ],
+        )
+    }
+
+    fn parse_type_member(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.current.start;
+        let readonly = self.eat(TokenKind::Readonly).is_some();
+        let key = self.parse_type_member_key()?;
+        let optional = self.eat(TokenKind::Question).is_some();
+        if matches!(self.current.kind, TokenKind::Lt | TokenKind::LeftParen) {
+            let type_parameters = if self.current.kind == TokenKind::Lt {
+                self.parse_type_parameters()?
+            } else {
+                self.tape.push_null()?
+            };
+            let (parameters, parameters_end) = self.parse_type_signature_parameters()?;
+            let return_type = if self.eat(TokenKind::Colon).is_some() {
+                self.parse_type_annotation()?.value()
+            } else {
+                self.tape.push_null()?
+            };
+            let end = self.previous_end(parameters_end);
+            let computed = self.tape.push_bool(false)?;
+            let optional = self.tape.push_bool(optional)?;
+            return self.node(
+                NodeTag::TS_METHOD_SIGNATURE,
+                Span::new(start, end),
+                &[
+                    key.value(),
+                    type_parameters,
+                    parameters,
+                    return_type,
+                    computed,
+                    optional,
+                ],
+            );
+        }
+
+        self.expect(TokenKind::Colon);
+        let annotation = self.parse_type_annotation()?;
+        let computed = self.tape.push_bool(false)?;
+        let optional = self.tape.push_bool(optional)?;
+        let readonly = self.tape.push_bool(readonly)?;
+        self.node(
+            NodeTag::TS_PROPERTY_SIGNATURE,
+            Span::new(start, annotation.span.end),
+            &[
+                key.value(),
+                annotation.value(),
+                computed,
+                optional,
+                readonly,
+            ],
+        )
+    }
+
+    fn parse_type_member_key(&mut self) -> Result<ParsedNode, ParseError> {
+        if matches!(self.current.kind, TokenKind::String | TokenKind::Number) {
+            return self.parse_literal();
+        }
+        let token = self.take();
+        if !Self::is_identifier_name(token.kind) && token.kind != TokenKind::New {
+            self.error(Self::token_span(token), "expected a type member name");
+        }
+        let name = self.tape.push_source_slice(Self::token_span(token))?;
+        self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name])
+    }
+
+    fn parse_type_alias_declaration(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Type).start;
+        let id = self.parse_binding_identifier(BindingKind::Type)?;
+        let type_parameters = self.parse_type_parameters()?;
+        self.expect(TokenKind::Eq);
+        let annotation = self.parse_type()?;
+        let end = self.consume_semicolon();
+        self.node(
+            NodeTag::TS_TYPE_ALIAS_DECLARATION,
+            Span::new(start, end),
+            &[id.value(), type_parameters, annotation.value()],
+        )
+    }
+
+    fn parse_interface_declaration(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Interface).start;
+        let id = self.parse_binding_identifier(BindingKind::Type)?;
+        let type_parameters = self.parse_type_parameters()?;
+        let mut heritage = Vec::new();
+        if self.eat(TokenKind::Extends).is_some() {
+            loop {
+                heritage.push(self.parse_interface_heritage()?.value());
+                if self.eat(TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
+        let body = self.parse_interface_body()?;
+        let heritage = self.tape.push_list(&heritage)?;
+        self.node(
+            NodeTag::TS_INTERFACE_DECLARATION,
+            Span::new(start, body.span.end),
+            &[id.value(), type_parameters, heritage, body.value()],
+        )
+    }
+
+    fn parse_interface_heritage(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.current.start;
+        let mut expression = self.parse_type_identifier()?;
+        while self.eat(TokenKind::Dot).is_some() {
+            let right = self.parse_type_identifier()?;
+            let computed = self.tape.push_bool(false)?;
+            let optional = self.tape.push_bool(false)?;
+            expression = self.node(
+                NodeTag::MEMBER_EXPRESSION,
+                Span::new(expression.span.start, right.span.end),
+                &[expression.value(), right.value(), computed, optional],
+            )?;
+        }
+        let (type_arguments, end) = if self.current.kind == TokenKind::Lt {
+            self.parse_type_arguments()?
+        } else {
+            (self.tape.push_null()?, expression.span.end)
+        };
+        self.node(
+            NodeTag::TS_INTERFACE_HERITAGE,
+            Span::new(start, end),
+            &[expression.value(), type_arguments],
+        )
+    }
+
+    fn parse_enum_declaration(&mut self, is_const: bool) -> Result<ParsedNode, ParseError> {
+        let start = if is_const {
+            let start = self.expect(TokenKind::Const).start;
+            self.expect(TokenKind::Enum);
+            start
+        } else {
+            self.expect(TokenKind::Enum).start
+        };
+        let id = self.parse_binding_identifier(BindingKind::Type)?;
+        let body_start = self.expect(TokenKind::LeftBrace).start;
+        let mut members = Vec::new();
+        while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
+            let member_start = self.current.start;
+            let member_id = if matches!(self.current.kind, TokenKind::String | TokenKind::Number) {
+                self.parse_literal()?
+            } else {
+                self.parse_type_member_key()?
+            };
+            let initializer = if self.eat(TokenKind::Eq).is_some() {
+                self.parse_assignment_expression(true)?.value()
+            } else {
+                self.tape.push_null()?
+            };
+            let member_end = self.previous_end(member_id.span.end);
+            members.push(
+                self.node(
+                    NodeTag::TS_ENUM_MEMBER,
+                    Span::new(member_start, member_end),
+                    &[member_id.value(), initializer],
+                )?
+                .value(),
+            );
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RightBrace).end;
+        let _ = self.eat(TokenKind::Semicolon);
+        let members = self.tape.push_list(&members)?;
+        let body = self.node(
+            NodeTag::TS_ENUM_BODY,
+            Span::new(body_start, end),
+            &[members],
+        )?;
+        let is_const = self.tape.push_bool(is_const)?;
+        let declare = self.tape.push_bool(false)?;
+        self.node(
+            NodeTag::TS_ENUM_DECLARATION,
+            Span::new(start, end),
+            &[id.value(), body.value(), is_const, declare],
+        )
+    }
+
+    fn parse_module_declaration(&mut self) -> Result<ParsedNode, ParseError> {
+        let keyword = self.take();
+        let start = keyword.start;
+        let mut id = if self.current.kind == TokenKind::String {
+            self.parse_literal()?
+        } else {
+            self.parse_type_identifier()?
+        };
+        while self.eat(TokenKind::Dot).is_some() {
+            let right = self.parse_type_identifier()?;
+            id = self.node(
+                NodeTag::TS_QUALIFIED_NAME,
+                Span::new(id.span.start, right.span.end),
+                &[id.value(), right.value()],
+            )?;
+        }
+        let block_start = self.expect(TokenKind::LeftBrace).start;
+        self.context.enter_scope(ScopeKind::Type);
+        let mut body = Vec::new();
+        while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
+            let before = self.current.start;
+            body.push(self.parse_statement()?.value());
+            if self.current.start == before {
+                self.bump();
+            }
+        }
+        let end = self.expect(TokenKind::RightBrace).end;
+        let _ = self.context.leave_scope();
+        let body = self.tape.push_list(&body)?;
+        let module_body = self.node(
+            NodeTag::TS_MODULE_BLOCK,
+            Span::new(block_start, end),
+            &[body],
+        )?;
+        let declare = self.tape.push_bool(false)?;
+        let kind = self
+            .tape
+            .push_u32(u32::from(keyword.kind == TokenKind::Module))?;
+        self.node(
+            NodeTag::TS_MODULE_DECLARATION,
+            Span::new(start, end),
+            &[id.value(), module_body.value(), declare, kind],
+        )
+    }
+
+    fn parse_type_identifier(&mut self) -> Result<ParsedNode, ParseError> {
+        let token = self.take();
+        if !Self::is_type_reference_name(token.kind) {
+            self.error(Self::token_span(token), "expected a type name");
+        }
+        let name = self.tape.push_source_slice(Self::token_span(token))?;
+        self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name])
+    }
+
+    fn invalid_type(&mut self) -> Result<ParsedNode, ParseError> {
+        let span = self.current_span();
+        self.error(span, "expected a type");
+        if !matches!(
+            self.current.kind,
+            TokenKind::Eof
+                | TokenKind::Semicolon
+                | TokenKind::Comma
+                | TokenKind::RightParen
+                | TokenKind::RightBracket
+                | TokenKind::RightBrace
+                | TokenKind::Eq
+                | TokenKind::Question
+                | TokenKind::Colon
+                | TokenKind::Pipe
+                | TokenKind::Amp
+                | TokenKind::Gt
+                | TokenKind::ShiftRight
+                | TokenKind::ShiftRightUnsigned
+        ) {
+            self.bump();
+        }
+        let name = self.tape.push_string("<invalid>")?;
+        let identifier = self.node(NodeTag::IDENTIFIER, span, &[name])?;
+        let parameters = self.tape.push_null()?;
+        self.node(
+            NodeTag::TS_TYPE_REFERENCE,
+            span,
+            &[identifier.value(), parameters],
+        )
+    }
+
+    fn expect_type_greater(&mut self) -> u32 {
+        if let Some(end) = self.eat_type_greater() {
+            return end;
+        }
+        self.error(self.current_span(), "expected `>`");
+        self.current.start
+    }
+
+    fn eat_type_greater(&mut self) -> Option<u32> {
+        let start = self.current.start;
+        match self.current.kind {
+            TokenKind::Gt => Some(self.take().end),
+            TokenKind::ShiftRight => {
+                self.current.start = start + 1;
+                self.current.kind = TokenKind::Gt;
+                self.current.flags = TokenFlags::default();
+                Some(start + 1)
+            }
+            TokenKind::ShiftRightUnsigned => {
+                self.current.start = start + 1;
+                self.current.kind = TokenKind::ShiftRight;
+                self.current.flags = TokenFlags::default();
+                Some(start + 1)
+            }
+            TokenKind::GtEq => {
+                self.current.start = start + 1;
+                self.current.kind = TokenKind::Eq;
+                self.current.flags = TokenFlags::default();
+                Some(start + 1)
+            }
+            TokenKind::ShiftRightEq => {
+                self.current.start = start + 1;
+                self.current.kind = TokenKind::GtEq;
+                self.current.flags = TokenFlags::default();
+                Some(start + 1)
+            }
+            TokenKind::ShiftRightUnsignedEq => {
+                self.current.start = start + 1;
+                self.current.kind = TokenKind::ShiftRightEq;
+                self.current.flags = TokenFlags::default();
+                Some(start + 1)
+            }
+            _ => None,
+        }
+    }
+
+    const fn current_is_type_greater(&self) -> bool {
+        matches!(
+            self.current.kind,
+            TokenKind::Gt
+                | TokenKind::GtEq
+                | TokenKind::ShiftRight
+                | TokenKind::ShiftRightEq
+                | TokenKind::ShiftRightUnsigned
+                | TokenKind::ShiftRightUnsignedEq
+        )
+    }
+
+    fn looks_like_function_type(&self) -> bool {
+        let Some(rest) = self.source.get(self.current.start as usize..) else {
+            return false;
+        };
+        let bytes = rest.as_bytes();
+        let mut depth = 0_u32;
+        let mut quote = None;
+        let mut escaped = false;
+        for (index, &byte) in bytes.iter().enumerate() {
+            if let Some(delimiter) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == delimiter {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"' | b'`') {
+                quote = Some(byte);
+                continue;
+            }
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return rest
+                            .get(index + 1..)
+                            .is_some_and(|tail| tail.trim_start().starts_with("=>"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn looks_like_named_tuple_member(&self) -> bool {
+        if !Self::is_identifier_name(self.current.kind) {
+            return false;
+        }
+        self.source
+            .get(self.current.end as usize..)
+            .is_some_and(|rest| matches!(rest.trim_start().as_bytes().first(), Some(b':' | b'?')))
+    }
+
+    fn looks_like_mapped_type(&self) -> bool {
+        self.current.kind == TokenKind::LeftBracket
+            || self.current.kind == TokenKind::Readonly
+                && self
+                    .source
+                    .get(self.current.end as usize..)
+                    .is_some_and(|rest| rest.trim_start().starts_with('['))
+    }
+
+    fn current_type_keyword_tag(&self) -> Option<NodeTag> {
+        let tag = match self.current.kind {
+            TokenKind::Any => NodeTag::TS_ANY_KEYWORD,
+            TokenKind::Boolean => NodeTag::TS_BOOLEAN_KEYWORD,
+            TokenKind::Never => NodeTag::TS_NEVER_KEYWORD,
+            TokenKind::Null => NodeTag::TS_NULL_KEYWORD,
+            TokenKind::NumberKeyword => NodeTag::TS_NUMBER_KEYWORD,
+            TokenKind::Object => NodeTag::TS_OBJECT_KEYWORD,
+            TokenKind::StringKeyword => NodeTag::TS_STRING_KEYWORD,
+            TokenKind::Symbol => NodeTag::TS_SYMBOL_KEYWORD,
+            TokenKind::This => NodeTag::TS_THIS_TYPE,
+            TokenKind::Undefined => NodeTag::TS_UNDEFINED_KEYWORD,
+            TokenKind::Unknown => NodeTag::TS_UNKNOWN_KEYWORD,
+            TokenKind::Void => NodeTag::TS_VOID_KEYWORD,
+            TokenKind::Identifier => match self
+                .source
+                .get(self.current.start as usize..self.current.end as usize)
+            {
+                Some("bigint") => NodeTag::TS_BIGINT_KEYWORD,
+                Some("intrinsic") => NodeTag::TS_INTRINSIC_KEYWORD,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(tag)
+    }
+
+    const fn is_type_reference_name(kind: TokenKind) -> bool {
+        Self::is_identifier_name(kind) || matches!(kind, TokenKind::This | TokenKind::Void)
     }
 
     fn invalid_expression(&mut self) -> Result<ParsedNode, ParseError> {
