@@ -1237,4 +1237,49 @@ describe("parse", () => {
       expect(result.program.type).toBe("Program");
     }
   });
+
+  it("exposes assignment-target validation through the Node API", () => {
+    const valid = parse("await = 1; yield = 2; ({ value } = source); factory() += 1;", {
+      semanticErrors: true,
+      sourceType: "script",
+    });
+    expect(valid.diagnostics).toEqual([]);
+    expect(valid.program.body[2].expression.expression.left.type).toBe("ObjectPattern");
+
+    const constructedMember = parse("new Constructor().member = value;", {
+      semanticErrors: true,
+      sourceType: "script",
+    });
+    expect(constructedMember.diagnostics).toEqual([]);
+    expect(constructedMember.program.body[0].expression.left.type).toBe("MemberExpression");
+    expect(constructedMember.program.body[0].expression.left.object.type).toBe("NewExpression");
+
+    for (
+      const source of [
+        "factory() ||= source;",
+        "target?.member++;",
+        "({ value }) = source;",
+        "'use strict'; (eval) = source;",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true, sourceType: "script" });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.panicked).toBe(false);
+      expect(result.program.type).toBe("Program");
+    }
+
+    const optionalAssignment = parse("target?.member = value; target?.member &&= value;", {
+      optionalChainingAssign: true,
+      semanticErrors: true,
+      sourceType: "script",
+    });
+    expect(optionalAssignment.diagnostics).toEqual([]);
+
+    const typescriptJs = parse("function load() { await new Promise(undefined); }", {
+      semanticErrors: true,
+      sourceType: "script",
+      typescriptJsCompatibility: true,
+    });
+    expect(typescriptJs.diagnostics).toEqual([]);
+  });
 });

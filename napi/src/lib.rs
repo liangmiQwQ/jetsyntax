@@ -1,4 +1,4 @@
-use jetsyntax::{Language, ParseOptions, SourceKind, parse};
+use jetsyntax::{Language, ParseOptions, SourceKind, SyntaxExtensions, parse};
 use napi::bindgen_prelude::Uint32Array;
 use napi_derive::napi;
 
@@ -13,6 +13,8 @@ pub struct BindingOptions {
     pub allow_return_outside_function: Option<bool>,
     pub range: Option<bool>,
     pub semantic_errors: Option<bool>,
+    pub typescript_js_compatibility: Option<bool>,
+    pub optional_chaining_assign: Option<bool>,
 }
 
 #[napi(object)]
@@ -40,6 +42,10 @@ pub fn parse_to_tape(
         preserve_parentheses: options.preserve_parens.unwrap_or(true),
         allow_return_outside_function: options.allow_return_outside_function.unwrap_or(false),
         semantic_errors: options.semantic_errors.unwrap_or(false),
+        syntax_extensions: SyntaxExtensions {
+            typescript_js_compatibility: options.typescript_js_compatibility.unwrap_or(false),
+            optional_chaining_assign: options.optional_chaining_assign.unwrap_or(false),
+        },
     };
     let result = parse(&source, parse_options).map_err(|error| {
         napi::Error::from_reason(format!("JetSyntax failed to parse source: {error}"))

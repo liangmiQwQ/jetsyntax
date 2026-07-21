@@ -80,6 +80,7 @@ export async function loadBabel(root) {
             preserveParens: true,
             semanticErrors: true,
             sourceType: options.sourceType ?? "script",
+            optionalChainingAssign: pluginNames.includes("optionalChainingAssign"),
           },
           expectation,
           unsupportedReasons: reasons,

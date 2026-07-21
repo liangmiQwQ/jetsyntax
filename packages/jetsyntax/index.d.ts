@@ -8,6 +8,8 @@ export interface ParseOptions {
   allowReturnOutsideFunction?: boolean;
   range?: boolean;
   semanticErrors?: boolean;
+  typescriptJsCompatibility?: boolean;
+  optionalChainingAssign?: boolean;
 }
 
 export interface Program {

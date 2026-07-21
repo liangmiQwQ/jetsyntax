@@ -42,20 +42,28 @@ test("official loaders preserve suite outcomes and explicit exclusions", async (
     options: { plugins: ["typescript"] },
     output: {},
   });
+  await babelFixture(babelRoot, "optional/syntax/assignment", "(target?.value) = next;", {
+    options: { plugins: [["optionalChainingAssign", { version: "2023-07" }]] },
+    output: {},
+  });
   await write(join(babelRoot, "core/syntax/nested/child"), "input.js", "let value = 1;");
   const babel = await loadBabel(babelRoot);
   assert.deepEqual(babel.inventory, {
-    enabledFixtures: 6,
+    enabledFixtures: 7,
     upstreamDisabled: 1,
     upstreamUndiscovered: 1,
-    clean: 3,
+    clean: 4,
     fatal: 1,
     recovery: 2,
-    executions: 6,
+    executions: 7,
   });
   assert.equal(babel.extensions.unsupportedReasons["plugin:flow"], 1);
   assert.equal(babel.cases.find((testCase) => testCase.id.includes("typescript/dts"))?.options.lang, "dts");
   assert.equal(babel.cases.find((testCase) => testCase.id.includes("typescript/syntax"))?.options.lang, "ts");
+  assert.equal(
+    babel.cases.find((testCase) => testCase.id.includes("optional/syntax"))?.options.optionalChainingAssign,
+    true,
+  );
 
   const typeScriptRoot = join(root, "typescript", "tests", "cases", "compiler");
   await write(
@@ -67,6 +75,8 @@ test("official loaders preserve suite outcomes and explicit exclusions", async (
       "let value: number = 1;",
       "// @filename: b.ts",
       "const value = ;",
+      "// @filename: c.js",
+      "function load() { await new Promise(undefined); }",
       "// @filename: tsconfig.json",
       "{}",
     ].join("\n"),
@@ -75,12 +85,16 @@ test("official loaders preserve suite outcomes and explicit exclusions", async (
   assert.deepEqual(typeScript.inventory, {
     caseFiles: 1,
     configurations: 2,
-    sourceUnits: 2,
+    sourceUnits: 3,
     nonSourceUnits: 1,
-    executions: 4,
+    executions: 6,
     nonSourceExecutions: 2,
   });
   assert.equal(typeScript.cases.filter((testCase) => testCase.expectation === "diagnostic").length, 2);
+  assert.equal(
+    typeScript.cases.find((testCase) => testCase.path.endsWith(":c.js"))?.options.typescriptJsCompatibility,
+    true,
+  );
 });
 
 async function babelFixture(root, fixture, source, { options, output }) {

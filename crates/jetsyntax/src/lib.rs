@@ -55,6 +55,13 @@ pub struct ParseOptions {
     pub preserve_parentheses: bool,
     pub allow_return_outside_function: bool,
     pub semantic_errors: bool,
+    pub syntax_extensions: SyntaxExtensions,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SyntaxExtensions {
+    pub typescript_js_compatibility: bool,
+    pub optional_chaining_assign: bool,
 }
 
 impl Default for ParseOptions {
@@ -65,6 +72,7 @@ impl Default for ParseOptions {
             preserve_parentheses: true,
             allow_return_outside_function: false,
             semantic_errors: false,
+            syntax_extensions: SyntaxExtensions::default(),
         }
     }
 }

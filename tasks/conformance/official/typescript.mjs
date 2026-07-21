@@ -71,6 +71,7 @@ export async function loadTypeScript(root) {
             preserveParens: true,
             semanticErrors: false,
             sourceType: sourceTypeFor(sourceFile, unit.name, variantSettings),
+            typescriptJsCompatibility: isJavaScriptUnit(unit.name),
           },
           expectation,
         });
@@ -197,6 +198,10 @@ function languageFor(file) {
   if (lower.endsWith(".jsx")) return "jsx";
   if (/\.[cm]?ts$/.test(lower)) return "ts";
   return "js";
+}
+
+function isJavaScriptUnit(file) {
+  return /\.[cm]?jsx?$/.test(file.toLowerCase());
 }
 
 function sourceTypeFor(sourceFile, file, settings) {

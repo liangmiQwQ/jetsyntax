@@ -589,6 +589,53 @@ fn parses_typescript_expression_wrappers_without_diagnostics() {
     assert_child_tag(&parsed, NodeTag::TS_TYPE_ASSERTION, 1, NodeTag::IDENTIFIER);
 }
 
+/// TypeScript expression-only wrappers preserve the assignment target of their operand.
+#[test]
+fn validates_assignment_targets_through_typescript_wrappers() {
+    let valid = [
+        "value as unknown = source;",
+        "value satisfies unknown = source;",
+        "value! += source;",
+        "(value as unknown)++;",
+        "(<unknown>value)++;",
+    ];
+    for source in valid {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect(source);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect(source);
+    }
+
+    let invalid = [
+        "(value + offset) as unknown = source;",
+        "factory() as unknown ||= source;",
+        "optional?.member! = source;",
+        "'use strict'; (eval as unknown) = source;",
+    ];
+    for source in invalid {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect(source);
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect(source);
+    }
+}
+
 #[test]
 fn keeps_angle_bracket_type_assertions_out_of_tsx() {
     let parsed = parse(

@@ -81,6 +81,47 @@ impl ParsedNode {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AssignmentTargetType {
+    RestrictedIdentifier,
+    Simple,
+    WebCompat,
+    OptionalChain,
+    Invalid,
+}
+
+#[derive(Clone, Copy)]
+enum AssignmentTargetPolicy {
+    Assignment,
+    CompoundAssignment,
+    LogicalAssignment,
+    Update,
+    ForInOf,
+}
+
+impl AssignmentTargetPolicy {
+    const fn allows_web_compat(self) -> bool {
+        !matches!(self, Self::LogicalAssignment)
+    }
+
+    const fn allows_optional_chain(self) -> bool {
+        matches!(
+            self,
+            Self::Assignment | Self::CompoundAssignment | Self::LogicalAssignment
+        )
+    }
+
+    const fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Assignment => "invalid assignment target",
+            Self::CompoundAssignment => "invalid compound assignment target",
+            Self::LogicalAssignment => "invalid logical assignment target",
+            Self::Update => "invalid update target",
+            Self::ForInOf => "invalid for-in/of assignment target",
+        }
+    }
+}
+
 struct ParsedPropertyName {
     key: ParsedNode,
     computed: bool,
@@ -122,7 +163,13 @@ struct AssignmentPatternCandidate {
     node: NodeRef,
     tag: NodeTag,
     group_start: usize,
-    error_span: Option<Span>,
+    error: Option<AssignmentPatternError>,
+}
+
+#[derive(Clone, Copy)]
+enum AssignmentPatternError {
+    Accessor(Span),
+    InvalidTarget(Span),
 }
 
 #[derive(Clone, Copy)]
@@ -140,6 +187,7 @@ struct Parser<'s> {
     function_depth: u32,
     // Parentheses-transparent semantic tag for immediate grammar checks, without widening ParsedNode.
     last_node_tag: Option<NodeTag>,
+    last_assignment_target: AssignmentTargetType,
     assignment_pattern_candidates: Vec<AssignmentPatternCandidate>,
 }
 
@@ -148,11 +196,19 @@ impl<'s> Parser<'s> {
         let mut lexer = Lexer::new(source);
         let current = lexer.next_token();
         let module = matches!(options.source_kind, SourceKind::Module);
+        let top_level_await = matches!(
+            options.source_kind,
+            SourceKind::Module | SourceKind::Unambiguous
+        );
         let ambient = matches!(options.language, Language::TypeScriptDefinition);
         let strict =
             module || current.kind == TokenKind::String && has_use_strict_directive(source, 0);
-        let grammar =
-            GrammarContext::new(module, ambient, options.semantic_errors).with_strict(strict);
+        let typescript_grammar = options.language.is_typescript()
+            || options.syntax_extensions.typescript_js_compatibility;
+        let grammar = GrammarContext::new(module, ambient, options.semantic_errors)
+            .with_strict(strict)
+            .with_allow_await(top_level_await || typescript_grammar)
+            .with_allow_yield(typescript_grammar);
         Self {
             source,
             lexer,
@@ -162,6 +218,7 @@ impl<'s> Parser<'s> {
             options,
             function_depth: 0,
             last_node_tag: None,
+            last_assignment_target: AssignmentTargetType::Invalid,
             assignment_pattern_candidates: Vec::new(),
         }
     }
@@ -555,8 +612,16 @@ impl<'s> Parser<'s> {
                 .with_function(true)
                 .with_generator(generator)
                 .with_async_function(asynchronous)
-                .with_allow_yield(generator)
-                .with_allow_await(asynchronous)
+                .with_allow_yield(
+                    generator
+                        || self.options.language.is_typescript()
+                        || self.options.syntax_extensions.typescript_js_compatibility,
+                )
+                .with_allow_await(
+                    asynchronous
+                        || self.options.language.is_typescript()
+                        || self.options.syntax_extensions.typescript_js_compatibility,
+                )
                 .with_parameters(false),
         );
         previous
@@ -1492,7 +1557,15 @@ impl<'s> Parser<'s> {
 
         if matches!(self.current.kind, TokenKind::In | TokenKind::Of) {
             if let Some(expression) = expression_init {
-                self.retag_assignment_pattern(expression.node)?;
+                let assignment_target = self.last_assignment_target;
+                let pattern = self.retag_assignment_pattern(expression.node)?;
+                if !pattern {
+                    self.validate_assignment_target(
+                        expression.span,
+                        assignment_target,
+                        AssignmentTargetPolicy::ForInOf,
+                    );
+                }
             }
             let operator = self.take();
             let right = self.parse_expression(true)?;
@@ -1750,28 +1823,7 @@ impl<'s> Parser<'s> {
         let assignment_patterns = self.assignment_pattern_checkpoint();
         if self.current.kind == TokenKind::Async && self.looks_like_async_arrow() {
             let start = self.take().start;
-            let previous_grammar = self.enter_function_context(false, true);
-            let mut parameters = Vec::new();
-            if self.eat(TokenKind::LeftParen).is_some() {
-                while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
-                    parameters.push(
-                        self.parse_binding_identifier(BindingKind::Parameter)?
-                            .value(),
-                    );
-                    if self.eat(TokenKind::Comma).is_none() {
-                        break;
-                    }
-                }
-                self.expect(TokenKind::RightParen);
-            } else {
-                parameters.push(
-                    self.parse_binding_identifier(BindingKind::Parameter)?
-                        .value(),
-                );
-            }
-            self.expect(TokenKind::Arrow);
-            let arrow = self.parse_arrow_function(start, &parameters, true, allow_in);
-            self.leave_function_context(previous_grammar);
+            let arrow = self.parse_async_arrow_function(start, allow_in);
             self.rollback_assignment_patterns(assignment_patterns);
             return arrow;
         }
@@ -1787,6 +1839,17 @@ impl<'s> Parser<'s> {
         }
         let left = self.parse_conditional_expression(allow_in)?;
         if self.eat(TokenKind::Arrow).is_some() {
+            if self.reports_ecmascript_early_errors() {
+                match self.last_assignment_target {
+                    AssignmentTargetType::OptionalChain => {
+                        self.error(left.span, "optional chains are not valid arrow parameters");
+                    }
+                    AssignmentTargetType::WebCompat => {
+                        self.error(left.span, "call expressions are not valid arrow parameters");
+                    }
+                    _ => {}
+                }
+            }
             let previous_grammar = self.enter_function_context(false, false);
             let arrow =
                 self.parse_arrow_function(left.span.start, &[left.value()], false, allow_in);
@@ -1794,21 +1857,34 @@ impl<'s> Parser<'s> {
             self.rollback_assignment_patterns(assignment_patterns);
             return arrow;
         }
+        // After a bare `yield`, line-leading `/=` starts a regexp statement.
+        if self.current.kind == TokenKind::SlashEq
+            && self.current.flags.line_break_before()
+            && self.last_node_tag == Some(NodeTag::YIELD_EXPRESSION)
+        {
+            self.retain_root_assignment_pattern(assignment_patterns, left.node);
+            return Ok(left);
+        }
         let Some(operator) = assignment_operator(self.current.kind) else {
             self.retain_root_assignment_pattern(assignment_patterns, left.node);
             return Ok(left);
         };
-        if self.reports_ecmascript_early_errors()
-            && self.last_node_tag == Some(NodeTag::FUNCTION_EXPRESSION)
-        {
-            self.error(
-                left.span,
-                "function expressions are not valid assignment targets",
-            );
-        }
+        let assignment_target = self.last_assignment_target;
         self.bump();
-        if operator == AssignmentOperator::Assign {
-            self.retag_assignment_pattern(left.node)?;
+        let pattern = if operator == AssignmentOperator::Assign {
+            self.retag_assignment_pattern(left.node)?
+        } else {
+            false
+        };
+        if !pattern {
+            let policy = match operator {
+                AssignmentOperator::Assign => AssignmentTargetPolicy::Assignment,
+                AssignmentOperator::LogicalOr
+                | AssignmentOperator::LogicalAnd
+                | AssignmentOperator::Nullish => AssignmentTargetPolicy::LogicalAssignment,
+                _ => AssignmentTargetPolicy::CompoundAssignment,
+            };
+            self.validate_assignment_target(left.span, assignment_target, policy);
         }
         let right = self.parse_assignment_expression(allow_in)?;
         let operator = self.tape.push_u32(operator as u32)?;
@@ -1819,6 +1895,53 @@ impl<'s> Parser<'s> {
         );
         self.rollback_assignment_patterns(assignment_patterns);
         assignment
+    }
+
+    fn parse_async_arrow_function(
+        &mut self,
+        start: u32,
+        allow_in: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let previous_grammar = self.enter_function_context(false, true);
+        self.context
+            .set_grammar(self.context.grammar().with_parameters(true));
+        let mut parameters = Vec::new();
+        let mut simple_parameters = true;
+        if self.eat(TokenKind::LeftParen).is_some() {
+            while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
+                let pattern = self.parse_binding_pattern(BindingKind::Parameter)?;
+                if self.current.kind == TokenKind::Eq {
+                    simple_parameters = false;
+                }
+                simple_parameters &= self.last_node_tag == Some(NodeTag::IDENTIFIER);
+                parameters.push(self.parse_binding_default(pattern)?.value());
+                if self.eat(TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RightParen);
+        } else {
+            parameters.push(
+                self.parse_binding_identifier(BindingKind::Parameter)?
+                    .value(),
+            );
+        }
+        self.expect(TokenKind::Arrow);
+        self.context
+            .set_grammar(self.context.grammar().with_parameters(false));
+        if self.reports_ecmascript_early_errors()
+            && !simple_parameters
+            && self.current.kind == TokenKind::LeftBrace
+            && has_use_strict_directive(self.source, self.current.end as usize)
+        {
+            self.error(
+                self.current_span(),
+                "an arrow function with non-simple parameters cannot contain a use strict directive",
+            );
+        }
+        let arrow = self.parse_arrow_function(start, &parameters, true, allow_in);
+        self.leave_function_context(previous_grammar);
+        arrow
     }
 
     fn parse_arrow_function(
@@ -1875,6 +1998,7 @@ impl<'s> Parser<'s> {
                 && !self.current.flags.escaped()
                 && matches!(self.current.kind, TokenKind::As | TokenKind::Satisfies)
             {
+                let assignment_target = self.last_assignment_target;
                 let operator = self.take();
                 let type_annotation =
                     if operator.kind == TokenKind::As && self.current.kind == TokenKind::Const {
@@ -1891,6 +2015,7 @@ impl<'s> Parser<'s> {
                     Span::new(left.span.start, type_annotation.span.end),
                     &[left.value(), type_annotation.value()],
                 )?;
+                self.last_assignment_target = assignment_target;
                 continue;
             }
 
@@ -1958,6 +2083,12 @@ impl<'s> Parser<'s> {
         if let Some(operator) = update_operator(self.current.kind) {
             let start = self.take().start;
             let argument = self.parse_unary_expression()?;
+            let assignment_target = self.last_assignment_target;
+            self.validate_assignment_target(
+                argument.span,
+                assignment_target,
+                AssignmentTargetPolicy::Update,
+            );
             let operator = self.tape.push_u32(operator as u32)?;
             let prefix = self.tape.push_bool(true)?;
             return self.node(
@@ -1966,10 +2097,10 @@ impl<'s> Parser<'s> {
                 &[operator, prefix, argument.value()],
             );
         }
-        if self.current.kind == TokenKind::Await {
+        if self.current.kind == TokenKind::Await && self.context.grammar().allow_await() {
             return self.parse_await_expression();
         }
-        if self.current.kind == TokenKind::Yield {
+        if self.current.kind == TokenKind::Yield && self.context.grammar().allow_yield() {
             return self.parse_yield_expression();
         }
         self.parse_postfix_expression()
@@ -2039,16 +2170,27 @@ impl<'s> Parser<'s> {
         let type_annotation = self.parse_type()?;
         self.expect_type_greater();
         let expression = self.parse_unary_expression()?;
-        self.node(
+        let assignment_target = self.last_assignment_target;
+        let assertion = self.node(
             NodeTag::TS_TYPE_ASSERTION,
             Span::new(start, expression.span.end),
             &[type_annotation.value(), expression.value()],
-        )
+        )?;
+        self.last_assignment_target = assignment_target;
+        Ok(assertion)
     }
 
     // Postfix operations must stay in precedence order within one left-folding dispatch loop.
     #[allow(clippy::too_many_lines)]
     fn parse_postfix_expression(&mut self) -> Result<ParsedNode, ParseError> {
+        self.parse_postfix_expression_until_call(false)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn parse_postfix_expression_until_call(
+        &mut self,
+        stop_before_call: bool,
+    ) -> Result<ParsedNode, ParseError> {
         let mut expression = self.parse_primary_expression()?;
         let mut is_chain = false;
         loop {
@@ -2109,6 +2251,7 @@ impl<'s> Parser<'s> {
                         &[expression.value(), property.value(), computed, optional],
                     )?;
                 }
+                TokenKind::LeftParen if stop_before_call => break,
                 TokenKind::LeftParen => {
                     self.bump();
                     let arguments = self.parse_argument_list()?;
@@ -2131,6 +2274,22 @@ impl<'s> Parser<'s> {
                 TokenKind::PlusPlus | TokenKind::MinusMinus
                     if !self.current.flags.line_break_before() =>
                 {
+                    if is_chain {
+                        // The completed chain is the update operand, not the update expression's root.
+                        expression = self.node(
+                            NodeTag::CHAIN_EXPRESSION,
+                            expression.span,
+                            &[expression.value()],
+                        )?;
+                        self.last_assignment_target = AssignmentTargetType::Invalid;
+                        is_chain = false;
+                    }
+                    let assignment_target = self.last_assignment_target;
+                    self.validate_assignment_target(
+                        expression.span,
+                        assignment_target,
+                        AssignmentTargetPolicy::Update,
+                    );
                     let token = self.take();
                     let operator = update_operator(token.kind).unwrap_or(UpdateOperator::Increment);
                     let operator = self.tape.push_u32(operator as u32)?;
@@ -2146,27 +2305,33 @@ impl<'s> Parser<'s> {
                         && !self.current.flags.line_break_before() =>
                 {
                     let bang = self.take();
+                    let assignment_target = self.last_assignment_target;
                     expression = self.node(
                         NodeTag::TS_NON_NULL_EXPRESSION,
                         Span::new(expression.span.start, bang.end),
                         &[expression.value()],
                     )?;
+                    self.last_assignment_target = assignment_target;
                 }
                 _ => break,
             }
+            if is_chain {
+                self.last_assignment_target =
+                    if self.last_node_tag == Some(NodeTag::MEMBER_EXPRESSION) {
+                        AssignmentTargetType::OptionalChain
+                    } else {
+                        AssignmentTargetType::Invalid
+                    };
+            }
         }
         if is_chain {
+            let assignment_target = self.last_assignment_target;
             expression = self.node(
                 NodeTag::CHAIN_EXPRESSION,
                 expression.span,
                 &[expression.value()],
             )?;
-            if assignment_operator(self.current.kind).is_some() {
-                self.error(
-                    expression.span,
-                    "optional chains are not valid assignment targets",
-                );
-            }
+            self.last_assignment_target = assignment_target;
         }
         Ok(expression)
     }
@@ -2177,6 +2342,9 @@ impl<'s> Parser<'s> {
                 self.parse_function(false, true)
             }
             kind if Self::is_identifier_name(kind) => self.parse_identifier_reference(),
+            TokenKind::Yield if !self.context.grammar().allow_yield() => {
+                self.parse_identifier_reference()
+            }
             TokenKind::Number
             | TokenKind::BigInt
             | TokenKind::String
@@ -2434,10 +2602,14 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_parenthesized_expression(&mut self) -> Result<ParsedNode, ParseError> {
+        let assignment_patterns = self.assignment_pattern_checkpoint();
         let start = self.take().start;
         let expression = self.parse_expression(true)?;
         let semantic_tag = self.last_node_tag;
+        let assignment_target = self.last_assignment_target;
         let end = self.expect(TokenKind::RightParen).end;
+        // Parentheses preserve simple targets but stop cover expressions from becoming patterns.
+        self.rollback_assignment_patterns(assignment_patterns);
         if self.options.preserve_parentheses {
             let parenthesized = self.node(
                 NodeTag::PARENTHESIZED_EXPRESSION,
@@ -2445,8 +2617,10 @@ impl<'s> Parser<'s> {
                 &[expression.value()],
             )?;
             self.last_node_tag = semantic_tag;
+            self.last_assignment_target = assignment_target;
             Ok(parenthesized)
         } else {
+            self.last_assignment_target = assignment_target;
             Ok(expression)
         }
     }
@@ -2460,8 +2634,9 @@ impl<'s> Parser<'s> {
                 elements.push(self.tape.push_null()?);
                 continue;
             }
-            let element = if self.eat(TokenKind::Ellipsis).is_some() {
+            let (element, assignment_target) = if self.eat(TokenKind::Ellipsis).is_some() {
                 let argument = self.parse_assignment_expression(true)?;
+                let assignment_target = self.last_assignment_target;
                 let spread =
                     self.node(NodeTag::SPREAD_ELEMENT, argument.span, &[argument.value()])?;
                 self.assignment_pattern_candidates
@@ -2469,12 +2644,22 @@ impl<'s> Parser<'s> {
                         node: spread.node,
                         tag: NodeTag::REST_ELEMENT,
                         group_start: usize::MAX,
-                        error_span: None,
+                        error: None,
                     });
-                spread
+                (spread, assignment_target)
             } else {
-                self.parse_assignment_expression(true)?
+                let element = self.parse_assignment_expression(true)?;
+                (element, self.last_assignment_target)
             };
+            if assignment_target == AssignmentTargetType::OptionalChain {
+                self.assignment_pattern_candidates
+                    .push(AssignmentPatternCandidate {
+                        node: element.node,
+                        tag: NodeTag::CHAIN_EXPRESSION,
+                        group_start: usize::MAX,
+                        error: Some(AssignmentPatternError::InvalidTarget(element.span)),
+                    });
+            }
             elements.push(element.value());
             if self.eat(TokenKind::Comma).is_none() {
                 break;
@@ -2503,6 +2688,7 @@ impl<'s> Parser<'s> {
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
             if self.eat(TokenKind::Ellipsis).is_some() {
                 let argument = self.parse_assignment_expression(true)?;
+                let assignment_target = self.last_assignment_target;
                 let spread =
                     self.node(NodeTag::SPREAD_ELEMENT, argument.span, &[argument.value()])?;
                 self.assignment_pattern_candidates
@@ -2510,8 +2696,17 @@ impl<'s> Parser<'s> {
                         node: spread.node,
                         tag: NodeTag::REST_ELEMENT,
                         group_start: usize::MAX,
-                        error_span: None,
+                        error: None,
                     });
+                if assignment_target == AssignmentTargetType::OptionalChain {
+                    self.assignment_pattern_candidates
+                        .push(AssignmentPatternCandidate {
+                            node: spread.node,
+                            tag: NodeTag::CHAIN_EXPRESSION,
+                            group_start: usize::MAX,
+                            error: Some(AssignmentPatternError::InvalidTarget(argument.span)),
+                        });
+                }
                 properties.push(spread.value());
             } else if let Some(accessor) = self.current_accessor_kind(false) {
                 let property_start = self.current.start;
@@ -2522,7 +2717,7 @@ impl<'s> Parser<'s> {
                         node: property.node,
                         tag: NodeTag::PROPERTY,
                         group_start: usize::MAX,
-                        error_span: Some(property.span),
+                        error: Some(AssignmentPatternError::Accessor(property.span)),
                     });
                 properties.push(property.value());
             } else {
@@ -2557,7 +2752,7 @@ impl<'s> Parser<'s> {
                 };
                 let key = property_name.key;
                 let computed = property_name.computed;
-                let (value, method, shorthand) = if generator || asynchronous {
+                let (value, method, shorthand, assignment_target) = if generator || asynchronous {
                     let method_patterns = self.assignment_pattern_checkpoint();
                     let value = self.parse_method_function_with_super_call(
                         key.span.start,
@@ -2567,7 +2762,7 @@ impl<'s> Parser<'s> {
                         false,
                     )?;
                     self.rollback_assignment_patterns(method_patterns);
-                    (value, true, false)
+                    (value, true, false, self.last_assignment_target)
                 } else if self.current.kind == TokenKind::LeftParen {
                     let method_patterns = self.assignment_pattern_checkpoint();
                     let value = self.parse_method_function_with_super_call(
@@ -2578,9 +2773,10 @@ impl<'s> Parser<'s> {
                         false,
                     )?;
                     self.rollback_assignment_patterns(method_patterns);
-                    (value, true, false)
+                    (value, true, false, self.last_assignment_target)
                 } else if self.eat(TokenKind::Colon).is_some() {
-                    (self.parse_assignment_expression(true)?, false, false)
+                    let value = self.parse_assignment_expression(true)?;
+                    (value, false, false, self.last_assignment_target)
                 } else {
                     if !property_name.shorthand {
                         self.error(key.span, "property name requires `:` or method parameters");
@@ -2596,8 +2792,22 @@ impl<'s> Parser<'s> {
                             &[value.value(), right.value()],
                         )?;
                     }
-                    (value, false, property_name.shorthand)
+                    (
+                        value,
+                        false,
+                        property_name.shorthand,
+                        self.last_assignment_target,
+                    )
                 };
+                if assignment_target == AssignmentTargetType::OptionalChain {
+                    self.assignment_pattern_candidates
+                        .push(AssignmentPatternCandidate {
+                            node: value.node,
+                            tag: NodeTag::CHAIN_EXPRESSION,
+                            group_start: usize::MAX,
+                            error: Some(AssignmentPatternError::InvalidTarget(value.span)),
+                        });
+                }
                 let kind = self.tape.push_u32(0)?;
                 let method = self.tape.push_bool(method)?;
                 let shorthand = self.tape.push_bool(shorthand)?;
@@ -2682,7 +2892,7 @@ impl<'s> Parser<'s> {
                 &[meta.value(), property.value()],
             );
         }
-        let callee = self.parse_postfix_expression()?;
+        let callee = self.parse_postfix_expression_until_call(true)?;
         let arguments = if self.eat(TokenKind::LeftParen).is_some() {
             let arguments = self.parse_argument_list()?;
             self.expect(TokenKind::RightParen);
@@ -2848,8 +3058,11 @@ impl<'s> Parser<'s> {
     fn parse_identifier_reference(&mut self) -> Result<ParsedNode, ParseError> {
         let token = self.current;
         let span = Self::token_span(token);
+        let await_reserved = self.context.grammar().async_function()
+            || self.context.grammar().module()
+            || self.context.grammar().class() && !self.context.grammar().function();
         if self.reports_ecmascript_early_errors()
-            && self.context.grammar().async_function()
+            && await_reserved
             && self.identifier_name_matches(span, "await", token.flags.escaped())
         {
             self.error(
@@ -2874,7 +3087,17 @@ impl<'s> Parser<'s> {
                 "strict mode reserved word cannot be used as an identifier",
             );
         }
-        self.parse_identifier()
+        let restricted_assignment_target = self.reports_ecmascript_early_errors()
+            && self.context.grammar().strict()
+            && (self.identifier_name_matches(span, "eval", token.flags.escaped())
+                || self.identifier_name_matches(span, "arguments", token.flags.escaped()));
+        self.bump();
+        let name = self.tape.push_source_slice(span)?;
+        let identifier = self.node(NodeTag::IDENTIFIER, span, &[name])?;
+        if restricted_assignment_target {
+            self.last_assignment_target = AssignmentTargetType::RestrictedIdentifier;
+        }
+        Ok(identifier)
     }
 
     fn parse_member_property(&mut self) -> Result<ParsedNode, ParseError> {
@@ -2978,8 +3201,11 @@ impl<'s> Parser<'s> {
             .source
             .get(token.start as usize..token.end as usize)
             .unwrap_or_default();
+        let await_reserved = self.context.grammar().async_function()
+            || self.context.grammar().module()
+            || self.context.grammar().class() && !self.context.grammar().function();
         if self.reports_ecmascript_early_errors()
-            && self.context.grammar().async_function()
+            && await_reserved
             && self.identifier_name_matches(span, "await", escaped)
         {
             self.error(span, "await cannot be bound in an async function");
@@ -4037,8 +4263,39 @@ impl<'s> Parser<'s> {
         fields: &[ValueRef],
     ) -> Result<ParsedNode, ParseError> {
         let node = self.tape.push_node(tag, span, 0, fields)?;
+        let assignment_target = match tag {
+            NodeTag::IDENTIFIER | NodeTag::MEMBER_EXPRESSION => AssignmentTargetType::Simple,
+            NodeTag::CALL_EXPRESSION => AssignmentTargetType::WebCompat,
+            _ => AssignmentTargetType::Invalid,
+        };
         self.last_node_tag = Some(tag);
+        self.last_assignment_target = assignment_target;
         Ok(ParsedNode { node, span })
+    }
+
+    fn validate_assignment_target(
+        &mut self,
+        span: Span,
+        target: AssignmentTargetType,
+        policy: AssignmentTargetPolicy,
+    ) {
+        if !self.reports_ecmascript_early_errors() {
+            return;
+        }
+        let valid = match target {
+            AssignmentTargetType::Simple => true,
+            AssignmentTargetType::WebCompat => {
+                !self.context.grammar().strict() && policy.allows_web_compat()
+            }
+            AssignmentTargetType::OptionalChain => {
+                self.options.syntax_extensions.optional_chaining_assign
+                    && policy.allows_optional_chain()
+            }
+            AssignmentTargetType::RestrictedIdentifier | AssignmentTargetType::Invalid => false,
+        };
+        if !valid {
+            self.error(span, policy.diagnostic());
+        }
     }
 
     const fn assignment_pattern_checkpoint(&self) -> AssignmentPatternCheckpoint {
@@ -4077,34 +4334,39 @@ impl<'s> Parser<'s> {
                 node: root,
                 tag,
                 group_start: checkpoint.candidate_len,
-                error_span: None,
+                error: None,
             });
     }
 
-    fn retag_assignment_pattern(&mut self, root: NodeRef) -> Result<(), ParseError> {
+    fn retag_assignment_pattern(&mut self, root: NodeRef) -> Result<bool, ParseError> {
         let Some(group) = self.assignment_pattern_candidates.last().copied() else {
-            return Ok(());
+            return Ok(false);
         };
         if group.node.offset() != root.offset() {
-            return Ok(());
+            return Ok(false);
         }
-        if let Some(span) = self.assignment_pattern_candidates[group.group_start..]
+        if let Some(error) = self.assignment_pattern_candidates[group.group_start..]
             .iter()
-            .find_map(|candidate| candidate.error_span)
+            .find_map(|candidate| candidate.error)
         {
-            self.error(
-                span,
-                "accessor properties are not allowed in assignment patterns",
-            );
+            match error {
+                AssignmentPatternError::Accessor(span) => self.error(
+                    span,
+                    "accessor properties are not allowed in assignment patterns",
+                ),
+                AssignmentPatternError::InvalidTarget(span) => {
+                    self.error(span, "invalid assignment pattern target");
+                }
+            }
         }
         for candidate in &self.assignment_pattern_candidates[group.group_start..] {
-            if candidate.error_span.is_none() {
+            if candidate.error.is_none() {
                 self.tape.retag_node(candidate.node, candidate.tag)?;
             }
         }
         self.assignment_pattern_candidates
             .truncate(group.group_start);
-        Ok(())
+        Ok(true)
     }
 
     fn consume_semicolon(&mut self) -> u32 {
@@ -4312,14 +4574,33 @@ impl<'s> Parser<'s> {
     }
 
     fn looks_like_async_arrow(&self) -> bool {
-        self.source
-            .get(self.current.end as usize..)
-            .and_then(|rest| rest.get(..rest.len().min(256)))
-            .is_some_and(|rest| {
-                let arrow = rest.find("=>");
-                let boundary = rest.find([';', '{', '}']);
-                arrow.is_some_and(|arrow| boundary.is_none_or(|boundary| arrow < boundary))
-            })
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let first = lookahead.next_token();
+        if first.flags.line_break_before() {
+            return false;
+        }
+        if first.kind != TokenKind::LeftParen {
+            return Self::is_identifier_name(first.kind)
+                && matches!(lookahead.next_token(), token if token.kind == TokenKind::Arrow && !token.flags.line_break_before());
+        }
+
+        let mut depth = 1_u32;
+        loop {
+            let token = lookahead.next_token();
+            match token.kind {
+                TokenKind::LeftParen => depth = depth.saturating_add(1),
+                TokenKind::RightParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        let arrow = lookahead.next_token();
+                        return arrow.kind == TokenKind::Arrow && !arrow.flags.line_break_before();
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
     }
 
     fn looks_like_empty_arrow(&self) -> bool {

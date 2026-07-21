@@ -1,5 +1,5 @@
 use jetsyntax::{
-    Language, ParseOptions, ParseResult, SourceKind, parse,
+    Language, ParseOptions, ParseResult, SourceKind, SyntaxExtensions, parse,
     tape::{FrozenTape, NodeTag, TapeValue},
 };
 
@@ -109,6 +109,160 @@ fn parser_should_preserve_operator_precedence_and_associativity() {
     }
 
     assert_failures_empty(&failures);
+}
+
+/// Assignment and update operators share target classification while preserving Annex B call targets.
+#[test]
+fn parser_should_apply_standard_assignment_target_policies() {
+    let clean = [
+        "target = value; target.member += value; ++target; target--; for (target in source) {} for (target.member of source) {}",
+        "factory() = value; factory() += value; ++factory(); factory()--; for (factory() in source) {} for (factory() of source) {}",
+        "await = 1; yield = 2;",
+        "({ value } = source); [first] = source;",
+        "'use strict'; eval; arguments; await = 1;",
+        "(target) = value;",
+        "(factory()) = value;",
+        "(target?.member).property = value;",
+        "new Constructor().member = value;",
+    ];
+    for source in clean {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                source_kind: SourceKind::Script,
+                ..ParseOptions::default()
+            },
+        )
+        .expect(source);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect(source);
+    }
+
+    let invalid = [
+        "value + offset = source;",
+        "factory() ||= source;",
+        "factory() &&= source;",
+        "factory() ??= source;",
+        "target?.member = source;",
+        "target?.member++;",
+        "++target?.member;",
+        "({ value }) = source;",
+        "([first]) = source;",
+        "(async)(parameter) => value;",
+        "'use strict'; eval = source;",
+        "'use strict'; \\u0065val = source;",
+        "'use strict'; arguments++;",
+        "'use strict'; factory() += source;",
+        "'use strict'; for (factory() in source) {}",
+    ];
+    for source in invalid {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                source_kind: SourceKind::Script,
+                ..ParseOptions::default()
+            },
+        )
+        .expect(source);
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect(source);
+    }
+}
+
+#[test]
+fn parser_should_apply_contextual_keyword_assignment_policies() {
+    let module = parse(
+        "function nested() { await = source; }",
+        ParseOptions {
+            semantic_errors: true,
+            source_kind: SourceKind::Module,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("module await restriction");
+    assert!(!module.diagnostics.is_empty());
+    module.tape.validate().expect("valid module recovery tape");
+
+    let typescript_js = parse(
+        "function load() { await new Promise(undefined); }",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            semantic_errors: true,
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("TypeScript JavaScript compatibility");
+    assert!(
+        typescript_js.diagnostics.is_empty(),
+        "{:?}",
+        typescript_js.diagnostics
+    );
+    let standard_js = parse(
+        "function load() { await new Promise(undefined); }",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("standard JavaScript await grammar");
+    assert!(!standard_js.diagnostics.is_empty());
+}
+
+#[test]
+fn parser_should_apply_optional_chaining_assignment_policy() {
+    let optional_assignment = parse(
+        "target?.member = value; (target?.member) += value; target?.member ||= value; target?.member &&= value; target?.member ??= value;",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            semantic_errors: true,
+            syntax_extensions: SyntaxExtensions {
+                optional_chaining_assign: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("optional chaining assignment compatibility");
+    assert!(
+        optional_assignment.diagnostics.is_empty(),
+        "{:?}",
+        optional_assignment.diagnostics
+    );
+
+    for source in [
+        "target?.member++;",
+        "for (target?.member in source) {}",
+        "target?.() = value;",
+        "({ value: target?.member } = source);",
+        "[target?.member] = source;",
+        "(target?.member) => value;",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Script,
+                semantic_errors: true,
+                syntax_extensions: SyntaxExtensions {
+                    optional_chaining_assign: true,
+                    ..SyntaxExtensions::default()
+                },
+                ..ParseOptions::default()
+            },
+        )
+        .expect(source);
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+    }
 }
 
 /// Every ECMAScript statement family must produce its corresponding tape node without diagnostics.
@@ -888,6 +1042,7 @@ fn parser_should_diagnose_async_function_expression_early_errors() {
         "async function await() {}",
         ParseOptions {
             semantic_errors: true,
+            source_kind: SourceKind::Script,
             ..ParseOptions::default()
         },
     )
