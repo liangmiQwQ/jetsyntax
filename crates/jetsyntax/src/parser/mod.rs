@@ -629,6 +629,30 @@ impl<'s> Parser<'s> {
     #[allow(clippy::too_many_lines)]
     fn parse_export_declaration(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Export).start;
+        // Babel emits both TypeScript-only forms as standalone statements rather than ES export wrappers.
+        if self.options.language.is_typescript() && self.eat(TokenKind::Eq).is_some() {
+            let expression = self.parse_assignment_expression(true)?;
+            let end = self.consume_semicolon();
+            return self.node(
+                NodeTag::TS_EXPORT_ASSIGNMENT,
+                Span::new(start, end),
+                &[expression.value()],
+            );
+        }
+        if self.options.language.is_typescript()
+            && self.current.kind == TokenKind::As
+            && !self.current.flags.escaped()
+        {
+            self.bump();
+            self.expect(TokenKind::Namespace);
+            let id = self.parse_identifier()?;
+            let end = self.consume_semicolon();
+            return self.node(
+                NodeTag::TS_NAMESPACE_EXPORT_DECLARATION,
+                Span::new(start, end),
+                &[id.value()],
+            );
+        }
         if self.eat(TokenKind::Default).is_some() {
             let (declaration, needs_semicolon) = match self.current.kind {
                 TokenKind::Function => (self.parse_function(true, false)?, false),

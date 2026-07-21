@@ -514,6 +514,31 @@ describe("decodeTape", () => {
     });
   });
 
+  it("decodes TypeScript export assignment and namespace export records", () => {
+    const source = "export = value; export as namespace Library;";
+    const tape = new HandcraftedTape();
+    const value = tape.node(2, 9, 14, [tape.source(9, 14)]);
+    const assignment = tape.node(561, 0, 15, [value]);
+    const library = tape.node(2, 36, 43, [tape.source(36, 43)]);
+    const namespaceExport = tape.node(562, 16, 44, [library]);
+    const program = tape.node(1, 0, 44, [
+      tape.list([assignment, namespaceExport]),
+      tape.integer(1),
+    ]);
+
+    const decoded = decodeTape(source, tape.finish(program));
+    expect(decoded.body).toMatchObject([
+      {
+        type: "TSExportAssignment",
+        expression: { type: "Identifier", name: "value" },
+      },
+      {
+        type: "TSNamespaceExportDeclaration",
+        id: { type: "Identifier", name: "Library" },
+      },
+    ]);
+  });
+
   it("bounds recovery patterns that temporarily wrap expression nodes", () => {
     const source = "value";
     const tape = new HandcraftedTape();

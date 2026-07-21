@@ -161,6 +161,8 @@ for (
     [558, ["TSInterfaceHeritage", ["expression", "typeArguments"]]],
     [559, ["TSNullKeyword", []]],
     [560, ["TSTypeAssertion", ["typeAnnotation", "expression"]]],
+    [561, ["TSExportAssignment", ["expression"]]],
+    [562, ["TSNamespaceExportDeclaration", ["id"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -946,6 +948,12 @@ function decodeTapeInternal(source, tape, options, trusted) {
       case 560:
         node.typeAnnotation = fields[0];
         node.expression = fields[1];
+        return node;
+      case 561:
+        node.expression = fields[0];
+        return node;
+      case 562:
+        node.id = fields[0];
         return node;
       case 531:
         node.typeAnnotation = fields[0];

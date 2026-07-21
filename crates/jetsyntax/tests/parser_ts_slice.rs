@@ -154,6 +154,70 @@ fn parses_named_typescript_declarations_and_nested_generics() {
 }
 
 #[test]
+fn parses_typescript_export_assignment_and_namespace_export() {
+    let source = "export = Namespace.factory; export as namespace JetSyntax;";
+    assert_clean_with_tags(
+        "TypeScript export forms",
+        source,
+        &[
+            NodeTag::TS_EXPORT_ASSIGNMENT,
+            NodeTag::TS_NAMESPACE_EXPORT_DECLARATION,
+        ],
+    );
+
+    let parsed = parse(source, typescript_options()).expect("parse TypeScript export forms");
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_EXPORT_ASSIGNMENT,
+        0,
+        NodeTag::MEMBER_EXPRESSION,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_NAMESPACE_EXPORT_DECLARATION,
+        0,
+        NodeTag::IDENTIFIER,
+    );
+    assert_node_field_count(&parsed, NodeTag::TS_EXPORT_ASSIGNMENT, 1);
+    assert_node_field_count(&parsed, NodeTag::TS_NAMESPACE_EXPORT_DECLARATION, 1);
+}
+
+#[test]
+fn malformed_typescript_exports_recover_to_valid_tapes() {
+    for source in ["export = ;", "export as value;"] {
+        let parsed = parse(source, typescript_options()).expect("recoverable TypeScript parse");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid recovery tape");
+    }
+}
+
+#[test]
+fn keeps_typescript_export_forms_out_of_javascript() {
+    let parsed = parse(
+        "export = value; export as namespace Library;",
+        ParseOptions {
+            language: Language::JavaScript,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("recoverable JavaScript parse");
+    assert!(!parsed.diagnostics.is_empty());
+    parsed.tape.validate().expect("valid recovery tape");
+
+    let tags: Vec<_> = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node { tag, .. } => Some(tag),
+            _ => None,
+        })
+        .collect();
+    assert!(!tags.contains(&NodeTag::TS_EXPORT_ASSIGNMENT));
+    assert!(!tags.contains(&NodeTag::TS_NAMESPACE_EXPORT_DECLARATION));
+}
+
+#[test]
 fn parses_typescript_expression_wrappers_without_diagnostics() {
     let cases = [
         (
