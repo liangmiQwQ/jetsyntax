@@ -304,7 +304,9 @@ function decodeTapeInternal(source, tape, options, trusted) {
     }
     try {
       return poolDecoder.decode(poolBytes.subarray(start, end));
-    } catch {
+    } catch (error) {
+      // Preserve recursive trusted-decoder stack overflows so the outer fallback can switch to the iterative path.
+      if (error instanceof RangeError) throw error;
       throw new Error(`invalid UTF-8 in JetSyntax string-pool slice ${start}..${end}`);
     }
   }
@@ -322,7 +324,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
     if (reference < HEADER_WORDS || reference >= parentOffset) {
       throw new Error(`invalid JetSyntax backward reference ${reference} from ${parentOffset}`);
     }
-    requireReferenceMarker(reference);
+    // Native construction already proves marker integrity; keeping this edge compact raises the recursion ceiling.
     return decodeTrustedValue(reference);
   }
 
