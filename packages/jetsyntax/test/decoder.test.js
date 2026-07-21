@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeTape } from "../decoder.js";
+import { decodeTape, decodeTrustedTape } from "../decoder.js";
 
 const KIND_NODE = 1;
 const KIND_LIST = 2;
@@ -131,7 +131,8 @@ describe("decodeTape", () => {
     const program = tape.node(1, 0, 5, [body, sourceType]);
 
     const encoded = tape.finish(program);
-    const decoded = decodeTape(source, encoded);
+    const decoded = decodeTape(source, encoded, { range: true });
+    expect(decodeTrustedTape(source, encoded, { range: true })).toEqual(decoded);
     expect(decoded.end).toBe(3);
     expect(decoded.body[0].expression).toMatchObject({ name: "<invalid>", start: 0, end: 2 });
 
@@ -549,6 +550,29 @@ describe("decodeTape", () => {
     });
   });
 
+  it("falls back to iterative decoding for deeply nested valid tapes", () => {
+    const source = "value";
+    const tape = new HandcraftedTape();
+    const name = tape.source(0, source.length);
+    let expression = tape.node(2, 0, source.length, [name]);
+    const depth = 20_000;
+    for (let index = 0; index < depth; index++) {
+      expression = tape.node(72, 0, source.length, [expression]);
+    }
+    const statement = tape.node(5, 0, source.length, [expression]);
+    const body = tape.list([statement]);
+    const sourceType = tape.integer(0);
+    const program = tape.node(1, 0, source.length, [body, sourceType]);
+
+    const decoded = decodeTrustedTape(source, tape.finish(program));
+    let current = decoded.body[0].expression;
+    for (let index = 0; index < depth; index++) {
+      expect(current.type).toBe("ParenthesizedExpression");
+      current = current.expression;
+    }
+    expect(current).toMatchObject({ type: "Identifier", name: "value" });
+  });
+
   it("fails loudly for unsupported, unknown, and malformed tags", () => {
     for (const [tag, message] of [[260, "unsupported"], [4096, "unknown"]]) {
       const tape = new HandcraftedTape();
@@ -560,5 +584,8 @@ describe("decodeTape", () => {
     const child = tape.null();
     const root = tape.node(1, 0, 0, [child, child + 1]);
     expect(() => decodeTape("", tape.finish(root))).toThrow("invalid JetSyntax backward reference");
+    expect(() => decodeTrustedTape("", tape.finish(root))).toThrow(
+      "invalid JetSyntax backward reference",
+    );
   });
 });

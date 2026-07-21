@@ -234,6 +234,20 @@ const SOURCE_TYPES = ["script", "module", "commonjs"];
 const TS_MODULE_KINDS = ["namespace", "module"];
 
 export function decodeTape(source, tape, options = {}) {
+  return decodeTapeInternal(source, tape, options, false);
+}
+
+export function decodeTrustedTape(source, tape, options = {}) {
+  try {
+    return decodeTapeInternal(source, tape, options, true);
+  } catch (error) {
+    // Recursive materialization is faster for native-validated tapes, but deeply nested valid input must remain decodable.
+    if (error instanceof RangeError) return decodeTape(source, tape, options);
+    throw error;
+  }
+}
+
+function decodeTapeInternal(source, tape, options, trusted) {
   if (!(tape instanceof Uint32Array)) {
     throw new TypeError("JetSyntax tape must be a Uint32Array");
   }
@@ -252,7 +266,7 @@ export function decodeTape(source, tape, options = {}) {
   const poolDecoder = new TextDecoder("utf-8", { fatal: true });
   const numberBytes = new ArrayBuffer(8);
   const numberView = new DataView(numberBytes);
-  const decoded = new Array(header.recordEnd);
+  const decoded = trusted ? null : new Array(header.recordEnd);
 
   function sourceSlice(start, end) {
     if (start > end) {
@@ -284,11 +298,110 @@ export function decodeTape(source, tape, options = {}) {
     }
   }
 
-  function readReference(reference, parentOffset) {
+  function readDecodedReference(reference, parentOffset) {
     if (reference >= parentOffset || decoded[reference] === undefined) {
       throw new Error(`invalid JetSyntax backward reference ${reference} from ${parentOffset}`);
     }
     return decoded[reference];
+  }
+
+  // Native tapes are validated postfix trees, so their references can be materialized without a cache.
+  function readTrustedReference(reference, parentOffset) {
+    if (reference < HEADER_WORDS || reference >= parentOffset) {
+      throw new Error(`invalid JetSyntax backward reference ${reference} from ${parentOffset}`);
+    }
+    return decodeTrustedValue(reference);
+  }
+
+  const readReference = trusted ? readTrustedReference : readDecodedReference;
+
+  function decodeTrustedValue(offset) {
+    requireWords(offset, 1, header.recordEnd);
+    const record = tape[offset];
+    const kind = (record & KIND_MASK) >>> KIND_SHIFT;
+    switch (kind) {
+      case KIND_NODE: {
+        requireWords(offset, 5, header.recordEnd);
+        const size = 5 + tape[offset + 4];
+        if (tape[offset + 1] !== size) {
+          throw new Error(`invalid JetSyntax node length at word ${offset}`);
+        }
+        requireWords(offset, size, header.recordEnd);
+        return decodeNode(offset, record);
+      }
+      case KIND_LIST: {
+        requireWords(offset, 3, header.recordEnd);
+        const count = tape[offset + 2];
+        const size = 3 + count;
+        if (record !== KIND_LIST << KIND_SHIFT || tape[offset + 1] !== size) {
+          throw new Error(`invalid JetSyntax list record at word ${offset}`);
+        }
+        requireWords(offset, size, header.recordEnd);
+        const value = new Array(count);
+        for (let index = 0; index < count; index++) {
+          value[index] = readTrustedReference(tape[offset + 3 + index], offset);
+        }
+        return value;
+      }
+      case KIND_NULL:
+        if (record !== (KIND_NULL << KIND_SHIFT) >>> 0) {
+          throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+        }
+        return null;
+      case KIND_BOOL:
+        if ((record & ~1) !== KIND_BOOL << KIND_SHIFT) {
+          throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+        }
+        return (record & 1) !== 0;
+      case KIND_INLINE_U32:
+        return record & INLINE_U32_MASK;
+      case KIND_U32:
+        if (record !== (KIND_U32 << KIND_SHIFT) >>> 0) {
+          throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+        }
+        requireWords(offset, 2, header.recordEnd);
+        return tape[offset + 1];
+      case KIND_F64:
+        if (record !== (KIND_F64 << KIND_SHIFT) >>> 0) {
+          throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+        }
+        requireWords(offset, 3, header.recordEnd);
+        numberView.setUint32(0, tape[offset + 1], true);
+        numberView.setUint32(4, tape[offset + 2], true);
+        return numberView.getFloat64(0, true);
+      case KIND_SOURCE_SLICE:
+        if (record !== (KIND_SOURCE_SLICE << KIND_SHIFT) >>> 0) {
+          throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+        }
+        requireWords(offset, 3, header.recordEnd);
+        return sourceSlice(tape[offset + 1], tape[offset + 2]);
+      case KIND_POOL_STRING:
+        if (record !== (KIND_POOL_STRING << KIND_SHIFT) >>> 0) {
+          throw new Error(`unknown or malformed JetSyntax value at word ${offset}`);
+        }
+        requireWords(offset, 3, header.recordEnd);
+        return poolString(tape[offset + 1], tape[offset + 2]);
+      default:
+        throw new Error(`unknown JetSyntax tape value kind ${kind} at word ${offset}`);
+    }
+  }
+
+  function decodeTrustedRoot() {
+    const root = header.root;
+    if (root < HEADER_WORDS || root >= header.recordEnd) {
+      throw new Error(`invalid JetSyntax tape root offset ${root}`);
+    }
+    const record = tape[root];
+    if ((record >>> KIND_SHIFT) !== KIND_NODE) {
+      throw new Error("invalid JetSyntax tape: root record is not a node");
+    }
+    requireWords(root, 5, header.recordEnd);
+    const size = 5 + tape[root + 4];
+    if (tape[root + 1] !== size || root + size !== header.recordEnd) {
+      throw new Error(`invalid JetSyntax tape root offset ${root}`);
+    }
+    requireWords(root, size, header.recordEnd);
+    return decodeNode(root, record);
   }
 
   function decodeRecords() {
@@ -921,7 +1034,7 @@ export function decodeTape(source, tape, options = {}) {
     }
   }
 
-  return decodeRecords();
+  return trusted ? decodeTrustedRoot() : decodeRecords();
 }
 
 function validateHeader(tape) {
