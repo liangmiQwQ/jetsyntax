@@ -132,8 +132,8 @@ fn parse_jetsyntax(source: &str, language: Language) -> Duration {
 }
 
 fn parse_oxc(source: &str, source_type: SourceType) -> Duration {
-    let allocator = OxcAllocator::default();
     let start = Instant::now();
+    let allocator = OxcAllocator::default();
     let result = OxcParser::new(&allocator, black_box(source), source_type).parse();
     let elapsed = start.elapsed();
     assert!(result.diagnostics.is_empty());

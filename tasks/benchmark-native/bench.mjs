@@ -53,6 +53,7 @@ const report = {
     speedup: "(Yuku median / JetSyntax median - 1) * 100",
     materialization: "parse plus access to the returned syntax-tree storage length",
     allocation: "parser-owned output allocation is included; output destruction is excluded",
+    processes: "Rust parsers share one process; pinned Yuku runs in a separate Zig process; startup is excluded",
   },
   buildFlags: {
     Rust: `cargo build --release; RUSTFLAGS=${rustFlags}`,

@@ -77,6 +77,7 @@ const report = {
     statistic: "median wall-clock latency",
     speedup: "(Yuku median / JetSyntax median - 1) * 100",
     materialization: "synchronous parse plus access to the returned Program body",
+    sampling: "parsers are interleaved in rotating order within every fixture",
   },
   parsers,
   fixtures: Object.fromEntries(
