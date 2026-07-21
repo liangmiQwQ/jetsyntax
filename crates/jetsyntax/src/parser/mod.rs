@@ -104,6 +104,7 @@ struct ParsedParameterList {
     value: ValueRef,
     count: usize,
     has_rest: bool,
+    has_trailing_comma: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -364,6 +365,7 @@ impl<'s> Parser<'s> {
     fn parse_parameter_list(&mut self) -> Result<ParsedParameterList, ParseError> {
         let mut params = Vec::new();
         let mut has_rest = false;
+        let mut has_trailing_comma = false;
         while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
             let parameter = if self.eat(TokenKind::Ellipsis).is_some() {
                 has_rest = true;
@@ -376,11 +378,14 @@ impl<'s> Parser<'s> {
             if self.eat(TokenKind::Comma).is_none() {
                 break;
             }
+            has_trailing_comma =
+                matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof);
         }
         Ok(ParsedParameterList {
             count: params.len(),
             value: self.tape.push_list(&params)?,
             has_rest,
+            has_trailing_comma,
         })
     }
 
@@ -422,10 +427,12 @@ impl<'s> Parser<'s> {
         if accessor == Some(ClassAccessorKind::Get) && params.count != 0 {
             self.error(self.current_span(), "class getter must not have parameters");
         }
-        if accessor == Some(ClassAccessorKind::Set) && (params.count != 1 || params.has_rest) {
+        if accessor == Some(ClassAccessorKind::Set)
+            && (params.count != 1 || params.has_rest || params.has_trailing_comma)
+        {
             self.error(
                 self.current_span(),
-                "class setter must have exactly one non-rest parameter",
+                "class setter must have exactly one non-rest parameter without a trailing comma",
             );
         }
         self.expect(TokenKind::RightParen);

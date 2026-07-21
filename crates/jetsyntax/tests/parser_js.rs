@@ -921,6 +921,11 @@ fn parser_should_diagnose_public_class_accessor_early_errors() {
             &[NodeTag::METHOD_DEFINITION],
         ),
         GrammarCase::script(
+            "setter trailing comma",
+            "class C { set value(parameter,) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
             "getter constructor",
             "class C { get constructor() {} }",
             &[NodeTag::METHOD_DEFINITION],

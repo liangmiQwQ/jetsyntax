@@ -340,6 +340,7 @@ describe("parse", () => {
       "class C { set value() {} }",
       "class C { set value(first, second) {} }",
       "class C { set value(...values) {} }",
+      "class C { set value(parameter,) {} }",
       "class C { get constructor() {} }",
       "class C { set 'constructor'(value) {} }",
       "class C { get \"constr\\u0075ctor\"() {} }",
