@@ -286,7 +286,13 @@ struct BuilderRecord {
     incoming: u32,
 }
 
-/// A speculative parse snapshot. Record identities make stale branch handles detectable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuilderMode {
+    Safe,
+    Parser,
+}
+
+/// A speculative parse snapshot. Safe builders use record identities to detect stale branches.
 #[derive(Clone, Copy, Debug)]
 pub struct Checkpoint {
     builder_id: u64,
@@ -294,6 +300,7 @@ pub struct Checkpoint {
     pool_len: usize,
     records_len: usize,
     last_record_id: Option<u64>,
+    value_count: u32,
     node_count: u32,
 }
 
@@ -359,29 +366,51 @@ impl Error for TapeError {}
 /// Mutable postfix tape writer used directly by the parser.
 #[derive(Debug)]
 pub struct TapeBuilder {
+    mode: BuilderMode,
     id: u64,
     next_record_id: u64,
     source_bytes: u32,
     words: Vec<u32>,
     string_pool: Vec<u8>,
     records: Vec<BuilderRecord>,
+    value_count: u32,
     node_count: u32,
 }
 
 impl TapeBuilder {
     #[must_use]
     pub fn new(source_bytes: u32) -> Self {
+        Self::with_mode(source_bytes, BuilderMode::Safe)
+    }
+
+    /// Creates the low-overhead builder used only by the parser.
+    ///
+    /// The parser must emit current-branch backward references. [`Self::finish`] strictly validates
+    /// the completed wire tape before returning it.
+    #[must_use]
+    #[allow(dead_code)] // Parser integration is owned by a separate concurrent change.
+    pub(crate) fn new_parser(source_bytes: u32) -> Self {
+        Self::with_mode(source_bytes, BuilderMode::Parser)
+    }
+
+    fn with_mode(source_bytes: u32, mode: BuilderMode) -> Self {
         let source_len = source_bytes as usize;
         let mut words =
             Vec::with_capacity(HEADER_WORDS + source_len.min(MAX_INITIAL_WORD_CAPACITY));
         words.resize(HEADER_WORDS, 0);
         Self {
+            mode,
             id: NEXT_BUILDER_ID.fetch_add(1, Ordering::Relaxed),
             next_record_id: 1,
             source_bytes,
             words,
             string_pool: Vec::new(),
-            records: Vec::with_capacity((source_len / 4).min(MAX_INITIAL_RECORD_CAPACITY)),
+            records: if mode == BuilderMode::Safe {
+                Vec::with_capacity((source_len / 4).min(MAX_INITIAL_RECORD_CAPACITY))
+            } else {
+                Vec::new()
+            },
+            value_count: 0,
             node_count: 0,
         }
     }
@@ -394,6 +423,7 @@ impl TapeBuilder {
             pool_len: self.string_pool.len(),
             records_len: self.records.len(),
             last_record_id: self.records.last().map(|record| record.id),
+            value_count: self.value_count,
             node_count: self.node_count,
         }
     }
@@ -404,17 +434,21 @@ impl TapeBuilder {
     ///
     /// Returns [`TapeError::ForeignCheckpoint`] for a stale or foreign snapshot.
     pub fn rollback(&mut self, checkpoint: Checkpoint) -> Result<(), TapeError> {
-        let branch_matches = match checkpoint.last_record_id {
-            Some(id) => self
-                .records
-                .get(checkpoint.records_len.saturating_sub(1))
-                .is_some_and(|record| record.id == id),
-            None => checkpoint.records_len == 0,
+        let branch_matches = match self.mode {
+            BuilderMode::Safe => match checkpoint.last_record_id {
+                Some(id) => self
+                    .records
+                    .get(checkpoint.records_len.saturating_sub(1))
+                    .is_some_and(|record| record.id == id),
+                None => checkpoint.records_len == 0,
+            },
+            BuilderMode::Parser => checkpoint.records_len == 0,
         };
         if checkpoint.builder_id != self.id
             || checkpoint.words_len > self.words.len()
             || checkpoint.pool_len > self.string_pool.len()
             || checkpoint.records_len > self.records.len()
+            || checkpoint.value_count > self.value_count
             || !branch_matches
         {
             return Err(TapeError::ForeignCheckpoint);
@@ -423,6 +457,7 @@ impl TapeBuilder {
         self.words.truncate(checkpoint.words_len);
         self.string_pool.truncate(checkpoint.pool_len);
         self.records.truncate(checkpoint.records_len);
+        self.value_count = checkpoint.value_count;
         self.node_count = checkpoint.node_count;
         Ok(())
     }
@@ -570,21 +605,42 @@ impl TapeBuilder {
         Ok(NodeRef(value_ref))
     }
 
+    pub(crate) fn retag_node(&mut self, node: NodeRef, tag: NodeTag) -> Result<(), TapeError> {
+        if tag.get() == 0 {
+            return Err(TapeError::InvalidTag);
+        }
+        if self.mode == BuilderMode::Safe {
+            self.validate_reference(node.as_value())?;
+        } else if node.0.builder_id != self.id || node.offset() as usize >= self.words.len() {
+            return Err(TapeError::ForeignReference);
+        }
+        let offset = node.offset() as usize;
+        debug_assert_eq!((self.words[offset] & KIND_MASK) >> KIND_SHIFT, KIND_NODE);
+        self.words[offset] = (self.words[offset] & !NODE_TAG_MASK) | u32::from(tag.get());
+        Ok(())
+    }
+
     /// Seals the final node as the root and validates the complete wire tape.
     ///
     /// # Errors
     ///
     /// Returns an error if `root` is stale, non-final, or the resulting tree is malformed.
     pub fn finish(mut self, root: NodeRef) -> Result<FrozenTape, TapeError> {
-        self.validate_reference(root.as_value())?;
-        if self
-            .records
-            .last()
-            .is_none_or(|record| record.offset != root.offset() || record.id != root.0.record_id)
-        {
-            return Err(TapeError::RootMustBeFinalNode);
+        match self.mode {
+            BuilderMode::Safe => {
+                self.validate_reference(root.as_value())?;
+                if self.records.last().is_none_or(|record| {
+                    record.offset != root.offset() || record.id != root.0.record_id
+                }) {
+                    return Err(TapeError::RootMustBeFinalNode);
+                }
+                self.validate_tree_references()?;
+            }
+            BuilderMode::Parser if root.0.builder_id != self.id => {
+                return Err(TapeError::ForeignReference);
+            }
+            BuilderMode::Parser => {}
         }
-        self.validate_tree_references()?;
 
         let record_end = to_u32(self.words.len())?;
         let pool_bytes = to_u32(self.string_pool.len())?;
@@ -604,10 +660,13 @@ impl TapeBuilder {
         self.words[HEADER_ROOT] = root.offset();
         self.words[HEADER_SOURCE_BYTES] = self.source_bytes;
         self.words[HEADER_NODE_COUNT] = self.node_count;
-        self.words[HEADER_VALUE_COUNT] = to_u32(self.records.len())?;
+        self.words[HEADER_VALUE_COUNT] = self.value_count;
         self.words[HEADER_RESERVED] = 0;
 
-        Ok(FrozenTape::from_builder(self.words, self.records))
+        match self.mode {
+            BuilderMode::Safe => Ok(FrozenTape::from_builder(self.words, self.records)),
+            BuilderMode::Parser => FrozenTape::from_words(self.words),
+        }
     }
 
     fn push_record(&mut self, words: &[u32]) -> Result<ValueRef, TapeError> {
@@ -619,22 +678,37 @@ impl TapeBuilder {
     }
 
     fn take_record_id(&mut self) -> Result<u64, TapeError> {
-        let record_id = self.next_record_id;
-        self.next_record_id = self
-            .next_record_id
-            .checked_add(1)
-            .ok_or(TapeError::TooLarge)?;
+        let value_count = self.value_count.checked_add(1).ok_or(TapeError::TooLarge)?;
+        let record_id = match self.mode {
+            BuilderMode::Safe => {
+                let record_id = self.next_record_id;
+                let next_record_id = self
+                    .next_record_id
+                    .checked_add(1)
+                    .ok_or(TapeError::TooLarge)?;
+                self.next_record_id = next_record_id;
+                record_id
+            }
+            BuilderMode::Parser => 0,
+        };
+        self.value_count = value_count;
         Ok(record_id)
     }
 
     fn complete_record(&mut self, offset: u32, record_id: u64) -> ValueRef {
-        let record_index = u32::try_from(self.records.len())
-            .expect("record count cannot exceed the validated u32 tape length");
-        self.records.push(BuilderRecord {
-            id: record_id,
-            offset,
-            incoming: 0,
-        });
+        let record_index = self.value_count.saturating_sub(1);
+        debug_assert!(
+            self.value_count > 0,
+            "completed records must increment the value count"
+        );
+        if self.mode == BuilderMode::Safe {
+            debug_assert_eq!(self.records.len(), record_index as usize);
+            self.records.push(BuilderRecord {
+                id: record_id,
+                offset,
+                incoming: 0,
+            });
+        }
         ValueRef {
             builder_id: self.id,
             record_id,
@@ -654,6 +728,9 @@ impl TapeBuilder {
     }
 
     fn mark_references(&mut self, references: &[ValueRef]) -> Result<(), TapeError> {
+        if self.mode == BuilderMode::Parser {
+            return Ok(());
+        }
         for (marked, reference) in references.iter().enumerate() {
             let index = match self.reference_index(*reference) {
                 Ok(index) => index,
@@ -672,6 +749,9 @@ impl TapeBuilder {
     }
 
     fn unmark_references(&mut self, references: &[ValueRef]) {
+        if self.mode == BuilderMode::Parser {
+            return;
+        }
         for reference in references {
             let Ok(index) = self.reference_index(*reference) else {
                 debug_assert!(false, "marked builder references must remain valid");
@@ -687,6 +767,9 @@ impl TapeBuilder {
     }
 
     fn unmark_discarded_references(&mut self, retained_records: usize) -> Result<(), TapeError> {
+        if self.mode == BuilderMode::Parser {
+            return Ok(());
+        }
         for record_index in retained_records..self.records.len() {
             let offset = to_usize(self.records[record_index].offset)?;
             let kind = (self.words[offset] & KIND_MASK) >> KIND_SHIFT;
@@ -1522,6 +1605,132 @@ mod tests {
 
         assert_eq!(trusted.words, strict.words);
         assert_eq!(trusted.record_offsets, strict.record_offsets);
+    }
+
+    #[test]
+    fn parser_builder_matches_safe_builder_without_record_metadata() {
+        fn program(mut builder: TapeBuilder) -> (TapeBuilder, NodeRef) {
+            let name = builder.push_source_slice(Span::new(0, 4)).expect("name");
+            let identifier = builder
+                .push_node(NodeTag::IDENTIFIER, Span::new(0, 4), 0, &[name])
+                .expect("identifier");
+            let body = builder.push_list(&[identifier.into()]).expect("body");
+            let source_type = builder.push_u32(1).expect("source type");
+            let root = builder
+                .push_node(NodeTag::PROGRAM, Span::new(0, 8), 0, &[body, source_type])
+                .expect("program");
+            (builder, root)
+        }
+
+        let (safe, safe_root) = program(TapeBuilder::new(8));
+        let (parser, parser_root) = program(TapeBuilder::new_parser(8));
+        assert!(parser.records.is_empty());
+        assert_eq!(parser.value_count, 5);
+
+        let safe = safe.finish(safe_root).expect("safe finish");
+        let parser = parser.finish(parser_root).expect("parser finish");
+
+        assert_eq!(parser.words, safe.words);
+        assert_eq!(parser.record_offsets, safe.record_offsets);
+    }
+
+    #[test]
+    fn parser_builder_finish_rejects_unreachable_records() {
+        let mut tape = TapeBuilder::new_parser(0);
+        let _unused = tape.push_null().expect("unused");
+        let used = tape.push_bool(true).expect("used");
+        let root = tape
+            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[used])
+            .expect("root");
+
+        assert!(matches!(
+            tape.finish(root),
+            Err(TapeError::MalformedRecord {
+                reason: "non-root record is not referenced exactly once",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parser_builder_finish_rejects_shared_records() {
+        let mut tape = TapeBuilder::new_parser(0);
+        let value = tape.push_null().expect("shared");
+        let root = tape
+            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[value, value])
+            .expect("root");
+
+        assert!(matches!(
+            tape.finish(root),
+            Err(TapeError::MalformedRecord {
+                reason: "record is referenced more than once",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parser_builder_finish_rejects_forward_references() {
+        let mut tape = TapeBuilder::new_parser(0);
+        let forward = ValueRef {
+            builder_id: tape.id,
+            record_id: 0,
+            record_index: 0,
+            offset: to_u32(tape.words.len()).expect("future offset"),
+        };
+        let root = tape
+            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[forward])
+            .expect("trusted append");
+
+        assert!(matches!(
+            tape.finish(root),
+            Err(TapeError::MalformedRecord {
+                reason: "reference does not point backward",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parser_builder_rollback_restores_counts_and_allows_reuse() {
+        let mut tape = TapeBuilder::new_parser(0);
+        let retained = tape.push_null().expect("retained value");
+        let checkpoint = tape.checkpoint();
+        let _discarded = tape
+            .push_node(NodeTag::IDENTIFIER, Span::new(0, 0), 0, &[retained])
+            .expect("discarded node");
+        tape.rollback(checkpoint).expect("rollback");
+        assert_eq!(tape.value_count, 1);
+        assert_eq!(tape.node_count, 0);
+        assert!(tape.records.is_empty());
+
+        let root = tape
+            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[retained])
+            .expect("program");
+        let tape = tape.finish(root).expect("finish tape");
+        assert_eq!(tape.header().value_count, 2);
+    }
+
+    #[test]
+    fn parser_builder_retags_nodes_without_record_metadata() {
+        let mut tape = TapeBuilder::new_parser(0);
+        let node = tape
+            .push_node(NodeTag::IDENTIFIER, Span::new(0, 0), 0, &[])
+            .expect("identifier");
+        tape.retag_node(node, NodeTag::PRIVATE_IDENTIFIER)
+            .expect("retag node");
+        let root = tape
+            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[node.into()])
+            .expect("program");
+        let tape = tape.finish(root).expect("finish tape");
+
+        assert!(matches!(
+            tape.value_at(node.offset()),
+            Ok(TapeValue::Node {
+                tag: NodeTag::PRIVATE_IDENTIFIER,
+                ..
+            })
+        ));
     }
 
     #[test]
