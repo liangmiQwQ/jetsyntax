@@ -247,8 +247,9 @@ impl From<NodeRef> for ValueRef {
 
 #[derive(Clone, Copy, Debug)]
 struct BuilderRecord {
-    offset: u32,
     id: u64,
+    offset: u32,
+    incoming: u32,
 }
 
 /// A speculative parse snapshot. Record identities make stale branch handles detectable.
@@ -380,6 +381,7 @@ impl TapeBuilder {
         {
             return Err(TapeError::ForeignCheckpoint);
         }
+        self.unmark_discarded_references(checkpoint.records_len)?;
         self.words.truncate(checkpoint.words_len);
         self.string_pool.truncate(checkpoint.pool_len);
         self.records.truncate(checkpoint.records_len);
@@ -460,19 +462,26 @@ impl TapeBuilder {
     ///
     /// Returns an error for a stale/foreign reference or an oversized tape.
     pub fn push_list(&mut self, items: &[ValueRef]) -> Result<ValueRef, TapeError> {
-        self.validate_references(items)?;
         let words = 3_usize
             .checked_add(items.len())
             .ok_or(TapeError::TooLarge)?;
         let words_u32 = to_u32(words)?;
         let items_u32 = to_u32(items.len())?;
         self.ensure_record_capacity(words)?;
+        self.mark_references(items)?;
+        let record_id = match self.take_record_id() {
+            Ok(record_id) => record_id,
+            Err(error) => {
+                self.unmark_references(items);
+                return Err(error);
+            }
+        };
 
         let offset = to_u32(self.words.len())?;
         self.words
             .extend_from_slice(&[KIND_LIST << KIND_SHIFT, words_u32, items_u32]);
         self.words.extend(items.iter().map(|item| item.offset));
-        self.complete_record(offset)
+        Ok(self.complete_record(offset, record_id))
     }
 
     /// Appends a node whose schema-ordered fields are previously completed values.
@@ -491,7 +500,6 @@ impl TapeBuilder {
             return Err(TapeError::InvalidTag);
         }
         self.validate_span(span)?;
-        self.validate_references(fields)?;
         let words = 5_usize
             .checked_add(fields.len())
             .ok_or(TapeError::TooLarge)?;
@@ -499,6 +507,14 @@ impl TapeBuilder {
         let fields_u32 = to_u32(fields.len())?;
         self.ensure_record_capacity(words)?;
         let next_node_count = self.node_count.checked_add(1).ok_or(TapeError::TooLarge)?;
+        self.mark_references(fields)?;
+        let record_id = match self.take_record_id() {
+            Ok(record_id) => record_id,
+            Err(error) => {
+                self.unmark_references(fields);
+                return Err(error);
+            }
+        };
 
         let offset = to_u32(self.words.len())?;
         self.words.extend_from_slice(&[
@@ -511,7 +527,7 @@ impl TapeBuilder {
             fields_u32,
         ]);
         self.words.extend(fields.iter().map(|field| field.offset));
-        let value_ref = self.complete_record(offset)?;
+        let value_ref = self.complete_record(offset, record_id);
         self.node_count = next_node_count;
         Ok(NodeRef(value_ref))
     }
@@ -530,6 +546,7 @@ impl TapeBuilder {
         {
             return Err(TapeError::RootMustBeFinalNode);
         }
+        self.validate_tree_references()?;
 
         let record_end = to_u32(self.words.len())?;
         let pool_bytes = to_u32(self.string_pool.len())?;
@@ -552,31 +569,37 @@ impl TapeBuilder {
         self.words[HEADER_VALUE_COUNT] = to_u32(self.records.len())?;
         self.words[HEADER_RESERVED] = 0;
 
-        FrozenTape::from_words(self.words)
+        Ok(FrozenTape::from_builder(self.words, self.records))
     }
 
     fn push_record(&mut self, words: &[u32]) -> Result<ValueRef, TapeError> {
         self.ensure_record_capacity(words.len())?;
+        let record_id = self.take_record_id()?;
         let offset = to_u32(self.words.len())?;
         self.words.extend_from_slice(words);
-        self.complete_record(offset)
+        Ok(self.complete_record(offset, record_id))
     }
 
-    fn complete_record(&mut self, offset: u32) -> Result<ValueRef, TapeError> {
+    fn take_record_id(&mut self) -> Result<u64, TapeError> {
         let record_id = self.next_record_id;
         self.next_record_id = self
             .next_record_id
             .checked_add(1)
             .ok_or(TapeError::TooLarge)?;
+        Ok(record_id)
+    }
+
+    fn complete_record(&mut self, offset: u32, record_id: u64) -> ValueRef {
         self.records.push(BuilderRecord {
-            offset,
             id: record_id,
+            offset,
+            incoming: 0,
         });
-        Ok(ValueRef {
+        ValueRef {
             builder_id: self.id,
             record_id,
             offset,
-        })
+        }
     }
 
     fn ensure_record_capacity(&self, additional: usize) -> Result<(), TapeError> {
@@ -589,14 +612,96 @@ impl TapeBuilder {
         Ok(())
     }
 
-    fn validate_references(&self, references: &[ValueRef]) -> Result<(), TapeError> {
-        for reference in references {
-            self.validate_reference(*reference)?;
+    fn mark_references(&mut self, references: &[ValueRef]) -> Result<(), TapeError> {
+        for (marked, reference) in references.iter().enumerate() {
+            let index = match self.reference_index(*reference) {
+                Ok(index) => index,
+                Err(error) => {
+                    self.unmark_references(&references[..marked]);
+                    return Err(error);
+                }
+            };
+            let Some(incoming) = self.records[index].incoming.checked_add(1) else {
+                self.unmark_references(&references[..marked]);
+                return Err(TapeError::TooLarge);
+            };
+            self.records[index].incoming = incoming;
         }
         Ok(())
     }
 
-    fn validate_reference(&self, reference: ValueRef) -> Result<(), TapeError> {
+    fn unmark_references(&mut self, references: &[ValueRef]) {
+        for reference in references {
+            let Ok(index) = self.reference_index(*reference) else {
+                debug_assert!(false, "marked builder references must remain valid");
+                continue;
+            };
+            let incoming = &mut self.records[index].incoming;
+            debug_assert!(
+                *incoming > 0,
+                "marked builder references must have an incoming edge"
+            );
+            *incoming = incoming.saturating_sub(1);
+        }
+    }
+
+    fn unmark_discarded_references(&mut self, retained_records: usize) -> Result<(), TapeError> {
+        for record_index in retained_records..self.records.len() {
+            let offset = to_usize(self.records[record_index].offset)?;
+            let kind = (self.words[offset] & KIND_MASK) >> KIND_SHIFT;
+            let references = match kind {
+                KIND_NODE => offset + 5..offset + 5 + to_usize(self.words[offset + 4])?,
+                KIND_LIST => offset + 3..offset + 3 + to_usize(self.words[offset + 2])?,
+                _ => offset..offset,
+            };
+            for word in references {
+                let reference = self.words[word];
+                let Ok(target) = self
+                    .records
+                    .binary_search_by_key(&reference, |record| record.offset)
+                else {
+                    debug_assert!(false, "builder records only contain valid references");
+                    continue;
+                };
+                if target >= retained_records {
+                    continue;
+                }
+                let incoming = &mut self.records[target].incoming;
+                debug_assert!(
+                    *incoming > 0,
+                    "discarded references must have an incoming edge"
+                );
+                *incoming = incoming.saturating_sub(1);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_tree_references(&self) -> Result<(), TapeError> {
+        let Some((root, records)) = self.records.split_last() else {
+            return Err(TapeError::RootMustBeFinalNode);
+        };
+        if root.incoming != 0 {
+            return Err(TapeError::MalformedRecord {
+                offset: root.offset,
+                reason: "root is referenced by another record",
+            });
+        }
+        for record in records {
+            let reason = match record.incoming {
+                1 => continue,
+                0 => "non-root record is not referenced exactly once",
+                _ => "record is referenced more than once",
+            };
+            return Err(TapeError::MalformedRecord {
+                offset: record.offset,
+                reason,
+            });
+        }
+        Ok(())
+    }
+
+    fn reference_index(&self, reference: ValueRef) -> Result<usize, TapeError> {
         if reference.builder_id != self.id {
             return Err(TapeError::ForeignReference);
         }
@@ -609,7 +714,11 @@ impl TapeBuilder {
         if self.records[index].id != reference.record_id {
             return Err(TapeError::ForeignReference);
         }
-        Ok(())
+        Ok(index)
+    }
+
+    fn validate_reference(&self, reference: ValueRef) -> Result<(), TapeError> {
+        self.reference_index(reference).map(|_| ())
     }
 
     const fn validate_span(&self, span: Span) -> Result<(), TapeError> {
@@ -656,6 +765,19 @@ pub struct FrozenTape {
 }
 
 impl FrozenTape {
+    fn from_builder(words: Vec<u32>, records: Vec<BuilderRecord>) -> Self {
+        // Builder writes are already validated and carry exact incoming-edge counts.
+        let record_offsets = records
+            .into_iter()
+            .map(|record| record.offset)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            words: words.into_boxed_slice(),
+            record_offsets,
+        }
+    }
+
     /// Creates and validates a tape from host-endian words.
     ///
     /// # Errors
@@ -1337,6 +1459,26 @@ mod tests {
     }
 
     #[test]
+    fn trusted_finish_matches_strict_reparse() {
+        let mut builder = TapeBuilder::new(8);
+        let name = builder.push_source_slice(Span::new(0, 4)).expect("name");
+        let identifier = builder
+            .push_node(NodeTag::IDENTIFIER, Span::new(0, 4), 0, &[name])
+            .expect("identifier");
+        let body = builder.push_list(&[identifier.into()]).expect("body");
+        let source_type = builder.push_u32(1).expect("source type");
+        let root = builder
+            .push_node(NodeTag::PROGRAM, Span::new(0, 8), 0, &[body, source_type])
+            .expect("program");
+
+        let trusted = builder.finish(root).expect("trusted finish");
+        let strict = FrozenTape::from_words(trusted.words().to_vec()).expect("strict reparse");
+
+        assert_eq!(trusted.words, strict.words);
+        assert_eq!(trusted.record_offsets, strict.record_offsets);
+    }
+
+    #[test]
     fn f64_is_exactly_three_words_and_round_trips() {
         let value = -12_345.25_f64;
         let mut tape = TapeBuilder::new(0);
@@ -1500,7 +1642,34 @@ mod tests {
     }
 
     #[test]
+    fn rollback_removes_edges_from_discarded_records() {
+        let mut tape = TapeBuilder::new(0);
+        let retained = tape.push_null().expect("retained value");
+        let checkpoint = tape.checkpoint();
+        let _discarded = tape
+            .push_node(NodeTag::IDENTIFIER, Span::new(0, 0), 0, &[retained])
+            .expect("discarded node");
+        tape.rollback(checkpoint).expect("rollback");
+
+        let root = tape
+            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[retained])
+            .expect("program");
+        tape.finish(root).expect("finish tape");
+    }
+
+    #[test]
     fn rejects_forward_and_non_record_references() {
+        let mut builder = TapeBuilder::new(0);
+        let forward = ValueRef {
+            builder_id: builder.id,
+            record_id: builder.next_record_id,
+            offset: to_u32(builder.words.len()).expect("future offset"),
+        };
+        assert!(matches!(
+            builder.push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[forward]),
+            Err(TapeError::ForeignReference)
+        ));
+
         let mut tape = TapeBuilder::new(0);
         let value = tape.push_null().expect("value");
         let program = tape
@@ -1533,22 +1702,50 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unreachable_or_shared_records() {
+    fn trusted_finish_rejects_unreachable_records() {
         let mut tape = TapeBuilder::new(0);
-        let unused = tape.push_null().expect("unused");
+        let _unused = tape.push_null().expect("unused");
         let used = tape.push_bool(true).expect("used");
         let program = tape
             .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[used])
             .expect("program");
-        assert!(tape.finish(program).is_err());
+        assert!(matches!(
+            tape.finish(program),
+            Err(TapeError::MalformedRecord {
+                reason: "non-root record is not referenced exactly once",
+                ..
+            })
+        ));
+    }
 
+    #[test]
+    fn trusted_finish_rejects_shared_records() {
         let mut tape = TapeBuilder::new(0);
         let value = tape.push_null().expect("shared");
         let program = tape
             .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[value, value])
             .expect("program");
-        assert!(tape.finish(program).is_err());
+        assert!(matches!(
+            tape.finish(program),
+            Err(TapeError::MalformedRecord {
+                reason: "record is referenced more than once",
+                ..
+            })
+        ));
+    }
 
-        let _ = unused;
+    #[test]
+    fn trusted_finish_rejects_a_non_final_root() {
+        let mut tape = TapeBuilder::new(0);
+        let value = tape.push_null().expect("value");
+        let root = tape
+            .push_node(NodeTag::PROGRAM, Span::new(0, 0), 0, &[value])
+            .expect("root");
+        let _trailing = tape.push_null().expect("trailing value");
+
+        assert!(matches!(
+            tape.finish(root),
+            Err(TapeError::RootMustBeFinalNode)
+        ));
     }
 }
