@@ -24,6 +24,7 @@ const HEADER_TOTAL_WORDS = 4;
 const HEADER_RECORD_END = 5;
 const HEADER_POOL_BYTES = 6;
 const HEADER_ROOT = 7;
+const HEADER_SOURCE_BYTES = 8;
 
 // These field orders are the transfer contract used by parser/mod.rs push_node call sites.
 // Extend this table and decodeNode together whenever the native parser starts emitting a new tag.
@@ -243,8 +244,7 @@ export function decodeTape(source, tape, options = {}) {
     throw new Error("invalid JetSyntax tape: root record is not a node");
   }
 
-  const sourceBytes = new TextEncoder().encode(source);
-  const sourceOffsets = makeSourceOffsets(source, sourceBytes.length);
+  const sourceOffsets = makeSourceOffsets(source, header.sourceBytes);
   const poolBytes = new Uint8Array(
     tape.buffer,
     tape.byteOffset + header.recordEnd * Uint32Array.BYTES_PER_ELEMENT,
@@ -263,7 +263,11 @@ export function decodeTape(source, tape, options = {}) {
   }
 
   function sourcePosition(byteOffset) {
-    if (byteOffset > sourceBytes.length || sourceOffsets.boundaries[byteOffset] !== 1) {
+    if (byteOffset > header.sourceBytes) {
+      throw new Error(`invalid JetSyntax source byte offset ${byteOffset}`);
+    }
+    if (sourceOffsets === null) return byteOffset;
+    if (sourceOffsets.boundaries[byteOffset] !== 1) {
       throw new Error(`invalid JetSyntax source byte offset ${byteOffset}`);
     }
     return sourceOffsets.utf16[byteOffset];
@@ -842,7 +846,12 @@ function validateHeader(tape) {
   ) {
     throw new Error("invalid JetSyntax record/string-pool bounds");
   }
-  return { recordEnd, poolBytes, root: tape[HEADER_ROOT] };
+  return {
+    recordEnd,
+    poolBytes,
+    root: tape[HEADER_ROOT],
+    sourceBytes: tape[HEADER_SOURCE_BYTES],
+  };
 }
 
 function indexRecords(tape, recordEnd) {
@@ -909,6 +918,12 @@ function requireWords(offset, size, recordEnd) {
 }
 
 function makeSourceOffsets(source, byteLength) {
+  if (source.length === byteLength && !/[^\x00-\x7F]/u.test(source)) return null;
+
+  const encodedByteLength = new TextEncoder().encode(source).length;
+  if (encodedByteLength !== byteLength) {
+    throw new Error("source UTF-8 length does not match JetSyntax input");
+  }
   const utf16 = new Uint32Array(byteLength + 1);
   const boundaries = new Uint8Array(byteLength + 1);
   let byteOffset = 0;

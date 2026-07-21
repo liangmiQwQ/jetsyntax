@@ -71,7 +71,7 @@ class HandcraftedTape {
     this.words[5] = recordEnd;
     this.words[6] = this.pool.length;
     this.words[7] = root;
-    this.words[8] = 0;
+    this.words[8] = this.words[root + 3];
     this.words[9] = 0;
     this.words[10] = 1;
     return Uint32Array.from(this.words);
@@ -130,9 +130,16 @@ describe("decodeTape", () => {
     const sourceType = tape.integer(0);
     const program = tape.node(1, 0, 5, [body, sourceType]);
 
-    const decoded = decodeTape(source, tape.finish(program));
+    const encoded = tape.finish(program);
+    const decoded = decodeTape(source, encoded);
     expect(decoded.end).toBe(3);
     expect(decoded.body[0].expression).toMatchObject({ name: "<invalid>", start: 0, end: 2 });
+
+    const invalidSourceLength = encoded.slice();
+    invalidSourceLength[8] = source.length;
+    expect(() => decodeTape(source, invalidSourceLength)).toThrow(
+      "source UTF-8 length does not match JetSyntax input",
+    );
   });
 
   it("decodes the emitted JSX schema", () => {

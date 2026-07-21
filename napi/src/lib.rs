@@ -46,7 +46,7 @@ pub fn parse_to_tape(
     })?;
 
     Ok(TapeTransferResult {
-        tape: result.tape.words().to_vec().into(),
+        tape: result.tape.into_words().into_vec().into(),
         diagnostics: result
             .diagnostics
             .into_iter()

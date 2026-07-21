@@ -849,6 +849,12 @@ impl FrozenTape {
         &self.words
     }
 
+    /// Consumes the validated tape and returns its wire words without copying them.
+    #[must_use]
+    pub fn into_words(self) -> Box<[u32]> {
+        self.words
+    }
+
     #[must_use]
     pub fn header(&self) -> TapeHeader {
         TapeHeader {
