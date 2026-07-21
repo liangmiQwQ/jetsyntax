@@ -358,6 +358,30 @@ impl<'s> Parser<'s> {
         }
         let params = self.parse_parameter_list()?.value;
         self.expect(TokenKind::RightParen);
+        let return_type = if self.options.language.is_typescript()
+            && let Some(colon) = self.eat(TokenKind::Colon)
+        {
+            let annotation = self.parse_type()?;
+            Some(
+                self.node(
+                    NodeTag::TS_TYPE_ANNOTATION,
+                    Span::new(colon.start, annotation.span.end),
+                    &[annotation.value()],
+                )?
+                .value(),
+            )
+        } else {
+            None
+        };
+        if self.context.grammar().ambient()
+            && self.options.semantic_errors
+            && self.current.kind == TokenKind::LeftBrace
+        {
+            self.error(
+                self.current_span(),
+                "function implementations are not allowed in ambient contexts",
+            );
+        }
         let body = self.parse_block_statement()?;
         self.leave_function_context(previous_grammar);
         let id = if let Some(id) = id {
@@ -367,15 +391,32 @@ impl<'s> Parser<'s> {
         };
         let generator = self.tape.push_bool(generator)?;
         let asynchronous = self.tape.push_bool(asynchronous)?;
-        self.node(
-            if declaration {
-                NodeTag::FUNCTION_DECLARATION
-            } else {
-                NodeTag::FUNCTION_EXPRESSION
-            },
-            Span::new(start, body.span.end),
-            &[id, params, body.value(), generator, asynchronous],
-        )
+        let tag = if declaration {
+            NodeTag::FUNCTION_DECLARATION
+        } else {
+            NodeTag::FUNCTION_EXPRESSION
+        };
+        let span = Span::new(start, body.span.end);
+        if let Some(return_type) = return_type {
+            self.node(
+                tag,
+                span,
+                &[
+                    id,
+                    params,
+                    body.value(),
+                    generator,
+                    asynchronous,
+                    return_type,
+                ],
+            )
+        } else {
+            self.node(
+                tag,
+                span,
+                &[id, params, body.value(), generator, asynchronous],
+            )
+        }
     }
 
     fn parse_parameter_list(&mut self) -> Result<ParsedParameterList, ParseError> {

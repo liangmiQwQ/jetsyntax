@@ -64,8 +64,8 @@ for (
     [22, ["ForStatement", ["init", "test", "update", "body"]]],
     [23, ["ForInStatement", ["left", "right", "body", "await"]]],
     [24, ["ForOfStatement", ["left", "right", "body", "await"]]],
-    [25, ["FunctionDeclaration", ["id", "params", "body", "generator", "async"]]],
-    [26, ["FunctionExpression", ["id", "params", "body", "generator", "async"]]],
+    [25, ["FunctionDeclaration", ["id", "params", "body", "generator", "async", "returnType"]]],
+    [26, ["FunctionExpression", ["id", "params", "body", "generator", "async", "returnType"]]],
     [27, ["ArrowFunctionExpression", ["params", "body", "async", "expression"]]],
     [28, ["VariableDeclaration", ["declarations", "kind"]]],
     [29, ["VariableDeclarator", ["id", "init"]]],
@@ -553,9 +553,15 @@ function decodeTapeInternal(source, tape, options, trusted) {
     }
 
     const fieldCount = tape[offset + 4];
-    const validFieldCount = tag === 2 ? fieldCount === 1 || fieldCount === 3 : fieldCount === schema[1].length;
+    // Unannotated functions retain the five-field wire shape; TypeScript return types add field six.
+    const functionNode = tag === 25 || tag === 26;
+    const validFieldCount = tag === 2
+      ? fieldCount === 1 || fieldCount === 3
+      : functionNode
+      ? fieldCount === 5 || fieldCount === 6
+      : fieldCount === schema[1].length;
     if (!validFieldCount) {
-      const expected = tag === 2 ? "1 or 3" : schema[1].length;
+      const expected = tag === 2 ? "1 or 3" : functionNode ? "5 or 6" : schema[1].length;
       throw new Error(
         `invalid ${schema[0]} field count ${fieldCount}; expected ${expected}`,
       );
@@ -674,6 +680,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.body = fields[2];
         node.generator = boolean(fields[3], tag);
         node.async = boolean(fields[4], tag);
+        if (fieldCount === 6) node.returnType = fields[5];
         return node;
       case 27:
         node.id = null;

@@ -239,6 +239,74 @@ describe("decodeTape", () => {
     });
   });
 
+  it("decodes legacy and annotated function field counts", () => {
+    const source = "function plain() {} function typed(): number {}";
+    const tape = new HandcraftedTape();
+    const emptyParameters = tape.list([]);
+    const emptyBody = tape.node(6, 17, 19, [tape.list([])]);
+    const legacy = tape.node(25, 0, 19, [
+      tape.null(),
+      emptyParameters,
+      emptyBody,
+      tape.boolean(false),
+      tape.boolean(false),
+    ]);
+
+    const returnType = tape.node(512, 36, 44, [tape.node(548, 38, 44, [])]);
+    const annotated = tape.node(26, 20, source.length, [
+      tape.null(),
+      tape.list([]),
+      tape.node(6, 45, 47, [tape.list([])]),
+      tape.boolean(false),
+      tape.boolean(false),
+      returnType,
+    ]);
+    const program = tape.node(1, 0, source.length, [tape.list([legacy, annotated]), tape.integer(0)]);
+
+    const decoded = decodeTape(source, tape.finish(program));
+    expect(decoded.body[0]).toMatchObject({
+      type: "FunctionDeclaration",
+      params: [],
+      generator: false,
+      async: false,
+    });
+    expect(decoded.body[0]).not.toHaveProperty("returnType");
+    expect(decoded.body[1]).toMatchObject({
+      type: "FunctionExpression",
+      returnType: {
+        type: "TSTypeAnnotation",
+        start: 36,
+        end: 44,
+        typeAnnotation: { type: "TSNumberKeyword", start: 38, end: 44 },
+      },
+    });
+  });
+
+  it("rejects malformed function field counts", () => {
+    for (
+      const [tag, fields, expected] of [
+        [25, ["null", "list", "body", false], "4"],
+        [26, ["null", "list", "body", false, false, "null", "null"], "7"],
+      ]
+    ) {
+      const tape = new HandcraftedTape();
+      const values = fields.map(value => {
+        if (value === "null") return tape.null();
+        if (value === "list") return tape.list([]);
+        if (value === "body") return tape.node(6, 0, 0, [tape.list([])]);
+        return tape.boolean(value);
+      });
+      const encoded = tape.finish(tape.node(tag, 0, 0, values));
+
+      expect(() => decodeTape("", encoded)).toThrow(
+        `invalid ${tag === 25 ? "FunctionDeclaration" : "FunctionExpression"} field count ${expected}; expected 5 or 6`,
+      );
+      expect(() => decodeTrustedTape("", encoded)).toThrow(
+        `invalid ${tag === 25 ? "FunctionDeclaration" : "FunctionExpression"} field count ${expected}; expected 5 or 6`,
+      );
+    }
+  });
+
   it("decodes compound TypeScript type and declaration records", () => {
     const tape = new HandcraftedTape();
     const aliasId = tape.node(2, 0, 0, [tape.string("Shape")]);

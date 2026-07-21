@@ -231,6 +231,67 @@ describe("parse", () => {
     ]);
   });
 
+  it("materializes TypeScript function return annotations", () => {
+    const source = [
+      "function convert(value: Input): Namespace.Output { return value; }",
+      "const later = function* (): Iterable<Result> { yield result; };",
+      "async function load(): Promise<Result> { return await request(); }",
+      "function plain() {}",
+    ].join("\n");
+    const result = parse(source, { lang: "ts" });
+
+    expect(result.diagnostics).toEqual([]);
+    const [convert, expressionStatement, load, plain] = result.program.body;
+    expect(convert).toMatchObject({
+      type: "FunctionDeclaration",
+      returnType: {
+        type: "TSTypeAnnotation",
+        typeAnnotation: {
+          type: "TSTypeReference",
+          typeName: {
+            type: "TSQualifiedName",
+            left: { name: "Namespace" },
+            right: { name: "Output" },
+          },
+        },
+      },
+    });
+    expect(source.slice(convert.returnType.start, convert.returnType.end)).toBe(
+      ": Namespace.Output",
+    );
+    expect(expressionStatement.declarations[0].init).toMatchObject({
+      type: "FunctionExpression",
+      generator: true,
+      returnType: {
+        type: "TSTypeAnnotation",
+        typeAnnotation: { type: "TSTypeReference" },
+      },
+    });
+    expect(load).toMatchObject({
+      type: "FunctionDeclaration",
+      async: true,
+      returnType: { type: "TSTypeAnnotation" },
+    });
+    expect(plain).not.toHaveProperty("returnType");
+  });
+
+  it("keeps unsupported function return forms diagnostic", () => {
+    for (
+      const [source, options] of [
+        ["function predicate(value: unknown): value is string { return true; }", { lang: "ts" }],
+        ["function assertion(value: unknown): asserts value {}", { lang: "ts" }],
+        ["function overload(): string;", { lang: "ts" }],
+        ["declare function declared(): string;", { lang: "ts" }],
+        ["function missing(): ; {}", { lang: "ts" }],
+        ["function javascript(): string {}", { lang: "js" }],
+      ]
+    ) {
+      const result = parse(source, options);
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
   it("does not join exported async functions across a line break", () => {
     const named = parse("export async/*\n*/function split() {}");
     expect(named.diagnostics).not.toEqual([]);

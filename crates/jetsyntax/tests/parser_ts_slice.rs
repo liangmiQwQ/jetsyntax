@@ -154,6 +154,123 @@ fn parses_named_typescript_declarations_and_nested_generics() {
 }
 
 #[test]
+fn parses_block_function_return_annotations() {
+    let source = [
+        "function convert(value: Input): Namespace.Output { return value; }",
+        "const convertLater = function (value: Input): Output | undefined { return value; };",
+        "async function load(): Promise<Result> { return await request(); }",
+        "function* values(): Iterable<Result> { yield result; }",
+        "function plain() {}",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse function return annotations");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid return-annotation tape");
+
+    let declarations = node_fields(&parsed, NodeTag::FUNCTION_DECLARATION).collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 4);
+    assert_eq!(declarations[0].len(), 6);
+    assert_eq!(declarations[1].len(), 6);
+    assert_eq!(declarations[2].len(), 6);
+    assert_eq!(declarations[3].len(), 5);
+
+    let expressions = node_fields(&parsed, NodeTag::FUNCTION_EXPRESSION).collect::<Vec<_>>();
+    assert_eq!(expressions.len(), 1);
+    assert_eq!(expressions[0].len(), 6);
+
+    for fields in declarations[..3].iter().chain(&expressions) {
+        let annotation = parsed.tape.value_at(fields[5]).expect("return annotation");
+        assert!(matches!(
+            annotation,
+            TapeValue::Node {
+                tag: NodeTag::TS_TYPE_ANNOTATION,
+                ..
+            }
+        ));
+    }
+
+    let TapeValue::Node { span, .. } = parsed
+        .tape
+        .value_at(declarations[0][5])
+        .expect("declaration return annotation")
+    else {
+        panic!("return annotation is not a node");
+    };
+    assert_eq!(
+        span.start as usize,
+        source.find(": Namespace.Output").unwrap()
+    );
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        ": Namespace.Output"
+    );
+
+    let definition = parse(
+        "function typed(): string {}",
+        ParseOptions {
+            language: Language::TypeScriptDefinition,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse definition-file typed function");
+    assert!(!definition.diagnostics.is_empty());
+    assert_node_field_count(&definition, NodeTag::FUNCTION_DECLARATION, 6);
+
+    let tsx = parse(
+        "function typed(): string {}",
+        ParseOptions {
+            language: Language::TypeScriptJsx,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse TSX typed function");
+    assert!(tsx.diagnostics.is_empty());
+    assert_node_field_count(&tsx, NodeTag::FUNCTION_DECLARATION, 6);
+}
+
+#[test]
+fn limits_function_return_annotations_to_supported_typescript_bodies() {
+    let cases = [
+        (
+            "predicate",
+            "function isText(value: unknown): value is string { return true; }",
+        ),
+        (
+            "assertion",
+            "function assertText(value: unknown): asserts value { }",
+        ),
+        ("overload", "function convert(): string;"),
+        ("declare", "declare function convert(): string;"),
+        ("missing type", "function missing(): ; {}"),
+    ];
+    for (name, source) in cases {
+        let parsed = parse(source, typescript_options()).expect(name);
+        assert!(!parsed.diagnostics.is_empty(), "{name}");
+        parsed.tape.validate().expect(name);
+    }
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "function convert(): string { return ''; }",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recoverable JavaScript parse");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid JavaScript recovery tape");
+    }
+}
+
+#[test]
 fn parses_typescript_export_assignment_and_namespace_export() {
     let source = "export = Namespace.factory; export as namespace JetSyntax;";
     assert_clean_with_tags(
