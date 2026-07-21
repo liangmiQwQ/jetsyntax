@@ -25,10 +25,10 @@ JetSyntax is built around a compact parser-owned wire format:
 
 1. An on-demand lexer scans only as the recursive-descent and Pratt parsers request tokens. Specialized rescans handle regular expressions, templates, and JSX text.
 2. Grammar state, scopes, labels, private names, and speculative checkpoints are kept in compact parser contexts. Recovery rolls the parser and output tape back together.
-3. The parser emits an append-only postfix tape of 32-bit words. Child records always precede their parent, so the completed program is the final record.
-4. Native Rust callers can consume the validated tape directly. NAPI transfers it as a `Uint32Array`; a handwritten JavaScript decoder materializes ESTree without serializing a Rust AST through JSON or Serde.
+3. The parser emits an append-only postfix tape of 32-bit words. Child records always precede their parent, and a reference marker plus scalar edge count proves at construction time that every non-root record has exactly one parent.
+4. Native Rust callers can consume the construction-proven tape directly. NAPI moves its word vector into a `Uint32Array`; a handwritten JavaScript decoder materializes ESTree without serializing a Rust AST through JSON or Serde.
 
-The postfix layout keeps native output independent from Rust struct layout and gives language bindings a stable boundary. Builder finalization uses parser-maintained record and edge indexes, while the public untrusted tape constructor retains full structural validation.
+The postfix layout keeps native output independent from Rust struct layout and gives language bindings a stable boundary. Parser finalization is O(1), and the native random-access record index is initialized lazily only if requested. The public untrusted tape constructor still performs full structural, reference, reachability, marker, and UTF-8 validation.
 
 JetSyntax's product parser does not depend on Yuku, OXC, or SWC. Those projects are development-only benchmark competitors.
 
