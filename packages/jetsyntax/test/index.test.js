@@ -334,6 +334,63 @@ describe("parse", () => {
     ]);
   });
 
+  it("materializes canonical private class accessors", () => {
+    const source = [
+      "class Accessors {",
+      "  get #\\u0076alue() { return this.#value; }",
+      "  set #value({ next } = fallback) { this.#value = next; }",
+      "  static get #π() { return this.#π; }",
+      "  static set #π(value) {}",
+      "}",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const members = result.program.body[0].body.body;
+    expect(members).toMatchObject([
+      {
+        type: "MethodDefinition",
+        kind: "get",
+        key: { type: "PrivateIdentifier", name: "value" },
+        computed: false,
+        static: false,
+        value: { type: "FunctionExpression", params: [], generator: false, async: false },
+      },
+      {
+        type: "MethodDefinition",
+        kind: "set",
+        key: { type: "PrivateIdentifier", name: "value" },
+        computed: false,
+        static: false,
+        value: {
+          type: "FunctionExpression",
+          params: [{ type: "AssignmentPattern", left: { type: "ObjectPattern" } }],
+          generator: false,
+          async: false,
+        },
+      },
+      {
+        type: "MethodDefinition",
+        kind: "get",
+        key: { type: "PrivateIdentifier", name: "π" },
+        computed: false,
+        static: true,
+      },
+      {
+        type: "MethodDefinition",
+        kind: "set",
+        key: { type: "PrivateIdentifier", name: "π" },
+        computed: false,
+        static: true,
+      },
+    ]);
+    expect(members[0].value.body.body[0].argument.property).toMatchObject({
+      type: "PrivateIdentifier",
+      name: "value",
+    });
+    expect(source.slice(members[0].key.start, members[0].key.end)).toBe("#\\u0076alue");
+  });
+
   it("diagnoses public class accessor early errors and unsupported introducers", () => {
     const sources = [
       "class C { get value(parameter) {} }",
@@ -354,7 +411,37 @@ describe("parse", () => {
       "class C { set value(next) { delete identifier; } }",
       "class C { g\\u0065t value() {} }",
       "class C { s\\u0065t value(next) {} }",
-      "class C { get #value() {} }",
+    ];
+
+    for (const source of sources) {
+      const result = parse(source, { semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.panicked, source).toBe(false);
+      expect(result.program.type, source).toBe("Program");
+    }
+  });
+
+  it("diagnoses private class accessor early errors and collisions", () => {
+    const sources = [
+      "class C { get #value(parameter) {} }",
+      "class C { set #value() {} }",
+      "class C { set #value(...values) {} }",
+      "class C { set #value(parameter,) {} }",
+      "class C { get #value() {} get #value() {} }",
+      "class C { set #value(next) {} set #value(next) {} }",
+      "class C { #value; get #value() {} }",
+      "class C { set #value(next) {} #value; }",
+      "class C { #value() {} set #value(next) {} }",
+      "class C { get #value() {} #value() {} }",
+      "class C { get #value() {} static set #value(next) {} }",
+      "class C { static get #\\u0076alue() {} set #value(next) {} }",
+      "class C { get #constructor() {} }",
+      "class C extends Base { get #value() { super(); } }",
+      "class C { set #value(next) { with (object) statement; } }",
+      "class C { g\\u0065t #value() {} }",
+      "class C { get # value() {} }",
+      "const object = { get #value() {} };",
+      "class C { method() { return { set #value(next) {} }; } }",
     ];
 
     for (const source of sources) {

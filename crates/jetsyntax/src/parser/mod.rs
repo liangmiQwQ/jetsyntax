@@ -4,7 +4,7 @@ mod context;
 
 pub use context::{Diagnostic, Severity};
 
-use std::{error::Error, fmt, iter::Peekable, str::Chars};
+use std::{borrow::Cow, error::Error, fmt, iter::Peekable, str::Chars};
 
 use crate::{
     Language, ParseOptions, SourceKind,
@@ -16,7 +16,9 @@ use crate::{
     tape::{FrozenTape, NodeRef, NodeTag, Span, TapeBuilder, TapeError, ValueRef},
 };
 
-use self::context::{BindingKind, GrammarContext, LabelKind, ParserContext, ScopeKind};
+use self::context::{
+    BindingKind, GrammarContext, LabelKind, ParserContext, PrivateAccessorKind, ScopeKind,
+};
 
 /// Successful native parse output.
 #[derive(Debug)]
@@ -96,6 +98,13 @@ impl AccessorKind {
         match self {
             Self::Get => 1,
             Self::Set => 2,
+        }
+    }
+
+    const fn private_kind(self) -> PrivateAccessorKind {
+        match self {
+            Self::Get => PrivateAccessorKind::Get,
+            Self::Set => PrivateAccessorKind::Set,
         }
     }
 }
@@ -554,7 +563,7 @@ impl<'s> Parser<'s> {
         };
 
         if leading_key.is_none()
-            && let Some(accessor) = self.current_accessor_kind()
+            && let Some(accessor) = self.current_accessor_kind(true)
         {
             return self.parse_class_accessor(start, is_static, accessor);
         }
@@ -592,9 +601,6 @@ impl<'s> Parser<'s> {
         }
         if generator && is_static && !computed && self.source_text(key.span) == "prototype" {
             self.error(key.span, "static class method cannot be named `prototype`");
-        }
-        if generator && !computed && self.source_text(key.span) == "#constructor" {
-            self.error(key.span, "private name `#constructor` is not allowed");
         }
         if generator || self.current.kind == TokenKind::LeftParen {
             let function =
@@ -637,13 +643,43 @@ impl<'s> Parser<'s> {
         accessor: AccessorKind,
     ) -> Result<ParsedNode, ParseError> {
         self.bump();
-        let property_name = self.parse_property_name(true)?;
+        let (property_name, private) = if self.current.kind == TokenKind::PrivateIdentifier {
+            let (key, name) = self.parse_private_identifier()?;
+            let name_span = Span::new(key.span.start.saturating_add(1), key.span.end);
+            if name == "constructor" && self.reports_private_early_errors() {
+                self.error(key.span, "private name `#constructor` is not allowed");
+            }
+            let _ = self.context.declare_private_accessor(
+                name,
+                name_span,
+                accessor.private_kind(),
+                is_static,
+            );
+            (
+                ParsedPropertyName {
+                    key,
+                    computed: false,
+                    shorthand: false,
+                },
+                true,
+            )
+        } else {
+            (self.parse_property_name(true)?, false)
+        };
         let key = property_name.key;
         let computed = property_name.computed;
-        if !computed && !is_static && self.static_property_name_matches(key.span, "constructor") {
+        if !private
+            && !computed
+            && !is_static
+            && self.static_property_name_matches(key.span, "constructor")
+        {
             self.error(key.span, "class constructor cannot be an accessor");
         }
-        if !computed && is_static && self.static_property_name_matches(key.span, "prototype") {
+        if !private
+            && !computed
+            && is_static
+            && self.static_property_name_matches(key.span, "prototype")
+        {
             self.error(
                 key.span,
                 "static class accessor cannot be named `prototype`",
@@ -1468,7 +1504,9 @@ impl<'s> Parser<'s> {
                         argument.span,
                         "deleting an unqualified identifier is forbidden in strict mode",
                     );
-                } else if self.is_private_member_target(argument) {
+                } else if self.is_private_member_target(argument)
+                    && self.reports_private_early_errors()
+                {
                     self.error(argument.span, "deleting a private member is forbidden");
                 }
             }
@@ -1979,7 +2017,7 @@ impl<'s> Parser<'s> {
                         error_span: None,
                     });
                 properties.push(spread.value());
-            } else if let Some(accessor) = self.current_accessor_kind() {
+            } else if let Some(accessor) = self.current_accessor_kind(false) {
                 let property_start = self.current.start;
                 let property = self.parse_object_accessor(property_start, accessor)?;
                 // This marker reports only if cover grammar later reinterprets the object as a pattern.
@@ -2301,21 +2339,13 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_member_property(&mut self) -> Result<ParsedNode, ParseError> {
-        let token = self.take();
-        if token.kind == TokenKind::PrivateIdentifier {
-            let name_span = Span::new(token.start.saturating_add(1), token.end);
-            let name_text = self
-                .source
-                .get(name_span.start as usize..name_span.end as usize)
-                .unwrap_or_default();
-            let _ = self.context.use_private(name_text, name_span);
-            let name = self.tape.push_source_slice(name_span)?;
-            return self.node(
-                NodeTag::PRIVATE_IDENTIFIER,
-                Self::token_span(token),
-                &[name],
-            );
+        if self.current.kind == TokenKind::PrivateIdentifier {
+            let (node, name) = self.parse_private_identifier()?;
+            let name_span = Span::new(node.span.start.saturating_add(1), node.span.end);
+            let _ = self.context.use_private(name, name_span);
+            return Ok(node);
         }
+        let token = self.take();
         self.parse_identifier_name_from(token)
     }
 
@@ -2332,16 +2362,29 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_class_private_identifier(&mut self) -> Result<ParsedNode, ParseError> {
+        let (node, name) = self.parse_private_identifier()?;
+        let name_span = Span::new(node.span.start.saturating_add(1), node.span.end);
+        if name == "constructor" && self.reports_private_early_errors() {
+            self.error(node.span, "private name `#constructor` is not allowed");
+        }
+        let _ = self.context.declare_private(name, name_span);
+        Ok(node)
+    }
+
+    fn parse_private_identifier(&mut self) -> Result<(ParsedNode, Cow<'s, str>), ParseError> {
         let token = self.take();
+        let span = Self::token_span(token);
         let name_span = Span::new(token.start.saturating_add(1), token.end);
-        let name_text = self.source_text(name_span);
-        let _ = self.context.declare_private(name_text, name_span);
-        let name = self.tape.push_source_slice(name_span)?;
-        self.node(
-            NodeTag::PRIVATE_IDENTIFIER,
-            Self::token_span(token),
-            &[name],
-        )
+        let raw = self.source_text(name_span);
+        let (name, value) = if token.flags.escaped() {
+            let name = decode_static_property_name(raw).unwrap_or_else(|| raw.to_owned());
+            let value = self.tape.push_string(&name)?;
+            (Cow::Owned(name), value)
+        } else {
+            (Cow::Borrowed(raw), self.tape.push_source_slice(name_span)?)
+        };
+        let node = self.node(NodeTag::PRIVATE_IDENTIFIER, span, &[value])?;
+        Ok((node, name))
     }
 
     fn parse_property_name(
@@ -3589,7 +3632,7 @@ impl<'s> Parser<'s> {
         token.kind == kind && !token.flags.line_break_before() && !token.flags.escaped()
     }
 
-    fn current_accessor_kind(&self) -> Option<AccessorKind> {
+    fn current_accessor_kind(&self, allow_private: bool) -> Option<AccessorKind> {
         if self.current.flags.escaped() {
             return None;
         }
@@ -3601,10 +3644,12 @@ impl<'s> Parser<'s> {
         let mut lookahead = Lexer::new(self.source);
         lookahead.set_position(self.current.end as usize);
         let next = lookahead.next_token().kind;
-        (matches!(
-            next,
-            TokenKind::LeftBracket | TokenKind::String | TokenKind::Number | TokenKind::BigInt
-        ) || Self::is_member_identifier_name(next))
+        (allow_private && next == TokenKind::PrivateIdentifier
+            || matches!(
+                next,
+                TokenKind::LeftBracket | TokenKind::String | TokenKind::Number | TokenKind::BigInt
+            )
+            || Self::is_member_identifier_name(next))
         .then_some(accessor)
     }
 
@@ -3650,6 +3695,10 @@ impl<'s> Parser<'s> {
             }
         }
         last_semantic.kind == TokenKind::PrivateIdentifier
+    }
+
+    const fn reports_private_early_errors(&self) -> bool {
+        !self.options.language.is_typescript() || self.options.semantic_errors
     }
 
     fn source_text(&self, span: Span) -> &'s str {

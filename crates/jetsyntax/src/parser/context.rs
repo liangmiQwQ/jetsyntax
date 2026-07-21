@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use crate::{lexer::TokenKind, tape::Span};
 
@@ -279,8 +279,8 @@ struct Scope<'s> {
     kind: ScopeKind,
     value_bindings: HashMap<&'s str, Binding>,
     type_bindings: HashMap<&'s str, Binding>,
-    private_names: HashMap<&'s str, Span>,
-    private_uses: Vec<(&'s str, Span)>,
+    private_names: HashMap<Cow<'s, str>, PrivateDeclaration>,
+    private_uses: Vec<(Cow<'s, str>, Span)>,
 }
 
 impl Scope<'_> {
@@ -309,6 +309,37 @@ enum BindingNamespace {
     Type,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrivateAccessorKind {
+    Get,
+    Set,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PrivateDeclaration {
+    Other(Span),
+    Accessor {
+        get: Option<Span>,
+        set: Option<Span>,
+        is_static: bool,
+    },
+}
+
+impl PrivateDeclaration {
+    const fn span(self) -> Span {
+        match self {
+            Self::Other(span) => span,
+            Self::Accessor { get, set, .. } => match get {
+                Some(span) => span,
+                None => match set {
+                    Some(span) => span,
+                    None => Span::new(0, 0),
+                },
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 enum Mutation<'s> {
     ScopePushed,
@@ -320,7 +351,12 @@ enum Mutation<'s> {
     },
     PrivateDeclared {
         scope: usize,
-        name: &'s str,
+        name: Cow<'s, str>,
+    },
+    PrivateDeclarationChanged {
+        scope: usize,
+        name: Cow<'s, str>,
+        previous: PrivateDeclaration,
     },
     PrivateUsed {
         scope: usize,
@@ -447,24 +483,94 @@ impl<'s> ParserContext<'s> {
         })
     }
 
-    pub(crate) fn declare_private(&mut self, name: &'s str, span: Span) -> bool {
+    pub(crate) fn declare_private(&mut self, name: Cow<'s, str>, span: Span) -> bool {
         let Some(scope) = self.class_scope() else {
             self.error(span, "private name is only valid inside a class");
             return false;
         };
-        if let Some(previous) = self.scopes[scope].private_names.get(name).copied() {
+        if let Some(previous) = self.scopes[scope].private_names.get(name.as_ref()).copied() {
             self.push_diagnostic(
                 Diagnostic::error(span, format!("duplicate private name `{name}`"))
-                    .with_related(previous),
+                    .with_related(previous.span()),
             );
             return false;
         }
-        self.scopes[scope].private_names.insert(name, span);
+        self.scopes[scope]
+            .private_names
+            .insert(name.clone(), PrivateDeclaration::Other(span));
         self.record(Mutation::PrivateDeclared { scope, name });
         true
     }
 
-    pub(crate) fn use_private(&mut self, name: &'s str, span: Span) -> bool {
+    pub(crate) fn declare_private_accessor(
+        &mut self,
+        name: Cow<'s, str>,
+        span: Span,
+        kind: PrivateAccessorKind,
+        is_static: bool,
+    ) -> bool {
+        let Some(scope) = self.class_scope() else {
+            self.error(span, "private name is only valid inside a class");
+            return false;
+        };
+        let previous = self.scopes[scope].private_names.get(name.as_ref()).copied();
+        let next = match (previous, kind) {
+            (None, PrivateAccessorKind::Get) => PrivateDeclaration::Accessor {
+                get: Some(span),
+                set: None,
+                is_static,
+            },
+            (None, PrivateAccessorKind::Set) => PrivateDeclaration::Accessor {
+                get: None,
+                set: Some(span),
+                is_static,
+            },
+            (
+                Some(PrivateDeclaration::Accessor {
+                    get: None,
+                    set,
+                    is_static: previous_static,
+                }),
+                PrivateAccessorKind::Get,
+            ) if previous_static == is_static => PrivateDeclaration::Accessor {
+                get: Some(span),
+                set,
+                is_static,
+            },
+            (
+                Some(PrivateDeclaration::Accessor {
+                    get,
+                    set: None,
+                    is_static: previous_static,
+                }),
+                PrivateAccessorKind::Set,
+            ) if previous_static == is_static => PrivateDeclaration::Accessor {
+                get,
+                set: Some(span),
+                is_static,
+            },
+            (Some(previous), _) => {
+                self.push_diagnostic(
+                    Diagnostic::error(span, format!("duplicate private name `{name}`"))
+                        .with_related(previous.span()),
+                );
+                return false;
+            }
+        };
+        self.scopes[scope].private_names.insert(name.clone(), next);
+        if let Some(previous) = previous {
+            self.record(Mutation::PrivateDeclarationChanged {
+                scope,
+                name,
+                previous,
+            });
+        } else {
+            self.record(Mutation::PrivateDeclared { scope, name });
+        }
+        true
+    }
+
+    pub(crate) fn use_private(&mut self, name: Cow<'s, str>, span: Span) -> bool {
         let Some(scope) = self.class_scope() else {
             self.error(span, "private name is only valid inside a class");
             return false;
@@ -472,7 +578,7 @@ impl<'s> ParserContext<'s> {
         if self.scopes[..=scope]
             .iter()
             .rev()
-            .any(|scope| scope.private_names.contains_key(name))
+            .any(|scope| scope.private_names.contains_key(name.as_ref()))
         {
             return true;
         }
@@ -633,21 +739,21 @@ impl<'s> ParserContext<'s> {
     }
 
     fn resolve_private_uses(&mut self, scope: &Scope<'s>) {
-        for &(name, span) in &scope.private_uses {
-            if scope.private_names.contains_key(name)
+        for (name, span) in &scope.private_uses {
+            if scope.private_names.contains_key(name.as_ref())
                 || self
                     .scopes
                     .iter()
                     .rev()
-                    .any(|scope| scope.private_names.contains_key(name))
+                    .any(|scope| scope.private_names.contains_key(name.as_ref()))
             {
                 continue;
             }
             if let Some(outer) = self.class_scope() {
-                self.scopes[outer].private_uses.push((name, span));
+                self.scopes[outer].private_uses.push((name.clone(), *span));
                 self.record(Mutation::PrivateUsed { scope: outer });
             } else {
-                self.error(span, format!("private name `{name}` is not declared"));
+                self.error(*span, format!("private name `{name}` is not declared"));
             }
         }
     }
@@ -683,7 +789,14 @@ impl<'s> ParserContext<'s> {
                 bindings.remove(name);
             }
             Mutation::PrivateDeclared { scope, name } => {
-                self.scopes[scope].private_names.remove(name);
+                self.scopes[scope].private_names.remove(name.as_ref());
+            }
+            Mutation::PrivateDeclarationChanged {
+                scope,
+                name,
+                previous,
+            } => {
+                self.scopes[scope].private_names.insert(name, previous);
             }
             Mutation::PrivateUsed { scope } => {
                 self.scopes[scope].private_uses.pop();
@@ -701,7 +814,12 @@ impl<'s> ParserContext<'s> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BindingKind, GrammarContext, LabelKind, ParserContext, ScopeKind, Severity};
+    use std::borrow::Cow;
+
+    use super::{
+        BindingKind, GrammarContext, LabelKind, ParserContext, PrivateAccessorKind, ScopeKind,
+        Severity,
+    };
     use crate::tape::Span;
 
     #[test]
@@ -763,15 +881,74 @@ mod tests {
         let mut context = ParserContext::new(GrammarContext::default());
         context.enter_scope(ScopeKind::Program);
         context.enter_scope(ScopeKind::Class);
-        assert!(context.use_private("#value", Span::new(4, 10)));
-        assert!(context.declare_private("#value", Span::new(12, 18)));
+        assert!(context.use_private(Cow::Borrowed("value"), Span::new(4, 10)));
+        assert!(context.declare_private(Cow::Borrowed("value"), Span::new(12, 18)));
         assert_eq!(context.leave_scope(), Some(ScopeKind::Class));
         assert!(context.diagnostics().is_empty());
 
         context.enter_scope(ScopeKind::Class);
-        assert!(context.use_private("#missing", Span::new(20, 28)));
+        assert!(context.use_private(Cow::Borrowed("missing"), Span::new(20, 28)));
         context.leave_scope();
         assert_eq!(context.diagnostics()[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn private_accessors_pair_only_by_kind_and_staticness() {
+        let mut context = ParserContext::new(GrammarContext::default());
+        context.enter_scope(ScopeKind::Class);
+        assert!(context.declare_private_accessor(
+            Cow::Borrowed("pair"),
+            Span::new(0, 4),
+            PrivateAccessorKind::Get,
+            false,
+        ));
+        assert!(context.declare_private_accessor(
+            Cow::Owned("pair".to_owned()),
+            Span::new(5, 9),
+            PrivateAccessorKind::Set,
+            false,
+        ));
+        assert!(!context.declare_private_accessor(
+            Cow::Borrowed("pair"),
+            Span::new(10, 14),
+            PrivateAccessorKind::Get,
+            false,
+        ));
+        assert!(!context.declare_private_accessor(
+            Cow::Borrowed("pair"),
+            Span::new(15, 19),
+            PrivateAccessorKind::Set,
+            true,
+        ));
+        assert!(!context.declare_private(Cow::Borrowed("pair"), Span::new(20, 24)));
+
+        assert_eq!(context.diagnostics().len(), 3);
+        assert_eq!(context.diagnostics()[0].related, Some(Span::new(0, 4)));
+        assert_eq!(context.diagnostics()[1].related, Some(Span::new(0, 4)));
+        assert_eq!(context.diagnostics()[2].related, Some(Span::new(0, 4)));
+    }
+
+    #[test]
+    fn rollback_restores_private_accessor_pair_state() {
+        let mut context = ParserContext::new(GrammarContext::default());
+        context.enter_scope(ScopeKind::Class);
+        let checkpoint = context.checkpoint();
+        assert!(context.declare_private_accessor(
+            Cow::Borrowed("value"),
+            Span::new(0, 5),
+            PrivateAccessorKind::Get,
+            false,
+        ));
+        assert!(context.declare_private_accessor(
+            Cow::Borrowed("value"),
+            Span::new(6, 11),
+            PrivateAccessorKind::Set,
+            false,
+        ));
+        context.rollback(checkpoint);
+
+        assert!(context.declare_private(Cow::Borrowed("value"), Span::new(12, 17)));
+        assert!(context.diagnostics().is_empty());
     }
 
     #[test]
@@ -782,7 +959,7 @@ mod tests {
         context.set_grammar(context.grammar().with_async_function(true));
         context.enter_scope(ScopeKind::Class);
         assert!(context.declare_binding("branch", BindingKind::Lexical, Span::new(0, 6)));
-        assert!(context.declare_private("#branch", Span::new(7, 14)));
+        assert!(context.declare_private(Cow::Borrowed("branch"), Span::new(7, 14)));
         assert!(context.declare_export("branch", Span::new(15, 21)));
         assert!(context.push_label(Some("branch"), LabelKind::Statement, Span::new(22, 28)));
         context.error(Span::new(29, 30), "branch diagnostic");

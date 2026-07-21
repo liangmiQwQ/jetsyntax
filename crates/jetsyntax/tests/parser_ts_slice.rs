@@ -420,6 +420,29 @@ fn emits_babel_8_typescript_schema_wrappers() {
     assert_node_field_count(&parsed, NodeTag::TS_STRING_KEYWORD, 0);
 }
 
+#[test]
+fn typescript_private_early_errors_follow_the_semantic_error_option() {
+    let source = "class A { #constructor() {} #value = 1; method() { delete this.#value; } }";
+    let syntax_only = parse(source, typescript_options()).expect("syntax-only parse");
+    assert!(
+        syntax_only.diagnostics.is_empty(),
+        "{:#?}",
+        syntax_only.diagnostics
+    );
+    syntax_only.tape.validate().expect("valid syntax-only tape");
+
+    let semantic = parse(
+        source,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("semantic parse");
+    assert_eq!(semantic.diagnostics.len(), 2, "{:#?}", semantic.diagnostics);
+    semantic.tape.validate().expect("valid semantic tape");
+}
+
 fn assert_clean_with_tags(name: &str, source: &str, expected_tags: &[NodeTag]) {
     let parsed = parse(source, typescript_options()).expect("parse");
     assert!(

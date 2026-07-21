@@ -896,6 +896,45 @@ fn parser_should_accept_public_class_accessors() {
     assert_clean_cases(&cases);
 }
 
+/// Private accessors share one canonical private name while preserving static and Unicode keys.
+#[test]
+fn parser_should_accept_private_class_accessors() {
+    let cases = [
+        GrammarCase::script(
+            "paired escaped private accessors",
+            "class Accessors { get #\\u0076alue() { return this.#value; } set #value({ next } = fallback) { this.#value = next; } }",
+            &[
+                NodeTag::CLASS_DECLARATION,
+                NodeTag::METHOD_DEFINITION,
+                NodeTag::PRIVATE_IDENTIFIER,
+                NodeTag::FUNCTION_EXPRESSION,
+                NodeTag::ASSIGNMENT_PATTERN,
+                NodeTag::OBJECT_PATTERN,
+            ],
+        ),
+        GrammarCase::script(
+            "static and Unicode private accessors",
+            "class Accessors { static get #π() { return this.#π; } static set #π(value) { this.#π = value; } get #only() {} set #write(value) {} }",
+            &[
+                NodeTag::METHOD_DEFINITION,
+                NodeTag::PRIVATE_IDENTIFIER,
+                NodeTag::MEMBER_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
+            "nested private accessor scopes",
+            "class Outer { get #value() { return class Inner { get #value() { return this.#value; } set #value(next) {} }; } set #value(next) {} }",
+            &[
+                NodeTag::CLASS_DECLARATION,
+                NodeTag::CLASS_EXPRESSION,
+                NodeTag::METHOD_DEFINITION,
+            ],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
 /// Accessor arity and noncomputed class special-name restrictions are early errors.
 #[test]
 fn parser_should_diagnose_public_class_accessor_early_errors() {
@@ -990,10 +1029,109 @@ fn parser_should_diagnose_public_class_accessor_early_errors() {
             "class C { s\\u0065t value(next) {} }",
             &[NodeTag::PROPERTY_DEFINITION, NodeTag::METHOD_DEFINITION],
         ),
+    ];
+
+    assert_diagnostic_cases(&cases, true);
+}
+
+/// Private accessor arity, private-name collisions, and class-only syntax are early errors.
+#[test]
+fn parser_should_diagnose_private_class_accessor_early_errors() {
+    let cases = [
         GrammarCase::script(
-            "private getter remains unsupported",
-            "class C { get #value() {} }",
+            "private getter parameter",
+            "class C { get #value(parameter) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "private setter without parameter",
+            "class C { set #value() {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "private setter rest parameter",
+            "class C { set #value(...values) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "private setter trailing comma",
+            "class C { set #value(parameter,) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "duplicate private getters",
+            "class C { get #value() {} get #value() {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "duplicate private setters",
+            "class C { set #value(next) {} set #value(next) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "private getter after field",
+            "class C { #value; get #value() {} }",
             &[NodeTag::PROPERTY_DEFINITION, NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "private field after setter",
+            "class C { set #value(next) {} #value; }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::PROPERTY_DEFINITION],
+        ),
+        GrammarCase::script(
+            "private setter after method",
+            "class C { #value() {} set #value(next) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "private method after getter",
+            "class C { get #value() {} #value() {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "mixed static private accessors",
+            "class C { get #value() {} static set #value(next) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "mixed escaped static private accessors",
+            "class C { static get #\\u0076alue() {} set #value(next) {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "private constructor accessor",
+            "class C { get #constructor() {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "direct super in private getter",
+            "class C extends Base { get #value() { super(); } }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "strict private setter body",
+            "class C { set #value(next) { with (object) statement; } }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::WITH_STATEMENT],
+        ),
+        GrammarCase::script(
+            "escaped private get introducer",
+            "class C { g\\u0065t #value() {} }",
+            &[NodeTag::PROPERTY_DEFINITION, NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "split private name",
+            "class C { get # value() {} }",
+            &[NodeTag::METHOD_DEFINITION],
+        ),
+        GrammarCase::script(
+            "object private getter",
+            "const object = { get #value() {} };",
+            &[NodeTag::OBJECT_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "object private setter inside class",
+            "class C { method() { return { set #value(next) {} }; } }",
+            &[NodeTag::OBJECT_EXPRESSION, NodeTag::METHOD_DEFINITION],
         ),
     ];
 
