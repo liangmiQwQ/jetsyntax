@@ -1,0 +1,9 @@
+packages:
+  - packages/*
+  - tasks/conformance
+  - tasks/benchmark-napi
+
+onlyBuiltDependencies:
+  - '@swc/core'
+  - '@napi-rs/cli'
+  - dprint

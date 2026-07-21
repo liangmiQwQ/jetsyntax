@@ -1,0 +1,19 @@
+{
+  "name": "jetsyntax-workspace",
+  "private": true,
+  "packageManager": "pnpm@10.34.4",
+  "scripts": {
+    "build": "pnpm --filter jetsyntax build",
+    "bench:napi": "pnpm --filter @jetsyntax/benchmark-napi bench",
+    "bench:native": "node tasks/benchmark-native/bench.mjs",
+    "check": "cargo check --workspace --all-targets",
+    "fmt": "cargo fmt --all -- --check && dprint check",
+    "lint": "cargo clippy --workspace --all-targets -- -D warnings",
+    "test": "cargo test --workspace && pnpm build && pnpm --filter jetsyntax test",
+    "test:conformance": "pnpm --filter @jetsyntax/conformance test"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.7.4",
+    "dprint": "0.55.2"
+  }
+}

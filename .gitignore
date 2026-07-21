@@ -1,0 +1,8 @@
+/node_modules
+/target
+/work
+.cache
+reports
+*.node
+packages/jetsyntax/binding.d.ts
+packages/jetsyntax/binding.js
