@@ -355,7 +355,8 @@ fn lexer_should_bound_unterminated_braced_unicode_escape_recovery() {
 #[test]
 fn lexer_should_rescan_regular_expressions_with_classes_escapes_and_flags() {
     let cases = [
-        r"/answer+/giu",
+        r"/answer+/dgimsuy",
+        r"/answer+/dgimsvy",
         r"/[/\]]+/u",
         r"/a\/b/dv",
         r"/(?:x|y){2,4}/m",
@@ -373,6 +374,42 @@ fn lexer_should_rescan_regular_expressions_with_classes_escapes_and_flags() {
             lexer.errors().is_empty(),
             "{source:?}: {:?}",
             lexer.errors()
+        );
+    }
+}
+
+/// Regular-expression flag text accepts only the eight unique ECMAScript flags.
+///
+/// Spec: invalid, duplicate, and jointly present `u` and `v` flags are syntax errors.
+#[test]
+fn lexer_should_diagnose_invalid_regular_expression_flags() {
+    let cases = [
+        (r"/./G", "invalid regular expression flag"),
+        (r"/./1", "invalid regular expression flag"),
+        (r"/./$", "invalid regular expression flag"),
+        (r"/./π", "invalid regular expression flag"),
+        (r"/./gig", "duplicate regular expression flag"),
+        (
+            r"/./uv",
+            "regular expression flags `u` and `v` cannot be combined",
+        ),
+        (
+            r"/./vu",
+            "regular expression flags `u` and `v` cannot be combined",
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let mut lexer = Lexer::new(source);
+        let slash = lexer.next_token();
+        let regexp = lexer.scan_regexp(slash);
+        assert_eq!(regexp.kind, TokenKind::RegExp, "{source:?}");
+        assert_eq!(lexer.source_text(regexp), source, "{source:?}");
+        assert_eq!(lexer.next_token().kind, TokenKind::Eof, "{source:?}");
+        assert_eq!(
+            lexer.errors().first().map(|error| error.message),
+            Some(expected),
+            "{source:?}"
         );
     }
 }

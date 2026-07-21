@@ -143,6 +143,31 @@ describe("parse", () => {
     expect(recovered.diagnostics).not.toContain("duplicate binding `leaked`");
   });
 
+  it("diagnoses invalid regular-expression literal flags with a recovered ESTree node", () => {
+    for (const [source, flags] of [["/./G;", "G"], ["/./gig;", "gig"], ["/./uv;", "uv"]]) {
+      const result = parse(source, { semanticErrors: true });
+
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+      expect(result.program.body[0].expression).toMatchObject({
+        type: "Literal",
+        raw: source.slice(0, -1),
+        value: null,
+        regex: { pattern: ".", flags },
+      });
+    }
+  });
+
+  it("leaves regular-expression constructor validation to runtime", () => {
+    const result = parse("new RegExp(\".\", \"uv\"); RegExp(\"\\\\p{Unknown}\", \"u\");");
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      { expression: { type: "NewExpression" } },
+      { expression: { type: "CallExpression" } },
+    ]);
+  });
+
   it("materializes AST output containing braced Unicode identifier escapes", () => {
     const result = parse("<\\u{2F804}></\\u{2F804}>", { lang: "jsx", semanticErrors: true });
 

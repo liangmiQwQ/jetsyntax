@@ -3039,7 +3039,8 @@ impl<'s> Parser<'s> {
 
     fn parse_regexp_literal(&mut self) -> Result<ParsedNode, ParseError> {
         let slash = self.current;
-        let token = self.lexer.scan_regexp(slash);
+        let flag_errors = self.reports_ecmascript_early_errors();
+        let token = self.lexer.scan_regexp_with_flag_errors(slash, flag_errors);
         self.current = self.lexer.next_token();
         let raw = self.tape.push_source_slice(Self::token_span(token))?;
         let kind = self.tape.push_u32(6)?;

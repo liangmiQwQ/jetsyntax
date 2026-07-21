@@ -396,6 +396,14 @@ impl<'s> Lexer<'s> {
 
     /// Rescan a `/` token as a regular-expression literal after the parser selects that grammar.
     pub fn scan_regexp(&mut self, slash: Token) -> Token {
+        self.scan_regexp_with_flag_errors(slash, true)
+    }
+
+    pub(crate) fn scan_regexp_with_flag_errors(
+        &mut self,
+        slash: Token,
+        flag_errors: bool,
+    ) -> Token {
         self.position = slash.start as usize + 1;
         let mut in_class = false;
         let mut escaped = false;
@@ -425,8 +433,40 @@ impl<'s> Lexer<'s> {
                 "unterminated regular expression",
             );
         }
+        let mut flags = 0_u8;
         while self.current_identifier_continue() {
+            let start = self.position;
+            let Some(&flag) = self.bytes.get(self.position) else {
+                break;
+            };
             self.advance_char();
+            if !flag_errors {
+                continue;
+            }
+            let bit = match flag {
+                b'd' => 1 << 0,
+                b'g' => 1 << 1,
+                b'i' => 1 << 2,
+                b'm' => 1 << 3,
+                b's' => 1 << 4,
+                b'u' => 1 << 5,
+                b'v' => 1 << 6,
+                b'y' => 1 << 7,
+                _ => {
+                    self.error(start, self.position, "invalid regular expression flag");
+                    continue;
+                }
+            };
+            if flags & bit != 0 {
+                self.error(start, self.position, "duplicate regular expression flag");
+            } else if matches!(flag, b'u' | b'v') && flags & ((1 << 5) | (1 << 6)) != 0 {
+                self.error(
+                    start,
+                    self.position,
+                    "regular expression flags `u` and `v` cannot be combined",
+                );
+            }
+            flags |= bit;
         }
         Token {
             kind: TokenKind::RegExp,

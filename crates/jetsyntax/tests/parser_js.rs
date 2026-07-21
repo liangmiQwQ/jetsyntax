@@ -867,6 +867,35 @@ fn parser_should_accept_regular_expressions_and_templates() {
     assert_clean_cases(&cases);
 }
 
+/// Invalid literal flags are diagnosed while runtime `RegExp` arguments remain ordinary strings.
+///
+/// Spec: regular-expression literal flag validation is a parse-time check, unlike construction.
+#[test]
+fn parser_should_validate_regular_expression_literal_flags() {
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script("invalid flag", "/./G;", &[NodeTag::LITERAL]),
+            GrammarCase::script("duplicate flag", "/./gig;", &[NodeTag::LITERAL]),
+            GrammarCase::script("incompatible flags", "/./uv;", &[NodeTag::LITERAL]),
+        ],
+        true,
+    );
+    assert_clean_cases(&[
+        GrammarCase::script(
+            "runtime constructor validation",
+            r#"new RegExp(".", "uv"); RegExp("\\p{Unknown}", "u");"#,
+            &[NodeTag::NEW_EXPRESSION, NodeTag::CALL_EXPRESSION],
+        ),
+        GrammarCase {
+            name: "TypeScript scanner compatibility",
+            source: "/foo/visualstudiocode; /./uv; /(?𝘴𝘪-𝘮:^𝘧𝘰𝘰.)/𝘨𝘮𝘶;",
+            language: Language::TypeScript,
+            source_kind: SourceKind::Script,
+            expected_tags: &[NodeTag::LITERAL],
+        },
+    ]);
+}
+
 /// Optional member, element, and call chains must be wrapped once in a chain expression.
 #[test]
 fn parser_should_accept_optional_chaining() {
