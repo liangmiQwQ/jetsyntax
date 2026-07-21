@@ -1000,6 +1000,200 @@ fn parser_should_diagnose_public_class_accessor_early_errors() {
     assert_diagnostic_cases(&cases, true);
 }
 
+/// Object accessors preserve literal and computed names without changing ordinary property roles.
+#[test]
+fn parser_should_accept_public_object_accessors() {
+    let cases = [
+        GrammarCase::script(
+            "public object accessors",
+            "const accessors = { get value() { return this._value; }, set value({ next } = fallback) { this._value = next; }, get [key]() { return value; }, set 'named'(value) {}, get 0() {}, set 1n(value) {}, get return() {}, set async(value) {} };",
+            &[
+                NodeTag::OBJECT_EXPRESSION,
+                NodeTag::PROPERTY,
+                NodeTag::FUNCTION_EXPRESSION,
+                NodeTag::ASSIGNMENT_PATTERN,
+                NodeTag::OBJECT_PATTERN,
+            ],
+        ),
+        GrammarCase::script(
+            "ordinary get and set properties",
+            "const names = { get() {}, set(value) {}, get, set, get: getter, set: setter, *generator() {}, *get() {}, async *set() {} };",
+            &[
+                NodeTag::OBJECT_EXPRESSION,
+                NodeTag::PROPERTY,
+                NodeTag::FUNCTION_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
+            "object accessor super property and sloppy body",
+            "const inherited = { get value() { with (object) return super.value; }, set value(next) { super.value = next; delete identifier; } };",
+            &[
+                NodeTag::PROPERTY,
+                NodeTag::MEMBER_EXPRESSION,
+                NodeTag::WITH_STATEMENT,
+                NodeTag::UNARY_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
+            "object accessor strict directive does not leak",
+            "const strict = { get value() { 'use strict'; return this.value; }, set value(next) { 'use strict'; this.value = next; } }; with (target) statement;",
+            &[
+                NodeTag::PROPERTY,
+                NodeTag::FUNCTION_EXPRESSION,
+                NodeTag::WITH_STATEMENT,
+            ],
+        ),
+        GrammarCase::module(
+            "strict property and member identifier names",
+            "const names = { static: 1, interface: 2, get public() { delete target.static; return target.static + target.interface; }, set private(value) { target.protected = value; } };",
+            &[
+                NodeTag::PROPERTY,
+                NodeTag::MEMBER_EXPRESSION,
+                NodeTag::UNARY_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
+            "strict delete computed member containing private access",
+            "class C { #key; get value() { delete target[this.#key]; return target[this.#key]; } }",
+            &[
+                NodeTag::METHOD_DEFINITION,
+                NodeTag::MEMBER_EXPRESSION,
+                NodeTag::UNARY_EXPRESSION,
+            ],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
+/// Object accessor arity, direct-super, and contextual introducer restrictions are early errors.
+#[test]
+fn parser_should_diagnose_public_object_accessor_early_errors() {
+    let cases = [
+        GrammarCase::script(
+            "getter parameter",
+            "const object = { get value(parameter) {} };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "setter without parameter",
+            "const object = { set value() {} };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "setter with two parameters",
+            "const object = { set value(first, second) {} };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "setter rest parameter",
+            "const object = { set value(...values) {} };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "setter trailing comma",
+            "const object = { set value(parameter,) {} };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "direct super in getter",
+            "const object = { get value() { super(); } };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "direct super in setter",
+            "const object = { set value(next) { super(); } };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "escaped get introducer",
+            "const object = { g\\u0065t value() {} };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "escaped set introducer",
+            "const object = { s\\u0065t value(next) {} };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "generator after get",
+            "const object = { get *value() {} };",
+            &[NodeTag::PROPERTY],
+        ),
+    ];
+
+    assert_diagnostic_cases(&cases, true);
+}
+
+/// Cover grammar and strict accessor bodies retain their surrounding early errors.
+#[test]
+fn parser_should_diagnose_object_accessor_context_errors() {
+    let cases = [
+        GrammarCase::script(
+            "accessor in assignment pattern",
+            "0, [{ get value() {} }] = [{}];",
+            &[NodeTag::ARRAY_PATTERN, NodeTag::OBJECT_PATTERN],
+        ),
+        GrammarCase::script(
+            "accessor in for-of assignment pattern",
+            "for ([{ set value(next) {} }] of source) {}",
+            &[NodeTag::FOR_OF_STATEMENT, NodeTag::OBJECT_PATTERN],
+        ),
+        GrammarCase::script(
+            "object accessor optional chain assignment",
+            "[{ set value(next) {} }?.value = 1] = [2];",
+            &[NodeTag::CHAIN_EXPRESSION, NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "use strict getter body",
+            "const object = { get value() { 'use strict'; public = 1; } };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "use strict setter parameter",
+            "const object = { set value(eval) { 'use strict'; } };",
+            &[NodeTag::PROPERTY],
+        ),
+        GrammarCase::script(
+            "use strict setter with default",
+            "const object = { set value(next = 0) { 'use strict'; } };",
+            &[NodeTag::PROPERTY, NodeTag::ASSIGNMENT_PATTERN],
+        ),
+        GrammarCase::module(
+            "export declaration in getter",
+            "const object = { get value() { export default null; } };",
+            &[NodeTag::PROPERTY, NodeTag::EXPORT_DEFAULT_DECLARATION],
+        ),
+        GrammarCase::module(
+            "import declaration in setter",
+            "const object = { set value(next) { import value from './value.js'; } };",
+            &[NodeTag::PROPERTY, NodeTag::IMPORT_DECLARATION],
+        ),
+        GrammarCase::module(
+            "strict with in getter",
+            "const object = { get value() { with (target) statement; } };",
+            &[NodeTag::PROPERTY, NodeTag::WITH_STATEMENT],
+        ),
+        GrammarCase::module(
+            "strict delete in setter",
+            "const object = { set value(next) { delete identifier; } };",
+            &[NodeTag::PROPERTY, NodeTag::UNARY_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "strict delete private member",
+            "class C { #value; method() { delete this.#value; } }",
+            &[NodeTag::CLASS_DECLARATION, NodeTag::UNARY_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "hashbang before strict directive",
+            "#!/usr/bin/env node\n'use strict'; with (target) statement;",
+            &[NodeTag::WITH_STATEMENT],
+        ),
+    ];
+
+    assert_diagnostic_cases(&cases, true);
+}
+
 /// Generator methods retain binding and constructor early errors.
 #[test]
 fn parser_should_diagnose_generator_method_early_errors() {

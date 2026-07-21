@@ -439,6 +439,14 @@ impl<'s> ParserContext<'s> {
         true
     }
 
+    pub(crate) fn current_restricted_parameter_binding(&self) -> Option<Span> {
+        let scope = self.scopes.last()?;
+        ["eval", "arguments"].into_iter().find_map(|name| {
+            let binding = scope.value_bindings.get(name)?;
+            (binding.kind == BindingKind::Parameter).then_some(binding.span)
+        })
+    }
+
     pub(crate) fn declare_private(&mut self, name: &'s str, span: Span) -> bool {
         let Some(scope) = self.class_scope() else {
             self.error(span, "private name is only valid inside a class");

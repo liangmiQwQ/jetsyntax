@@ -365,6 +365,151 @@ describe("parse", () => {
     }
   });
 
+  it("materializes public object accessors and preserves get/set property ambiguities", () => {
+    const source = [
+      "const accessors = {",
+      "  get value() { return this._value; },",
+      "  set value({ next } = fallback) { this._value = next; },",
+      "  get [key]() { return value; },",
+      "  set 'named'(value) {},",
+      "  get 0() {},",
+      "  set 1n(value) {},",
+      "  get return() {},",
+      "  set async(value) {},",
+      "  get() {},",
+      "  set(value) {},",
+      "  get,",
+      "  set,",
+      "  get: getter,",
+      "  set: setter,",
+      "  *get() {},",
+      "  async *set() {},",
+      "};",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const properties = result.program.body[0].declarations[0].init.properties;
+    expect(properties.slice(0, 8)).toMatchObject([
+      {
+        type: "Property",
+        kind: "get",
+        key: { type: "Identifier", name: "value" },
+        method: false,
+        shorthand: false,
+        computed: false,
+        value: { type: "FunctionExpression", params: [], generator: false, async: false },
+      },
+      {
+        type: "Property",
+        kind: "set",
+        key: { type: "Identifier", name: "value" },
+        method: false,
+        shorthand: false,
+        computed: false,
+        value: {
+          type: "FunctionExpression",
+          params: [{ type: "AssignmentPattern", left: { type: "ObjectPattern" } }],
+          generator: false,
+          async: false,
+        },
+      },
+      { type: "Property", kind: "get", computed: true, method: false, shorthand: false },
+      {
+        type: "Property",
+        kind: "set",
+        key: { type: "Literal", value: "named" },
+        computed: false,
+      },
+      { type: "Property", kind: "get", key: { type: "Literal", value: 0 } },
+      { type: "Property", kind: "set", key: { type: "Literal", bigint: "1" } },
+      { type: "Property", kind: "get", key: { type: "Identifier", name: "return" } },
+      { type: "Property", kind: "set", key: { type: "Identifier", name: "async" } },
+    ]);
+    expect(properties.slice(8)).toMatchObject([
+      { type: "Property", kind: "init", key: { name: "get" }, method: true },
+      { type: "Property", kind: "init", key: { name: "set" }, method: true },
+      { type: "Property", kind: "init", key: { name: "get" }, shorthand: true },
+      { type: "Property", kind: "init", key: { name: "set" }, shorthand: true },
+      { type: "Property", kind: "init", key: { name: "get" }, method: false },
+      { type: "Property", kind: "init", key: { name: "set" }, method: false },
+      {
+        type: "Property",
+        kind: "init",
+        key: { name: "get" },
+        method: true,
+        value: { generator: true, async: false },
+      },
+      {
+        type: "Property",
+        kind: "init",
+        key: { name: "set" },
+        method: true,
+        value: { generator: true, async: true },
+      },
+    ]);
+
+    const strictNames = parse(
+      [
+        "const names = { static: 1, interface: 2, get public() { delete target.static; return target.static + target.interface; }, set private(value) { target.protected = value; } };",
+        "class C { #key; get value() { delete target[this.#key]; return target[this.#key]; } }",
+      ].join("\n"),
+      { semanticErrors: true, sourceType: "module" },
+    );
+    expect(strictNames.diagnostics).toEqual([]);
+  });
+
+  it("diagnoses public object accessor early errors and unsupported introducers", () => {
+    const sources = [
+      "const object = { get value(parameter) {} };",
+      "const object = { set value() {} };",
+      "const object = { set value(first, second) {} };",
+      "const object = { set value(...values) {} };",
+      "const object = { set value(parameter,) {} };",
+      "const object = { get value() { super(); } };",
+      "const object = { set value(next) { super(); } };",
+      "const object = { g\\u0065t value() {} };",
+      "const object = { s\\u0065t value(next) {} };",
+      "const object = { get *value() {} };",
+      "0, [{ get value() {} }] = [{}];",
+      "for ([{ set value(next) {} }] of source) {}",
+      "[{ set value(next) {} }?.value = 1] = [2];",
+      "const object = { get value() { 'use strict'; public = 1; } };",
+      "const object = { set value(eval) { 'use strict'; } };",
+      "const object = { set value(next = 0) { 'use strict'; } };",
+      "class C { #value; method() { delete this.#value; } }",
+    ];
+
+    for (const source of sources) {
+      const result = parse(source, { semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.panicked, source).toBe(false);
+      expect(result.program.type, source).toBe("Program");
+    }
+
+    const moduleSources = [
+      "const object = { get value() { export default null; } };",
+      "const object = { set value(next) { import value from './value.js'; } };",
+      "const object = { set value(eval) {} };",
+    ];
+    for (const source of moduleSources) {
+      const result = parse(source, { semanticErrors: true, sourceType: "module" });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.panicked, source).toBe(false);
+    }
+
+    const preservedPrivateDelete = parse(
+      "class C { #value; method() { delete (this.#value); } }",
+      { preserveParens: true, semanticErrors: true },
+    );
+    expect(preservedPrivateDelete.diagnostics).not.toEqual([]);
+
+    const hashbangStrict = parse("#!/usr/bin/env node\n'use strict'; with (target) statement;", {
+      semanticErrors: true,
+    });
+    expect(hashbangStrict.diagnostics).not.toEqual([]);
+  });
+
   it("materializes property names across objects, patterns, and classes", () => {
     const source = [
       "const object = { [key]: value, return: keyword, 0: numeric, 1n: bigint, shorthand, [method]() {} };",

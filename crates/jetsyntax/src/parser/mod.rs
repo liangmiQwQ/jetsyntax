@@ -86,12 +86,12 @@ struct ParsedPropertyName {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum ClassAccessorKind {
+enum AccessorKind {
     Get,
     Set,
 }
 
-impl ClassAccessorKind {
+impl AccessorKind {
     const fn method_kind(self) -> u32 {
         match self {
             Self::Get => 1,
@@ -105,6 +105,7 @@ struct ParsedParameterList {
     count: usize,
     has_rest: bool,
     has_trailing_comma: bool,
+    simple: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -112,6 +113,7 @@ struct AssignmentPatternCandidate {
     node: NodeRef,
     tag: NodeTag,
     group_start: usize,
+    error_span: Option<Span>,
 }
 
 #[derive(Clone, Copy)]
@@ -127,6 +129,8 @@ struct Parser<'s> {
     context: ParserContext<'s>,
     options: ParseOptions,
     function_depth: u32,
+    // Parentheses-transparent semantic tag for immediate grammar checks, without widening ParsedNode.
+    last_node_tag: Option<NodeTag>,
     assignment_pattern_candidates: Vec<AssignmentPatternCandidate>,
 }
 
@@ -136,7 +140,9 @@ impl<'s> Parser<'s> {
         let current = lexer.next_token();
         let module = matches!(options.source_kind, SourceKind::Module);
         let ambient = matches!(options.language, Language::TypeScriptDefinition);
-        let grammar = GrammarContext::new(module, ambient);
+        let strict =
+            module || current.kind == TokenKind::String && has_use_strict_directive(source, 0);
+        let grammar = GrammarContext::new(module, ambient).with_strict(strict);
         Self {
             source,
             lexer,
@@ -145,6 +151,7 @@ impl<'s> Parser<'s> {
             context: ParserContext::new(grammar),
             options,
             function_depth: 0,
+            last_node_tag: None,
             assignment_pattern_candidates: Vec::new(),
         }
     }
@@ -366,13 +373,20 @@ impl<'s> Parser<'s> {
         let mut params = Vec::new();
         let mut has_rest = false;
         let mut has_trailing_comma = false;
+        let mut simple = true;
         while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
             let parameter = if self.eat(TokenKind::Ellipsis).is_some() {
                 has_rest = true;
+                simple = false;
                 let argument = self.parse_binding_pattern(BindingKind::Parameter)?;
                 self.parse_binding_rest_element(argument)?
             } else {
-                self.parse_binding_element(BindingKind::Parameter)?
+                let pattern = self.parse_binding_pattern(BindingKind::Parameter)?;
+                if self.current.kind == TokenKind::Eq {
+                    simple = false;
+                }
+                simple &= self.last_node_tag == Some(NodeTag::IDENTIFIER);
+                self.parse_binding_default(pattern)?
             };
             params.push(parameter.value());
             if self.eat(TokenKind::Comma).is_none() {
@@ -386,6 +400,7 @@ impl<'s> Parser<'s> {
             value: self.tape.push_list(&params)?,
             has_rest,
             has_trailing_comma,
+            simple,
         })
     }
 
@@ -415,7 +430,7 @@ impl<'s> Parser<'s> {
         start: u32,
         generator: bool,
         asynchronous: bool,
-        accessor: Option<ClassAccessorKind>,
+        accessor: Option<AccessorKind>,
     ) -> Result<ParsedNode, ParseError> {
         self.expect(TokenKind::LeftParen);
         let previous_grammar = self.enter_function_context(generator, asynchronous);
@@ -424,18 +439,35 @@ impl<'s> Parser<'s> {
                 .set_grammar(self.context.grammar().with_accessor(true));
         }
         let params = self.parse_parameter_list()?;
-        if accessor == Some(ClassAccessorKind::Get) && params.count != 0 {
-            self.error(self.current_span(), "class getter must not have parameters");
+        if accessor == Some(AccessorKind::Get) && params.count != 0 {
+            self.error(self.current_span(), "getter must not have parameters");
         }
-        if accessor == Some(ClassAccessorKind::Set)
+        if accessor == Some(AccessorKind::Set)
             && (params.count != 1 || params.has_rest || params.has_trailing_comma)
         {
             self.error(
                 self.current_span(),
-                "class setter must have exactly one non-rest parameter without a trailing comma",
+                "setter must have exactly one non-rest parameter without a trailing comma",
             );
         }
         self.expect(TokenKind::RightParen);
+        let has_use_strict = self.current.kind == TokenKind::LeftBrace
+            && has_use_strict_directive(self.source, self.current.end as usize);
+        if has_use_strict && !params.simple {
+            self.error(
+                self.current_span(),
+                "a function with non-simple parameters cannot contain a use strict directive",
+            );
+        }
+        if (self.context.grammar().strict() || has_use_strict)
+            && let Some(span) = self.context.current_restricted_parameter_binding()
+        {
+            self.error(span, "eval and arguments cannot be bound in strict mode");
+        }
+        if has_use_strict {
+            self.context
+                .set_grammar(self.context.grammar().with_strict(true));
+        }
         let body = self.parse_block_statement()?;
         self.leave_function_context(previous_grammar);
         let id = self.tape.push_null()?;
@@ -522,7 +554,7 @@ impl<'s> Parser<'s> {
         };
 
         if leading_key.is_none()
-            && let Some(accessor) = self.current_class_accessor_kind()
+            && let Some(accessor) = self.current_accessor_kind()
         {
             return self.parse_class_accessor(start, is_static, accessor);
         }
@@ -602,7 +634,7 @@ impl<'s> Parser<'s> {
         &mut self,
         start: u32,
         is_static: bool,
-        accessor: ClassAccessorKind,
+        accessor: AccessorKind,
     ) -> Result<ParsedNode, ParseError> {
         self.bump();
         let property_name = self.parse_property_name(true)?;
@@ -648,6 +680,12 @@ impl<'s> Parser<'s> {
                 NodeTag::EXPRESSION_STATEMENT,
                 Span::new(start, end),
                 &[expression.value()],
+            );
+        }
+        if self.function_depth > 0 && self.current.kind != TokenKind::Dot {
+            self.error(
+                Span::new(start, start.saturating_add(6)),
+                "import declarations are only allowed at the top level",
             );
         }
 
@@ -718,6 +756,12 @@ impl<'s> Parser<'s> {
     #[allow(clippy::too_many_lines)]
     fn parse_export_declaration(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Export).start;
+        if self.function_depth > 0 {
+            self.error(
+                Span::new(start, start.saturating_add(6)),
+                "export declarations are only allowed at the top level",
+            );
+        }
         // Babel emits both TypeScript-only forms as standalone statements rather than ES export wrappers.
         if self.options.language.is_typescript() && self.eat(TokenKind::Eq).is_some() {
             let expression = self.parse_assignment_expression(true)?;
@@ -976,6 +1020,7 @@ impl<'s> Parser<'s> {
         let start = self.take().start;
         let asynchronous = self.eat(TokenKind::Await).is_some();
         self.expect(TokenKind::LeftParen);
+        let mut expression_init = None;
         let init = if matches!(
             self.current.kind,
             TokenKind::Var | TokenKind::Let | TokenKind::Const
@@ -984,10 +1029,15 @@ impl<'s> Parser<'s> {
         } else if self.current.kind == TokenKind::Semicolon {
             self.tape.push_null()?
         } else {
-            self.parse_expression(false)?.value()
+            let expression = self.parse_expression(false)?;
+            expression_init = Some(expression);
+            expression.value()
         };
 
         if matches!(self.current.kind, TokenKind::In | TokenKind::Of) {
+            if let Some(expression) = expression_init {
+                self.retag_assignment_pattern(expression.node)?;
+            }
             let operator = self.take();
             let right = self.parse_expression(true)?;
             self.expect(TokenKind::RightParen);
@@ -1413,17 +1463,13 @@ impl<'s> Parser<'s> {
             let start = self.take().start;
             let argument = self.parse_unary_expression()?;
             if operator == UnaryOperator::Delete && self.context.grammar().strict() {
-                let text = self
-                    .source
-                    .get(argument.span.start as usize..argument.span.end as usize)
-                    .unwrap_or_default();
-                if text.chars().next().is_some_and(|character| {
-                    character == '_' || character == '$' || character.is_alphabetic()
-                }) {
+                if self.last_node_tag == Some(NodeTag::IDENTIFIER) {
                     self.error(
                         argument.span,
                         "deleting an unqualified identifier is forbidden in strict mode",
                     );
+                } else if self.is_private_member_target(argument) {
+                    self.error(argument.span, "deleting a private member is forbidden");
                 }
             }
             let operator = self.tape.push_u32(operator as u32)?;
@@ -1603,13 +1649,19 @@ impl<'s> Parser<'s> {
                 expression.span,
                 &[expression.value()],
             )?;
+            if assignment_operator(self.current.kind).is_some() {
+                self.error(
+                    expression.span,
+                    "optional chains are not valid assignment targets",
+                );
+            }
         }
         Ok(expression)
     }
 
     fn parse_primary_expression(&mut self) -> Result<ParsedNode, ParseError> {
         match self.current.kind {
-            kind if Self::is_identifier_name(kind) => self.parse_identifier(),
+            kind if Self::is_identifier_name(kind) => self.parse_identifier_reference(),
             TokenKind::Number
             | TokenKind::BigInt
             | TokenKind::String
@@ -1629,7 +1681,7 @@ impl<'s> Parser<'s> {
                 if self.context.grammar().accessor() && self.current.kind == TokenKind::LeftParen {
                     self.error(
                         Self::token_span(token),
-                        "direct super calls are not allowed in class accessors",
+                        "direct super calls are not allowed in accessors",
                     );
                 }
                 self.node(NodeTag::SUPER, Self::token_span(token), &[])
@@ -1850,13 +1902,16 @@ impl<'s> Parser<'s> {
     fn parse_parenthesized_expression(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.take().start;
         let expression = self.parse_expression(true)?;
+        let semantic_tag = self.last_node_tag;
         let end = self.expect(TokenKind::RightParen).end;
         if self.options.preserve_parentheses {
-            self.node(
+            let parenthesized = self.node(
                 NodeTag::PARENTHESIZED_EXPRESSION,
                 Span::new(start, end),
                 &[expression.value()],
-            )
+            )?;
+            self.last_node_tag = semantic_tag;
+            Ok(parenthesized)
         } else {
             Ok(expression)
         }
@@ -1880,6 +1935,7 @@ impl<'s> Parser<'s> {
                         node: spread.node,
                         tag: NodeTag::REST_ELEMENT,
                         group_start: usize::MAX,
+                        error_span: None,
                     });
                 spread
             } else {
@@ -1920,8 +1976,21 @@ impl<'s> Parser<'s> {
                         node: spread.node,
                         tag: NodeTag::REST_ELEMENT,
                         group_start: usize::MAX,
+                        error_span: None,
                     });
                 properties.push(spread.value());
+            } else if let Some(accessor) = self.current_accessor_kind() {
+                let property_start = self.current.start;
+                let property = self.parse_object_accessor(property_start, accessor)?;
+                // This marker reports only if cover grammar later reinterprets the object as a pattern.
+                self.assignment_pattern_candidates
+                    .push(AssignmentPatternCandidate {
+                        node: property.node,
+                        tag: NodeTag::PROPERTY,
+                        group_start: usize::MAX,
+                        error_span: Some(property.span),
+                    });
+                properties.push(property.value());
             } else {
                 let property_start = self.current.start;
                 let async_token = if self.current.kind == TokenKind::Async {
@@ -2015,6 +2084,35 @@ impl<'s> Parser<'s> {
             NodeTag::OBJECT_PATTERN,
         );
         Ok(expression)
+    }
+
+    fn parse_object_accessor(
+        &mut self,
+        start: u32,
+        accessor: AccessorKind,
+    ) -> Result<ParsedNode, ParseError> {
+        self.bump();
+        let property_name = self.parse_property_name(false)?;
+        let method_patterns = self.assignment_pattern_checkpoint();
+        let function =
+            self.parse_method_function(property_name.key.span.start, false, false, Some(accessor))?;
+        self.rollback_assignment_patterns(method_patterns);
+        let kind = self.tape.push_u32(accessor.method_kind())?;
+        let method = self.tape.push_bool(false)?;
+        let shorthand = self.tape.push_bool(false)?;
+        let computed = self.tape.push_bool(property_name.computed)?;
+        self.node(
+            NodeTag::PROPERTY,
+            Span::new(start, function.span.end),
+            &[
+                property_name.key.value(),
+                function.value(),
+                kind,
+                method,
+                shorthand,
+                computed,
+            ],
+        )
     }
 
     fn parse_new_expression(&mut self) -> Result<ParsedNode, ParseError> {
@@ -2191,6 +2289,17 @@ impl<'s> Parser<'s> {
         self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name])
     }
 
+    fn parse_identifier_reference(&mut self) -> Result<ParsedNode, ParseError> {
+        let span = self.current_span();
+        if self.context.grammar().strict() && self.is_strict_reserved_identifier(span) {
+            self.error(
+                span,
+                "strict mode reserved word cannot be used as an identifier",
+            );
+        }
+        self.parse_identifier()
+    }
+
     fn parse_member_property(&mut self) -> Result<ParsedNode, ParseError> {
         let token = self.take();
         if token.kind == TokenKind::PrivateIdentifier {
@@ -2285,6 +2394,15 @@ impl<'s> Parser<'s> {
             .source
             .get(token.start as usize..token.end as usize)
             .unwrap_or_default();
+        if self.context.grammar().strict()
+            && (matches!(name_text, "eval" | "arguments")
+                || self.is_strict_reserved_identifier(Self::token_span(token)))
+        {
+            self.error(
+                Self::token_span(token),
+                "identifier cannot be bound in strict mode",
+            );
+        }
         let _ = self
             .context
             .declare_binding(name_text, binding_kind, Self::token_span(token));
@@ -2446,6 +2564,12 @@ impl<'s> Parser<'s> {
             .source
             .get(span.start as usize..span.end as usize)
             .unwrap_or_default();
+        if self.context.grammar().strict()
+            && (matches!(name_text, "eval" | "arguments")
+                || self.is_strict_reserved_identifier(span))
+        {
+            self.error(span, "identifier cannot be bound in strict mode");
+        }
         let _ = self.context.declare_binding(name_text, binding_kind, span);
         self.identifier_from_span(span)
     }
@@ -3322,6 +3446,7 @@ impl<'s> Parser<'s> {
         fields: &[ValueRef],
     ) -> Result<ParsedNode, ParseError> {
         let node = self.tape.push_node(tag, span, 0, fields)?;
+        self.last_node_tag = Some(tag);
         Ok(ParsedNode { node, span })
     }
 
@@ -3361,6 +3486,7 @@ impl<'s> Parser<'s> {
                 node: root,
                 tag,
                 group_start: checkpoint.candidate_len,
+                error_span: None,
             });
     }
 
@@ -3371,8 +3497,19 @@ impl<'s> Parser<'s> {
         if group.node.offset() != root.offset() {
             return Ok(());
         }
+        if let Some(span) = self.assignment_pattern_candidates[group.group_start..]
+            .iter()
+            .find_map(|candidate| candidate.error_span)
+        {
+            self.error(
+                span,
+                "accessor properties are not allowed in assignment patterns",
+            );
+        }
         for candidate in &self.assignment_pattern_candidates[group.group_start..] {
-            self.tape.retag_node(candidate.node, candidate.tag)?;
+            if candidate.error_span.is_none() {
+                self.tape.retag_node(candidate.node, candidate.tag)?;
+            }
         }
         self.assignment_pattern_candidates
             .truncate(group.group_start);
@@ -3452,13 +3589,13 @@ impl<'s> Parser<'s> {
         token.kind == kind && !token.flags.line_break_before() && !token.flags.escaped()
     }
 
-    fn current_class_accessor_kind(&self) -> Option<ClassAccessorKind> {
+    fn current_accessor_kind(&self) -> Option<AccessorKind> {
         if self.current.flags.escaped() {
             return None;
         }
         let accessor = match self.current.kind {
-            TokenKind::Get => ClassAccessorKind::Get,
-            TokenKind::Set => ClassAccessorKind::Set,
+            TokenKind::Get => AccessorKind::Get,
+            TokenKind::Set => AccessorKind::Set,
             _ => return None,
         };
         let mut lookahead = Lexer::new(self.source);
@@ -3480,6 +3617,39 @@ impl<'s> Parser<'s> {
             return false;
         }
         decode_static_property_name(raw).is_some_and(|name| name == expected)
+    }
+
+    fn is_strict_reserved_identifier(&self, span: Span) -> bool {
+        [
+            "implements",
+            "interface",
+            "let",
+            "package",
+            "private",
+            "protected",
+            "public",
+            "static",
+            "yield",
+        ]
+        .into_iter()
+        .any(|name| self.static_property_name_matches(span, name))
+    }
+
+    fn is_private_member_target(&self, expression: ParsedNode) -> bool {
+        if self.last_node_tag != Some(NodeTag::MEMBER_EXPRESSION) {
+            return false;
+        }
+        let mut lexer = Lexer::new(self.source);
+        lexer.set_position(expression.span.start as usize);
+        let mut last = lexer.next_token();
+        let mut last_semantic = last;
+        while last.end < expression.span.end && last.kind != TokenKind::Eof {
+            last = lexer.next_token();
+            if last.kind != TokenKind::RightParen {
+                last_semantic = last;
+            }
+        }
+        last_semantic.kind == TokenKind::PrivateIdentifier
     }
 
     fn source_text(&self, span: Span) -> &'s str {
@@ -3601,6 +3771,44 @@ impl<'s> Parser<'s> {
                     | TokenKind::Yield
             )
     }
+}
+
+fn has_use_strict_directive(source: &str, position: usize) -> bool {
+    // Most function bodies do not start with a directive; avoid a second lexer on that hot path.
+    if source
+        .get(position..)
+        .and_then(|rest| rest.bytes().find(|byte| !byte.is_ascii_whitespace()))
+        .is_none_or(|byte| byte.is_ascii() && !matches!(byte, b'\'' | b'"' | b'#' | b'/'))
+    {
+        return false;
+    }
+    let mut lexer = Lexer::new(source);
+    lexer.set_position(position);
+    let mut directive = lexer.next_token();
+    while directive.kind == TokenKind::String {
+        let raw = source
+            .get(directive.start as usize..directive.end as usize)
+            .unwrap_or_default();
+        let is_use_strict = matches!(raw, "\"use strict\"" | "'use strict'");
+        let next = lexer.next_token();
+        if next.kind == TokenKind::Semicolon {
+            if is_use_strict {
+                return true;
+            }
+            directive = lexer.next_token();
+            continue;
+        }
+        if is_use_strict {
+            return matches!(next.kind, TokenKind::RightBrace | TokenKind::Eof)
+                || next.flags.line_break_before();
+        }
+        if next.flags.line_break_before() {
+            directive = next;
+            continue;
+        }
+        return false;
+    }
+    false
 }
 
 fn decode_static_property_name(raw: &str) -> Option<String> {
