@@ -28,148 +28,154 @@ const HEADER_SOURCE_BYTES = 8;
 
 // These field orders are the transfer contract used by parser/mod.rs push_node call sites.
 // Extend this table and decodeNode together whenever the native parser starts emitting a new tag.
-const NODE_SCHEMAS = new Map([
-  [1, ["Program", ["body", "sourceType"]]],
-  [2, ["Identifier", ["name"]]],
-  [3, ["PrivateIdentifier", ["name"]]],
-  [4, ["Literal", ["raw", "kind"]]],
-  [5, ["ExpressionStatement", ["expression"]]],
-  [6, ["BlockStatement", ["body"]]],
-  [7, ["EmptyStatement", []]],
-  [8, ["DebuggerStatement", []]],
-  [9, ["WithStatement", ["object", "body"]]],
-  [10, ["ReturnStatement", ["argument"]]],
-  [11, ["LabeledStatement", ["label", "body"]]],
-  [12, ["BreakStatement", ["label"]]],
-  [13, ["ContinueStatement", ["label"]]],
-  [14, ["IfStatement", ["test", "consequent", "alternate"]]],
-  [15, ["SwitchStatement", ["discriminant", "cases"]]],
-  [16, ["SwitchCase", ["test", "consequent"]]],
-  [17, ["ThrowStatement", ["argument"]]],
-  [18, ["TryStatement", ["block", "handler", "finalizer"]]],
-  [19, ["CatchClause", ["param", "body"]]],
-  [20, ["WhileStatement", ["test", "body"]]],
-  [21, ["DoWhileStatement", ["body", "test"]]],
-  [22, ["ForStatement", ["init", "test", "update", "body"]]],
-  [23, ["ForInStatement", ["left", "right", "body", "await"]]],
-  [24, ["ForOfStatement", ["left", "right", "body", "await"]]],
-  [25, ["FunctionDeclaration", ["id", "params", "body", "generator", "async"]]],
-  [26, ["FunctionExpression", ["id", "params", "body", "generator", "async"]]],
-  [27, ["ArrowFunctionExpression", ["params", "body", "async", "expression"]]],
-  [28, ["VariableDeclaration", ["declarations", "kind"]]],
-  [29, ["VariableDeclarator", ["id", "init"]]],
-  [30, ["ThisExpression", []]],
-  [31, ["ArrayExpression", ["elements"]]],
-  [32, ["ObjectExpression", ["properties"]]],
-  [33, ["Property", ["key", "value", "kind", "method", "shorthand", "computed"]]],
-  [34, ["SequenceExpression", ["expressions"]]],
-  [35, ["UnaryExpression", ["operator", "prefix", "argument"]]],
-  [36, ["UpdateExpression", ["operator", "prefix", "argument"]]],
-  [37, ["BinaryExpression", ["operator", "left", "right"]]],
-  [38, ["LogicalExpression", ["operator", "left", "right"]]],
-  [39, ["AssignmentExpression", ["operator", "left", "right"]]],
-  [40, ["AssignmentPattern", ["left", "right"]]],
-  [41, ["ConditionalExpression", ["test", "consequent", "alternate"]]],
-  [42, ["NewExpression", ["callee", "arguments"]]],
-  [43, ["CallExpression", ["callee", "arguments", "optional"]]],
-  [44, ["MemberExpression", ["object", "property", "computed", "optional"]]],
-  [45, ["ChainExpression", ["expression"]]],
-  [46, ["YieldExpression", ["argument", "delegate"]]],
-  [47, ["AwaitExpression", ["argument"]]],
-  [48, ["TemplateLiteral", ["quasis", "expressions"]]],
-  [49, ["TemplateElement", ["raw", "tail"]]],
-  [50, ["TaggedTemplateExpression", ["tag", "quasi"]]],
-  [51, ["SpreadElement", ["argument"]]],
-  [52, ["RestElement", ["argument"]]],
-  [53, ["ArrayPattern", ["elements"]]],
-  [54, ["ObjectPattern", ["properties"]]],
-  [55, ["MetaProperty", ["meta", "property"]]],
-  [56, ["ImportExpression", ["source", "options"]]],
-  [57, ["ClassDeclaration", ["id", "superClass", "body"]]],
-  [58, ["ClassExpression", ["id", "superClass", "body"]]],
-  [59, ["ClassBody", ["body"]]],
-  [60, ["MethodDefinition", ["key", "value", "kind", "computed", "static"]]],
-  [61, ["PropertyDefinition", ["key", "value", "computed", "static", "typeAnnotation"]]],
-  [62, ["StaticBlock", ["block"]]],
-  [63, ["ImportDeclaration", ["specifiers", "source", "attributes", "importKind"]]],
-  [64, ["ImportSpecifier", ["imported", "local", "importKind"]]],
-  [65, ["ImportDefaultSpecifier", ["local"]]],
-  [66, ["ImportNamespaceSpecifier", ["local"]]],
-  [67, ["ExportNamedDeclaration", ["declaration", "specifiers", "source", "attributes", "exportKind"]]],
-  [68, ["ExportDefaultDeclaration", ["declaration"]]],
-  [69, ["ExportAllDeclaration", ["source", "exported", "attributes", "exportKind"]]],
-  [70, ["ExportSpecifier", ["local", "exported"]]],
-  [71, ["Super", []]],
-  [72, ["ParenthesizedExpression", ["expression"]]],
-  [256, ["JSXIdentifier", ["name"]]],
-  [259, ["JSXElement", ["openingElement", "closingElement", "children"]]],
-  [261, ["JSXOpeningElement", ["name", "attributes", "selfClosing"]]],
-  [262, ["JSXClosingElement", ["name"]]],
-  [265, ["JSXAttribute", ["name", "value"]]],
-  [266, ["JSXSpreadAttribute", ["argument"]]],
-  [267, ["JSXExpressionContainer", ["expression"]]],
-  [268, ["JSXEmptyExpression", []]],
-  [269, ["JSXText", ["raw"]]],
-  [512, ["TSTypeAnnotation", ["typeAnnotation"]]],
-  [513, ["TSTypeReference", ["typeName", "typeArguments"]]],
-  [514, ["TSQualifiedName", ["left", "right"]]],
-  [515, ["TSUnionType", ["types"]]],
-  [516, ["TSIntersectionType", ["types"]]],
-  [517, ["TSLiteralType", ["literal"]]],
-  [518, ["TSArrayType", ["elementType"]]],
-  [519, ["TSTupleType", ["elementTypes"]]],
-  [520, ["TSFunctionType", ["typeParameters", "params", "returnType"]]],
-  [521, ["TSConditionalType", ["checkType", "extendsType", "trueType", "falseType"]]],
-  [522, ["TSMappedType", ["key", "constraint", "nameType", "typeAnnotation", "readonly", "optional"]]],
-  [523, ["TSTypeLiteral", ["members"]]],
-  [524, ["TSInterfaceDeclaration", ["id", "typeParameters", "extends", "body"]]],
-  [525, ["TSTypeAliasDeclaration", ["id", "typeParameters", "typeAnnotation"]]],
-  [526, ["TSEnumDeclaration", ["id", "body", "const", "declare"]]],
-  [527, ["TSModuleDeclaration", ["id", "body", "declare", "kind"]]],
-  [528, ["TSAsExpression", ["expression", "typeAnnotation"]]],
-  [529, ["TSSatisfiesExpression", ["expression", "typeAnnotation"]]],
-  [530, ["TSNonNullExpression", ["expression"]]],
-  [531, ["TSParenthesizedType", ["typeAnnotation"]]],
-  [532, ["TSIndexedAccessType", ["objectType", "indexType"]]],
-  [533, ["TSTypeOperator", ["operator", "typeAnnotation"]]],
-  [534, ["TSTypeParameter", ["name", "const", "in", "out", "constraint", "default"]]],
-  [535, ["TSPropertySignature", ["key", "typeAnnotation", "computed", "optional", "readonly"]]],
-  [536, ["TSMethodSignature", ["key", "typeParameters", "params", "returnType", "computed", "optional"]]],
-  [537, ["TSEnumMember", ["id", "initializer"]]],
-  [538, ["TSNamedTupleMember", ["label", "elementType", "optional"]]],
-  [539, ["TSInterfaceBody", ["body"]]],
-  [540, ["TSModuleBlock", ["body"]]],
-  [541, ["TSTypeParameterDeclaration", ["params"]]],
-  [542, ["TSTypeParameterInstantiation", ["params"]]],
-  [543, ["TSAnyKeyword", []]],
-  [544, ["TSBigIntKeyword", []]],
-  [545, ["TSBooleanKeyword", []]],
-  [546, ["TSIntrinsicKeyword", []]],
-  [547, ["TSNeverKeyword", []]],
-  [548, ["TSNumberKeyword", []]],
-  [549, ["TSObjectKeyword", []]],
-  [550, ["TSStringKeyword", []]],
-  [551, ["TSSymbolKeyword", []]],
-  [552, ["TSThisType", []]],
-  [553, ["TSUndefinedKeyword", []]],
-  [554, ["TSUnknownKeyword", []]],
-  [555, ["TSVoidKeyword", []]],
-  [556, ["TSInferType", ["typeParameter"]]],
-  [557, ["TSEnumBody", ["members"]]],
-  [558, ["TSInterfaceHeritage", ["expression", "typeArguments"]]],
-  [559, ["TSNullKeyword", []]],
-  [560, ["TSTypeAssertion", ["typeAnnotation", "expression"]]],
-]);
+const NODE_SCHEMAS = [];
+for (
+  const [tag, schema] of [
+    [1, ["Program", ["body", "sourceType"]]],
+    [2, ["Identifier", ["name"]]],
+    [3, ["PrivateIdentifier", ["name"]]],
+    [4, ["Literal", ["raw", "kind"]]],
+    [5, ["ExpressionStatement", ["expression"]]],
+    [6, ["BlockStatement", ["body"]]],
+    [7, ["EmptyStatement", []]],
+    [8, ["DebuggerStatement", []]],
+    [9, ["WithStatement", ["object", "body"]]],
+    [10, ["ReturnStatement", ["argument"]]],
+    [11, ["LabeledStatement", ["label", "body"]]],
+    [12, ["BreakStatement", ["label"]]],
+    [13, ["ContinueStatement", ["label"]]],
+    [14, ["IfStatement", ["test", "consequent", "alternate"]]],
+    [15, ["SwitchStatement", ["discriminant", "cases"]]],
+    [16, ["SwitchCase", ["test", "consequent"]]],
+    [17, ["ThrowStatement", ["argument"]]],
+    [18, ["TryStatement", ["block", "handler", "finalizer"]]],
+    [19, ["CatchClause", ["param", "body"]]],
+    [20, ["WhileStatement", ["test", "body"]]],
+    [21, ["DoWhileStatement", ["body", "test"]]],
+    [22, ["ForStatement", ["init", "test", "update", "body"]]],
+    [23, ["ForInStatement", ["left", "right", "body", "await"]]],
+    [24, ["ForOfStatement", ["left", "right", "body", "await"]]],
+    [25, ["FunctionDeclaration", ["id", "params", "body", "generator", "async"]]],
+    [26, ["FunctionExpression", ["id", "params", "body", "generator", "async"]]],
+    [27, ["ArrowFunctionExpression", ["params", "body", "async", "expression"]]],
+    [28, ["VariableDeclaration", ["declarations", "kind"]]],
+    [29, ["VariableDeclarator", ["id", "init"]]],
+    [30, ["ThisExpression", []]],
+    [31, ["ArrayExpression", ["elements"]]],
+    [32, ["ObjectExpression", ["properties"]]],
+    [33, ["Property", ["key", "value", "kind", "method", "shorthand", "computed"]]],
+    [34, ["SequenceExpression", ["expressions"]]],
+    [35, ["UnaryExpression", ["operator", "prefix", "argument"]]],
+    [36, ["UpdateExpression", ["operator", "prefix", "argument"]]],
+    [37, ["BinaryExpression", ["operator", "left", "right"]]],
+    [38, ["LogicalExpression", ["operator", "left", "right"]]],
+    [39, ["AssignmentExpression", ["operator", "left", "right"]]],
+    [40, ["AssignmentPattern", ["left", "right"]]],
+    [41, ["ConditionalExpression", ["test", "consequent", "alternate"]]],
+    [42, ["NewExpression", ["callee", "arguments"]]],
+    [43, ["CallExpression", ["callee", "arguments", "optional"]]],
+    [44, ["MemberExpression", ["object", "property", "computed", "optional"]]],
+    [45, ["ChainExpression", ["expression"]]],
+    [46, ["YieldExpression", ["argument", "delegate"]]],
+    [47, ["AwaitExpression", ["argument"]]],
+    [48, ["TemplateLiteral", ["quasis", "expressions"]]],
+    [49, ["TemplateElement", ["raw", "tail"]]],
+    [50, ["TaggedTemplateExpression", ["tag", "quasi"]]],
+    [51, ["SpreadElement", ["argument"]]],
+    [52, ["RestElement", ["argument"]]],
+    [53, ["ArrayPattern", ["elements"]]],
+    [54, ["ObjectPattern", ["properties"]]],
+    [55, ["MetaProperty", ["meta", "property"]]],
+    [56, ["ImportExpression", ["source", "options"]]],
+    [57, ["ClassDeclaration", ["id", "superClass", "body"]]],
+    [58, ["ClassExpression", ["id", "superClass", "body"]]],
+    [59, ["ClassBody", ["body"]]],
+    [60, ["MethodDefinition", ["key", "value", "kind", "computed", "static"]]],
+    [61, ["PropertyDefinition", ["key", "value", "computed", "static", "typeAnnotation"]]],
+    [62, ["StaticBlock", ["block"]]],
+    [63, ["ImportDeclaration", ["specifiers", "source", "attributes", "importKind"]]],
+    [64, ["ImportSpecifier", ["imported", "local", "importKind"]]],
+    [65, ["ImportDefaultSpecifier", ["local"]]],
+    [66, ["ImportNamespaceSpecifier", ["local"]]],
+    [67, ["ExportNamedDeclaration", ["declaration", "specifiers", "source", "attributes", "exportKind"]]],
+    [68, ["ExportDefaultDeclaration", ["declaration"]]],
+    [69, ["ExportAllDeclaration", ["source", "exported", "attributes", "exportKind"]]],
+    [70, ["ExportSpecifier", ["local", "exported"]]],
+    [71, ["Super", []]],
+    [72, ["ParenthesizedExpression", ["expression"]]],
+    [256, ["JSXIdentifier", ["name"]]],
+    [259, ["JSXElement", ["openingElement", "closingElement", "children"]]],
+    [261, ["JSXOpeningElement", ["name", "attributes", "selfClosing"]]],
+    [262, ["JSXClosingElement", ["name"]]],
+    [265, ["JSXAttribute", ["name", "value"]]],
+    [266, ["JSXSpreadAttribute", ["argument"]]],
+    [267, ["JSXExpressionContainer", ["expression"]]],
+    [268, ["JSXEmptyExpression", []]],
+    [269, ["JSXText", ["raw"]]],
+    [512, ["TSTypeAnnotation", ["typeAnnotation"]]],
+    [513, ["TSTypeReference", ["typeName", "typeArguments"]]],
+    [514, ["TSQualifiedName", ["left", "right"]]],
+    [515, ["TSUnionType", ["types"]]],
+    [516, ["TSIntersectionType", ["types"]]],
+    [517, ["TSLiteralType", ["literal"]]],
+    [518, ["TSArrayType", ["elementType"]]],
+    [519, ["TSTupleType", ["elementTypes"]]],
+    [520, ["TSFunctionType", ["typeParameters", "params", "returnType"]]],
+    [521, ["TSConditionalType", ["checkType", "extendsType", "trueType", "falseType"]]],
+    [522, ["TSMappedType", ["key", "constraint", "nameType", "typeAnnotation", "readonly", "optional"]]],
+    [523, ["TSTypeLiteral", ["members"]]],
+    [524, ["TSInterfaceDeclaration", ["id", "typeParameters", "extends", "body"]]],
+    [525, ["TSTypeAliasDeclaration", ["id", "typeParameters", "typeAnnotation"]]],
+    [526, ["TSEnumDeclaration", ["id", "body", "const", "declare"]]],
+    [527, ["TSModuleDeclaration", ["id", "body", "declare", "kind"]]],
+    [528, ["TSAsExpression", ["expression", "typeAnnotation"]]],
+    [529, ["TSSatisfiesExpression", ["expression", "typeAnnotation"]]],
+    [530, ["TSNonNullExpression", ["expression"]]],
+    [531, ["TSParenthesizedType", ["typeAnnotation"]]],
+    [532, ["TSIndexedAccessType", ["objectType", "indexType"]]],
+    [533, ["TSTypeOperator", ["operator", "typeAnnotation"]]],
+    [534, ["TSTypeParameter", ["name", "const", "in", "out", "constraint", "default"]]],
+    [535, ["TSPropertySignature", ["key", "typeAnnotation", "computed", "optional", "readonly"]]],
+    [536, ["TSMethodSignature", ["key", "typeParameters", "params", "returnType", "computed", "optional"]]],
+    [537, ["TSEnumMember", ["id", "initializer"]]],
+    [538, ["TSNamedTupleMember", ["label", "elementType", "optional"]]],
+    [539, ["TSInterfaceBody", ["body"]]],
+    [540, ["TSModuleBlock", ["body"]]],
+    [541, ["TSTypeParameterDeclaration", ["params"]]],
+    [542, ["TSTypeParameterInstantiation", ["params"]]],
+    [543, ["TSAnyKeyword", []]],
+    [544, ["TSBigIntKeyword", []]],
+    [545, ["TSBooleanKeyword", []]],
+    [546, ["TSIntrinsicKeyword", []]],
+    [547, ["TSNeverKeyword", []]],
+    [548, ["TSNumberKeyword", []]],
+    [549, ["TSObjectKeyword", []]],
+    [550, ["TSStringKeyword", []]],
+    [551, ["TSSymbolKeyword", []]],
+    [552, ["TSThisType", []]],
+    [553, ["TSUndefinedKeyword", []]],
+    [554, ["TSUnknownKeyword", []]],
+    [555, ["TSVoidKeyword", []]],
+    [556, ["TSInferType", ["typeParameter"]]],
+    [557, ["TSEnumBody", ["members"]]],
+    [558, ["TSInterfaceHeritage", ["expression", "typeArguments"]]],
+    [559, ["TSNullKeyword", []]],
+    [560, ["TSTypeAssertion", ["typeAnnotation", "expression"]]],
+  ]
+) NODE_SCHEMAS[tag] = schema;
 
-const UNSUPPORTED_NODE_TAGS = new Map([
-  [73, "ImportAttribute"],
-  [257, "JSXMemberExpression"],
-  [258, "JSXNamespacedName"],
-  [260, "JSXFragment"],
-  [263, "JSXOpeningFragment"],
-  [264, "JSXClosingFragment"],
-  [270, "JSXSpreadChild"],
-]);
+const UNSUPPORTED_NODE_TAGS = [];
+for (
+  const [tag, name] of [
+    [73, "ImportAttribute"],
+    [257, "JSXMemberExpression"],
+    [258, "JSXNamespacedName"],
+    [260, "JSXFragment"],
+    [263, "JSXOpeningFragment"],
+    [264, "JSXClosingFragment"],
+    [270, "JSXSpreadChild"],
+  ]
+) UNSUPPORTED_NODE_TAGS[tag] = name;
 
 const ASSIGNMENT_OPERATORS = [
   "=",
@@ -390,9 +396,9 @@ export function decodeTape(source, tape, options = {}) {
 
   function decodeNode(offset, record) {
     const tag = record & NODE_TAG_MASK;
-    const schema = NODE_SCHEMAS.get(tag);
+    const schema = NODE_SCHEMAS[tag];
     if (!schema) {
-      const unsupported = UNSUPPORTED_NODE_TAGS.get(tag);
+      const unsupported = UNSUPPORTED_NODE_TAGS[tag];
       if (unsupported) {
         throw new Error(`unsupported JetSyntax node tag ${tag} (${unsupported})`);
       }
@@ -417,433 +423,474 @@ export function decodeTape(source, tape, options = {}) {
     for (let index = 0; index < fieldCount; index++) {
       fields[index] = readReference(tape[offset + 5 + index], offset);
     }
-    const base = { type: schema[0], start, end };
-    if (options.range) base.range = [start, end];
+    const node = { type: schema[0], start, end };
+    if (options.range) node.range = [start, end];
 
     switch (tag) {
       case 1:
-        return { ...base, body: array(fields[0], tag), sourceType: enumValue(SOURCE_TYPES, fields[1], tag) };
+        node.body = array(fields[0], tag);
+        node.sourceType = enumValue(SOURCE_TYPES, fields[1], tag);
+        return node;
       case 2:
-        return fieldCount === 1
-          ? { ...base, name: string(fields[0], tag) }
-          : {
-            ...base,
-            name: string(fields[0], tag),
-            typeAnnotation: fields[1],
-            optional: boolean(fields[2], tag),
-          };
+        node.name = string(fields[0], tag);
+        if (fieldCount === 3) {
+          node.typeAnnotation = fields[1];
+          node.optional = boolean(fields[2], tag);
+        }
+        return node;
       case 3:
-        return { ...base, name: string(fields[0], tag) };
+        node.name = string(fields[0], tag);
+        return node;
       case 4:
-        return decodeLiteral(base, string(fields[0], tag), integer(fields[1], tag));
+        decodeLiteral(node, string(fields[0], tag), integer(fields[1], tag));
+        return node;
       case 5:
-        return { ...base, expression: fields[0] };
+        node.expression = fields[0];
+        return node;
       case 6:
-        return { ...base, body: array(fields[0], tag) };
+        node.body = array(fields[0], tag);
+        return node;
       case 7:
       case 8:
       case 30:
       case 71:
-        return base;
+        return node;
       case 9:
-        return { ...base, object: fields[0], body: fields[1] };
+        node.object = fields[0];
+        node.body = fields[1];
+        return node;
       case 10:
-        return { ...base, argument: fields[0] };
+        node.argument = fields[0];
+        return node;
       case 11:
-        return { ...base, label: fields[0], body: fields[1] };
+        node.label = fields[0];
+        node.body = fields[1];
+        return node;
       case 12:
       case 13:
-        return { ...base, label: fields[0] };
+        node.label = fields[0];
+        return node;
       case 14:
-        return { ...base, test: fields[0], consequent: fields[1], alternate: fields[2] };
+        node.test = fields[0];
+        node.consequent = fields[1];
+        node.alternate = fields[2];
+        return node;
       case 15:
-        return { ...base, discriminant: fields[0], cases: array(fields[1], tag) };
+        node.discriminant = fields[0];
+        node.cases = array(fields[1], tag);
+        return node;
       case 16:
-        return { ...base, test: fields[0], consequent: array(fields[1], tag) };
+        node.test = fields[0];
+        node.consequent = array(fields[1], tag);
+        return node;
       case 17:
-        return { ...base, argument: fields[0] };
+        node.argument = fields[0];
+        return node;
       case 18:
-        return { ...base, block: fields[0], handler: fields[1], finalizer: fields[2] };
+        node.block = fields[0];
+        node.handler = fields[1];
+        node.finalizer = fields[2];
+        return node;
       case 19:
-        return { ...base, param: fields[0], body: fields[1] };
+        node.param = fields[0];
+        node.body = fields[1];
+        return node;
       case 20:
-        return { ...base, test: fields[0], body: fields[1] };
+        node.test = fields[0];
+        node.body = fields[1];
+        return node;
       case 21:
-        return { ...base, body: fields[0], test: fields[1] };
+        node.body = fields[0];
+        node.test = fields[1];
+        return node;
       case 22:
-        return { ...base, init: fields[0], test: fields[1], update: fields[2], body: fields[3] };
+        node.init = fields[0];
+        node.test = fields[1];
+        node.update = fields[2];
+        node.body = fields[3];
+        return node;
       case 23:
-        return { ...base, left: fields[0], right: fields[1], body: fields[2] };
+        node.left = fields[0];
+        node.right = fields[1];
+        node.body = fields[2];
+        return node;
       case 24:
-        return {
-          ...base,
-          left: fields[0],
-          right: fields[1],
-          body: fields[2],
-          await: boolean(fields[3], tag),
-        };
+        node.left = fields[0];
+        node.right = fields[1];
+        node.body = fields[2];
+        node.await = boolean(fields[3], tag);
+        return node;
       case 25:
       case 26:
-        return {
-          ...base,
-          id: fields[0],
-          params: array(fields[1], tag),
-          body: fields[2],
-          generator: boolean(fields[3], tag),
-          async: boolean(fields[4], tag),
-        };
+        node.id = fields[0];
+        node.params = array(fields[1], tag);
+        node.body = fields[2];
+        node.generator = boolean(fields[3], tag);
+        node.async = boolean(fields[4], tag);
+        return node;
       case 27:
-        return {
-          ...base,
-          id: null,
-          params: array(fields[0], tag),
-          body: fields[1],
-          generator: false,
-          async: boolean(fields[2], tag),
-          expression: boolean(fields[3], tag),
-        };
+        node.id = null;
+        node.params = array(fields[0], tag);
+        node.body = fields[1];
+        node.generator = false;
+        node.async = boolean(fields[2], tag);
+        node.expression = boolean(fields[3], tag);
+        return node;
       case 28:
-        return {
-          ...base,
-          declarations: array(fields[0], tag),
-          kind: enumValue(VARIABLE_KINDS, fields[1], tag),
-        };
+        node.declarations = array(fields[0], tag);
+        node.kind = enumValue(VARIABLE_KINDS, fields[1], tag);
+        return node;
       case 29:
-        return { ...base, id: fields[0], init: fields[1] };
+        node.id = fields[0];
+        node.init = fields[1];
+        return node;
       case 31:
-        return { ...base, elements: array(fields[0], tag) };
+        node.elements = array(fields[0], tag);
+        return node;
       case 32:
-        return { ...base, properties: array(fields[0], tag) };
+        node.properties = array(fields[0], tag);
+        return node;
       case 33:
-        return {
-          ...base,
-          key: fields[0],
-          value: fields[1],
-          kind: enumValue(PROPERTY_KINDS, fields[2], tag),
-          method: boolean(fields[3], tag),
-          shorthand: boolean(fields[4], tag),
-          computed: boolean(fields[5], tag),
-        };
+        node.key = fields[0];
+        node.value = fields[1];
+        node.kind = enumValue(PROPERTY_KINDS, fields[2], tag);
+        node.method = boolean(fields[3], tag);
+        node.shorthand = boolean(fields[4], tag);
+        node.computed = boolean(fields[5], tag);
+        return node;
       case 34:
-        return { ...base, expressions: array(fields[0], tag) };
+        node.expressions = array(fields[0], tag);
+        return node;
       case 35:
-        return {
-          ...base,
-          operator: enumValue(UNARY_OPERATORS, fields[0], tag),
-          prefix: boolean(fields[1], tag),
-          argument: fields[2],
-        };
+        node.operator = enumValue(UNARY_OPERATORS, fields[0], tag);
+        node.prefix = boolean(fields[1], tag);
+        node.argument = fields[2];
+        return node;
       case 36:
-        return {
-          ...base,
-          operator: enumValue(UPDATE_OPERATORS, fields[0], tag),
-          prefix: boolean(fields[1], tag),
-          argument: fields[2],
-        };
+        node.operator = enumValue(UPDATE_OPERATORS, fields[0], tag);
+        node.prefix = boolean(fields[1], tag);
+        node.argument = fields[2];
+        return node;
       case 37:
       case 38:
-        return {
-          ...base,
-          operator: enumValue(BINARY_OPERATORS, fields[0], tag),
-          left: fields[1],
-          right: fields[2],
-        };
+        node.operator = enumValue(BINARY_OPERATORS, fields[0], tag);
+        node.left = fields[1];
+        node.right = fields[2];
+        return node;
       case 39:
-        return {
-          ...base,
-          operator: enumValue(ASSIGNMENT_OPERATORS, fields[0], tag),
-          left: fields[1],
-          right: fields[2],
-        };
+        node.operator = enumValue(ASSIGNMENT_OPERATORS, fields[0], tag);
+        node.left = fields[1];
+        node.right = fields[2];
+        return node;
       case 40:
-        return { ...base, left: fields[0], right: fields[1] };
+        node.left = fields[0];
+        node.right = fields[1];
+        return node;
       case 41:
-        return { ...base, test: fields[0], consequent: fields[1], alternate: fields[2] };
+        node.test = fields[0];
+        node.consequent = fields[1];
+        node.alternate = fields[2];
+        return node;
       case 42:
-        return { ...base, callee: fields[0], arguments: array(fields[1], tag) };
+        node.callee = fields[0];
+        node.arguments = array(fields[1], tag);
+        return node;
       case 43:
-        return {
-          ...base,
-          callee: fields[0],
-          arguments: array(fields[1], tag),
-          optional: boolean(fields[2], tag),
-        };
+        node.callee = fields[0];
+        node.arguments = array(fields[1], tag);
+        node.optional = boolean(fields[2], tag);
+        return node;
       case 44:
-        return {
-          ...base,
-          object: fields[0],
-          property: fields[1],
-          computed: boolean(fields[2], tag),
-          optional: boolean(fields[3], tag),
-        };
+        node.object = fields[0];
+        node.property = fields[1];
+        node.computed = boolean(fields[2], tag);
+        node.optional = boolean(fields[3], tag);
+        return node;
       case 45:
-        return { ...base, expression: fields[0] };
+        node.expression = fields[0];
+        return node;
       case 46:
-        return { ...base, argument: fields[0], delegate: boolean(fields[1], tag) };
+        node.argument = fields[0];
+        node.delegate = boolean(fields[1], tag);
+        return node;
       case 47:
-        return { ...base, argument: fields[0] };
+        node.argument = fields[0];
+        return node;
       case 48:
-        return { ...base, quasis: array(fields[0], tag), expressions: array(fields[1], tag) };
+        node.quasis = array(fields[0], tag);
+        node.expressions = array(fields[1], tag);
+        return node;
       case 49: {
         const raw = templateElementRaw(string(fields[0], tag));
-        return {
-          ...base,
-          value: { raw, cooked: decodeQuotedString(`\"${raw}\"`) },
-          tail: boolean(fields[1], tag),
-        };
+        node.value = { raw, cooked: decodeQuotedString(`\"${raw}\"`) };
+        node.tail = boolean(fields[1], tag);
+        return node;
       }
       case 50:
-        return { ...base, tag: fields[0], quasi: fields[1] };
+        node.tag = fields[0];
+        node.quasi = fields[1];
+        return node;
       case 51:
       case 52:
-        return { ...base, argument: fields[0] };
+        node.argument = fields[0];
+        return node;
       case 53:
-        return { ...base, elements: patternItems(fields[0], "elements", tag) };
+        node.elements = patternItems(fields[0], "elements", tag);
+        return node;
       case 54:
-        return { ...base, properties: patternItems(fields[0], "properties", tag) };
+        node.properties = patternItems(fields[0], "properties", tag);
+        return node;
       case 55:
-        return { ...base, meta: fields[0], property: fields[1] };
+        node.meta = fields[0];
+        node.property = fields[1];
+        return node;
       case 56:
-        return { ...base, source: fields[0], options: fields[1] };
+        node.source = fields[0];
+        node.options = fields[1];
+        return node;
       case 57:
       case 58:
-        return { ...base, id: fields[0], superClass: fields[1], body: fields[2] };
+        node.id = fields[0];
+        node.superClass = fields[1];
+        node.body = fields[2];
+        return node;
       case 59:
-        return { ...base, body: array(fields[0], tag) };
+        node.body = array(fields[0], tag);
+        return node;
       case 60:
-        return {
-          ...base,
-          key: fields[0],
-          value: fields[1],
-          kind: enumValue(METHOD_KINDS, fields[2], tag),
-          computed: boolean(fields[3], tag),
-          static: boolean(fields[4], tag),
-        };
+        node.key = fields[0];
+        node.value = fields[1];
+        node.kind = enumValue(METHOD_KINDS, fields[2], tag);
+        node.computed = boolean(fields[3], tag);
+        node.static = boolean(fields[4], tag);
+        return node;
       case 61:
-        return {
-          ...base,
-          key: fields[0],
-          value: fields[1],
-          computed: boolean(fields[2], tag),
-          static: boolean(fields[3], tag),
-          typeAnnotation: fields[4],
-        };
+        node.key = fields[0];
+        node.value = fields[1];
+        node.computed = boolean(fields[2], tag);
+        node.static = boolean(fields[3], tag);
+        node.typeAnnotation = fields[4];
+        return node;
       case 62: {
         const block = fields[0];
         if (block?.type !== "BlockStatement") {
           throw new Error("JetSyntax StaticBlock expected a BlockStatement field");
         }
-        return { ...base, body: block.body };
+        node.body = block.body;
+        return node;
       }
       case 63:
-        return {
-          ...base,
-          specifiers: array(fields[0], tag),
-          source: fields[1],
-          attributes: array(fields[2], tag),
-          importKind: enumValue(IMPORT_EXPORT_KINDS, fields[3], tag),
-        };
+        node.specifiers = array(fields[0], tag);
+        node.source = fields[1];
+        node.attributes = array(fields[2], tag);
+        node.importKind = enumValue(IMPORT_EXPORT_KINDS, fields[3], tag);
+        return node;
       case 64:
-        return {
-          ...base,
-          imported: fields[0],
-          local: fields[1],
-          importKind: enumValue(IMPORT_EXPORT_KINDS, fields[2], tag),
-        };
+        node.imported = fields[0];
+        node.local = fields[1];
+        node.importKind = enumValue(IMPORT_EXPORT_KINDS, fields[2], tag);
+        return node;
       case 65:
       case 66:
-        return { ...base, local: fields[0] };
+        node.local = fields[0];
+        return node;
       case 67:
-        return {
-          ...base,
-          declaration: fields[0],
-          specifiers: array(fields[1], tag),
-          source: fields[2],
-          attributes: array(fields[3], tag),
-          exportKind: enumValue(IMPORT_EXPORT_KINDS, fields[4], tag),
-        };
+        node.declaration = fields[0];
+        node.specifiers = array(fields[1], tag);
+        node.source = fields[2];
+        node.attributes = array(fields[3], tag);
+        node.exportKind = enumValue(IMPORT_EXPORT_KINDS, fields[4], tag);
+        return node;
       case 68:
-        return { ...base, declaration: fields[0] };
+        node.declaration = fields[0];
+        return node;
       case 69:
-        return {
-          ...base,
-          source: fields[0],
-          exported: fields[1],
-          attributes: array(fields[2], tag),
-          exportKind: enumValue(IMPORT_EXPORT_KINDS, fields[3], tag),
-        };
+        node.source = fields[0];
+        node.exported = fields[1];
+        node.attributes = array(fields[2], tag);
+        node.exportKind = enumValue(IMPORT_EXPORT_KINDS, fields[3], tag);
+        return node;
       case 70:
-        return { ...base, local: fields[0], exported: fields[1] };
+        node.local = fields[0];
+        node.exported = fields[1];
+        return node;
       case 72:
-        return { ...base, expression: fields[0] };
+        node.expression = fields[0];
+        return node;
       case 256:
-        return { ...base, name: string(fields[0], tag) };
+        node.name = string(fields[0], tag);
+        return node;
       case 259:
-        return {
-          ...base,
-          openingElement: fields[0],
-          closingElement: fields[1],
-          children: array(fields[2], tag),
-        };
+        node.openingElement = fields[0];
+        node.closingElement = fields[1];
+        node.children = array(fields[2], tag);
+        return node;
       case 261:
-        return {
-          ...base,
-          name: fields[0],
-          attributes: array(fields[1], tag),
-          selfClosing: boolean(fields[2], tag),
-        };
+        node.name = fields[0];
+        node.attributes = array(fields[1], tag);
+        node.selfClosing = boolean(fields[2], tag);
+        return node;
       case 262:
-        return { ...base, name: fields[0] };
+        node.name = fields[0];
+        return node;
       case 265:
-        return { ...base, name: fields[0], value: fields[1] };
+        node.name = fields[0];
+        node.value = fields[1];
+        return node;
       case 266:
-        return { ...base, argument: fields[0] };
+        node.argument = fields[0];
+        return node;
       case 267:
-        return { ...base, expression: fields[0] };
+        node.expression = fields[0];
+        return node;
       case 268:
-        return base;
+        return node;
       case 269: {
         const raw = string(fields[0], tag);
-        return { ...base, value: raw, raw };
+        node.value = raw;
+        node.raw = raw;
+        return node;
       }
       case 512:
-        return { ...base, typeAnnotation: fields[0] };
+        node.typeAnnotation = fields[0];
+        return node;
       case 513:
-        return { ...base, typeName: fields[0], typeArguments: fields[1] };
+        node.typeName = fields[0];
+        node.typeArguments = fields[1];
+        return node;
       case 514:
-        return { ...base, left: fields[0], right: fields[1] };
+        node.left = fields[0];
+        node.right = fields[1];
+        return node;
       case 515:
       case 516:
-        return { ...base, types: array(fields[0], tag) };
+        node.types = array(fields[0], tag);
+        return node;
       case 517:
-        return { ...base, literal: fields[0] };
+        node.literal = fields[0];
+        return node;
       case 518:
-        return { ...base, elementType: fields[0] };
+        node.elementType = fields[0];
+        return node;
       case 519:
-        return { ...base, elementTypes: array(fields[0], tag) };
+        node.elementTypes = array(fields[0], tag);
+        return node;
       case 520:
-        return {
-          ...base,
-          typeParameters: fields[0],
-          params: array(fields[1], tag),
-          returnType: fields[2],
-        };
+        node.typeParameters = fields[0];
+        node.params = array(fields[1], tag);
+        node.returnType = fields[2];
+        return node;
       case 521:
-        return {
-          ...base,
-          checkType: fields[0],
-          extendsType: fields[1],
-          trueType: fields[2],
-          falseType: fields[3],
-        };
+        node.checkType = fields[0];
+        node.extendsType = fields[1];
+        node.trueType = fields[2];
+        node.falseType = fields[3];
+        return node;
       case 522:
-        return {
-          ...base,
-          key: fields[0],
-          constraint: fields[1],
-          nameType: fields[2],
-          typeAnnotation: fields[3],
-          ...(fields[4] === null ? {} : { readonly: boolean(fields[4], tag) }),
-          optional: boolean(fields[5], tag),
-        };
+        node.key = fields[0];
+        node.constraint = fields[1];
+        node.nameType = fields[2];
+        node.typeAnnotation = fields[3];
+        if (fields[4] !== null) node.readonly = boolean(fields[4], tag);
+        node.optional = boolean(fields[5], tag);
+        return node;
       case 523:
-        return { ...base, members: array(fields[0], tag) };
+        node.members = array(fields[0], tag);
+        return node;
       case 524:
-        return {
-          ...base,
-          id: fields[0],
-          typeParameters: fields[1],
-          extends: array(fields[2], tag),
-          body: fields[3],
-          declare: false,
-        };
+        node.id = fields[0];
+        node.typeParameters = fields[1];
+        node.extends = array(fields[2], tag);
+        node.body = fields[3];
+        node.declare = false;
+        return node;
       case 525:
-        return {
-          ...base,
-          id: fields[0],
-          typeParameters: fields[1],
-          typeAnnotation: fields[2],
-          declare: false,
-        };
+        node.id = fields[0];
+        node.typeParameters = fields[1];
+        node.typeAnnotation = fields[2];
+        node.declare = false;
+        return node;
       case 526:
-        return {
-          ...base,
-          id: fields[0],
-          body: fields[1],
-          const: boolean(fields[2], tag),
-          declare: boolean(fields[3], tag),
-        };
+        node.id = fields[0];
+        node.body = fields[1];
+        node.const = boolean(fields[2], tag);
+        node.declare = boolean(fields[3], tag);
+        return node;
       case 527:
-        return {
-          ...base,
-          id: fields[0],
-          body: fields[1],
-          declare: boolean(fields[2], tag),
-          kind: enumValue(TS_MODULE_KINDS, fields[3], tag),
-        };
+        node.id = fields[0];
+        node.body = fields[1];
+        node.declare = boolean(fields[2], tag);
+        node.kind = enumValue(TS_MODULE_KINDS, fields[3], tag);
+        return node;
       case 528:
       case 529:
-        return { ...base, expression: fields[0], typeAnnotation: fields[1] };
+        node.expression = fields[0];
+        node.typeAnnotation = fields[1];
+        return node;
       case 530:
-        return { ...base, expression: fields[0] };
+        node.expression = fields[0];
+        return node;
       case 560:
-        return { ...base, typeAnnotation: fields[0], expression: fields[1] };
+        node.typeAnnotation = fields[0];
+        node.expression = fields[1];
+        return node;
       case 531:
-        return { ...base, typeAnnotation: fields[0] };
+        node.typeAnnotation = fields[0];
+        return node;
       case 532:
-        return { ...base, objectType: fields[0], indexType: fields[1] };
+        node.objectType = fields[0];
+        node.indexType = fields[1];
+        return node;
       case 533:
-        return { ...base, operator: string(fields[0], tag), typeAnnotation: fields[1] };
+        node.operator = string(fields[0], tag);
+        node.typeAnnotation = fields[1];
+        return node;
       case 534:
-        return {
-          ...base,
-          name: fields[0],
-          const: boolean(fields[1], tag),
-          in: boolean(fields[2], tag),
-          out: boolean(fields[3], tag),
-          constraint: fields[4],
-          default: fields[5],
-        };
+        node.name = fields[0];
+        node.const = boolean(fields[1], tag);
+        node.in = boolean(fields[2], tag);
+        node.out = boolean(fields[3], tag);
+        node.constraint = fields[4];
+        node.default = fields[5];
+        return node;
       case 535:
-        return {
-          ...base,
-          key: fields[0],
-          typeAnnotation: fields[1],
-          computed: boolean(fields[2], tag),
-          optional: boolean(fields[3], tag),
-          readonly: boolean(fields[4], tag),
-          accessibility: null,
-          static: false,
-        };
+        node.key = fields[0];
+        node.typeAnnotation = fields[1];
+        node.computed = boolean(fields[2], tag);
+        node.optional = boolean(fields[3], tag);
+        node.readonly = boolean(fields[4], tag);
+        node.accessibility = null;
+        node.static = false;
+        return node;
       case 536:
-        return {
-          ...base,
-          key: fields[0],
-          typeParameters: fields[1],
-          params: array(fields[2], tag),
-          returnType: fields[3],
-          computed: boolean(fields[4], tag),
-          optional: boolean(fields[5], tag),
-          kind: "method",
-          accessibility: null,
-          readonly: false,
-          static: false,
-        };
+        node.key = fields[0];
+        node.typeParameters = fields[1];
+        node.params = array(fields[2], tag);
+        node.returnType = fields[3];
+        node.computed = boolean(fields[4], tag);
+        node.optional = boolean(fields[5], tag);
+        node.kind = "method";
+        node.accessibility = null;
+        node.readonly = false;
+        node.static = false;
+        return node;
       case 537:
-        return { ...base, id: fields[0], initializer: fields[1] };
+        node.id = fields[0];
+        node.initializer = fields[1];
+        return node;
       case 538:
-        return {
-          ...base,
-          label: fields[0],
-          elementType: fields[1],
-          optional: boolean(fields[2], tag),
-        };
+        node.label = fields[0];
+        node.elementType = fields[1];
+        node.optional = boolean(fields[2], tag);
+        return node;
       case 539:
       case 540:
-        return { ...base, body: array(fields[0], tag) };
+        node.body = array(fields[0], tag);
+        return node;
       case 541:
       case 542:
-        return { ...base, params: array(fields[0], tag) };
+        node.params = array(fields[0], tag);
+        return node;
       case 543:
       case 544:
       case 545:
@@ -858,13 +905,17 @@ export function decodeTape(source, tape, options = {}) {
       case 554:
       case 555:
       case 559:
-        return base;
+        return node;
       case 556:
-        return { ...base, typeParameter: fields[0] };
+        node.typeParameter = fields[0];
+        return node;
       case 557:
-        return { ...base, members: array(fields[0], tag) };
+        node.members = array(fields[0], tag);
+        return node;
       case 558:
-        return { ...base, expression: fields[0], typeArguments: fields[1] };
+        node.expression = fields[0];
+        node.typeArguments = fields[1];
+        return node;
       default:
         throw new Error(`missing ESTree decoder for JetSyntax node tag ${tag}`);
     }
@@ -930,22 +981,29 @@ function makeSourceOffsets(source, byteLength) {
   return { utf16, boundaries };
 }
 
-function decodeLiteral(base, raw, kind) {
+function decodeLiteral(node, raw, kind) {
   switch (kind) {
     case 0:
-      return { ...base, value: Number(raw.replaceAll("_", "")), raw };
+      node.value = Number(raw.replaceAll("_", ""));
+      break;
     case 1:
-      return { ...base, value: decodeQuotedString(raw), raw };
+      node.value = decodeQuotedString(raw);
+      break;
     case 2:
-      return { ...base, value: raw === "true", raw };
+      node.value = raw === "true";
+      break;
     case 3:
-      return { ...base, value: null, raw };
+      node.value = null;
+      break;
     case 4: {
       const bigint = raw.replaceAll("_", "").replace(/n$/u, "");
-      return { ...base, value: BigInt(bigint), bigint, raw };
+      node.value = BigInt(bigint);
+      node.bigint = bigint;
+      break;
     }
     case 5:
-      return { ...base, value: decodeQuotedString(`\"${raw.slice(1, -1)}\"`), raw };
+      node.value = decodeQuotedString(`\"${raw.slice(1, -1)}\"`);
+      break;
     case 6: {
       const slash = lastRegexpSlash(raw);
       const pattern = slash === -1 ? raw.slice(1) : raw.slice(1, slash);
@@ -956,11 +1014,14 @@ function decodeLiteral(base, raw, kind) {
       } catch {
         // Future regular-expression syntax may be valid to JetSyntax but unsupported by this host.
       }
-      return { ...base, value, regex: { pattern, flags }, raw };
+      node.value = value;
+      node.regex = { pattern, flags };
+      break;
     }
     default:
       throw new Error(`unsupported JetSyntax literal kind ${kind}`);
   }
+  node.raw = raw;
 }
 
 function decodeQuotedString(raw) {
