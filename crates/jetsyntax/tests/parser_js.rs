@@ -1332,6 +1332,43 @@ fn parser_should_diagnose_object_accessor_context_errors() {
     assert_diagnostic_cases(&cases, true);
 }
 
+/// Strict reserved identifiers use one decoded spelling check without rejecting `IdentifierName`.
+#[test]
+fn parser_should_diagnose_strict_reserved_identifier_references() {
+    let options = ParseOptions {
+        language: Language::JavaScript,
+        source_kind: SourceKind::Module,
+        semantic_errors: true,
+        ..ParseOptions::default()
+    };
+    for source in [
+        "[implements];",
+        "[interface];",
+        "[let];",
+        "[package];",
+        "[private];",
+        "[protected];",
+        "[public];",
+        "[static];",
+        "[yield];",
+        "[impl\\u0065ments];",
+        "[st\\u0061tic];",
+        "[yi\\u0065ld];",
+    ] {
+        let parsed = parse(source, options).expect(source);
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect(source);
+    }
+
+    let allowed = parse(
+        "[fo\\u006f]; const names = { static: 1, interface: 2 }; names.static;",
+        options,
+    )
+    .expect("allowed strict IdentifierName spellings");
+    assert!(allowed.diagnostics.is_empty(), "{:#?}", allowed.diagnostics);
+    allowed.tape.validate().expect("valid allowed tape");
+}
+
 /// Generator methods retain binding and constructor early errors.
 #[test]
 fn parser_should_diagnose_generator_method_early_errors() {

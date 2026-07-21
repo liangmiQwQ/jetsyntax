@@ -3665,19 +3665,35 @@ impl<'s> Parser<'s> {
     }
 
     fn is_strict_reserved_identifier(&self, span: Span) -> bool {
-        [
-            "implements",
-            "interface",
-            "let",
-            "package",
-            "private",
-            "protected",
-            "public",
-            "static",
-            "yield",
-        ]
-        .into_iter()
-        .any(|name| self.static_property_name_matches(span, name))
+        let raw = self.source_text(span);
+        if !raw.contains('\\') {
+            return matches!(
+                raw,
+                "implements"
+                    | "interface"
+                    | "let"
+                    | "package"
+                    | "private"
+                    | "protected"
+                    | "public"
+                    | "static"
+                    | "yield"
+            );
+        }
+        decode_static_property_name(raw).is_some_and(|name| {
+            matches!(
+                name.as_str(),
+                "implements"
+                    | "interface"
+                    | "let"
+                    | "package"
+                    | "private"
+                    | "protected"
+                    | "public"
+                    | "static"
+                    | "yield"
+            )
+        })
     }
 
     fn is_private_member_target(&self, expression: ParsedNode) -> bool {
