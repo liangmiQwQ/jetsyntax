@@ -15,19 +15,25 @@ const ALLOW_AWAIT: u16 = 1 << 7;
 const ALLOW_YIELD: u16 = 1 << 8;
 const AMBIENT: u16 = 1 << 9;
 const ACCESSOR: u16 = 1 << 10;
+const PARAMETERS: u16 = 1 << 11;
+const ALLOW_SUPER: u16 = 1 << 12;
+const EARLY_ERRORS: u16 = 1 << 13;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GrammarContext(u16);
 
 impl GrammarContext {
     #[must_use]
-    pub(crate) const fn new(module: bool, ambient: bool) -> Self {
+    pub(crate) const fn new(module: bool, ambient: bool, early_errors: bool) -> Self {
         let mut bits = ALLOW_IN;
         if module {
             bits |= MODULE | STRICT | ALLOW_AWAIT;
         }
         if ambient {
             bits |= AMBIENT;
+        }
+        if early_errors {
+            bits |= EARLY_ERRORS;
         }
         Self(bits)
     }
@@ -88,6 +94,21 @@ impl GrammarContext {
     }
 
     #[must_use]
+    pub(crate) const fn parameters(self) -> bool {
+        self.has(PARAMETERS)
+    }
+
+    #[must_use]
+    pub(crate) const fn allow_super(self) -> bool {
+        self.has(ALLOW_SUPER)
+    }
+
+    #[must_use]
+    pub(crate) const fn early_errors(self) -> bool {
+        self.has(EARLY_ERRORS)
+    }
+
+    #[must_use]
     pub(crate) const fn with_strict(self, enabled: bool) -> Self {
         self.with(STRICT, enabled)
     }
@@ -140,6 +161,16 @@ impl GrammarContext {
     #[must_use]
     pub(crate) const fn with_accessor(self, enabled: bool) -> Self {
         self.with(ACCESSOR, enabled)
+    }
+
+    #[must_use]
+    pub(crate) const fn with_parameters(self, enabled: bool) -> Self {
+        self.with(PARAMETERS, enabled)
+    }
+
+    #[must_use]
+    pub(crate) const fn with_allow_super(self, enabled: bool) -> Self {
+        self.with(ALLOW_SUPER, enabled)
     }
 
     const fn has(self, flag: u16) -> bool {
@@ -439,6 +470,14 @@ impl<'s> ParserContext<'s> {
             BindingNamespace::Value
         };
 
+        let body_parameter_conflict = (self.grammar.early_errors()
+            && kind == BindingKind::Lexical
+            && target > 0
+            && self.scopes[target].kind == ScopeKind::Block
+            && self.scopes[target - 1].kind == ScopeKind::Function)
+            .then(|| self.scopes[target - 1].value_bindings.get(name).copied())
+            .flatten()
+            .filter(|binding| binding.kind == BindingKind::Parameter);
         let conflict = if kind.is_type() {
             self.scopes[target].type_bindings.get(name).copied()
         } else if kind.is_var_scoped() {
@@ -459,7 +498,8 @@ impl<'s> ParserContext<'s> {
                 .get(name)
                 .copied()
                 .filter(|binding| !kind.can_merge_with(binding.kind))
-        };
+        }
+        .or(body_parameter_conflict);
         if let Some(previous) = conflict {
             self.push_diagnostic(
                 Diagnostic::error(span, format!("duplicate binding `{name}`"))
@@ -839,7 +879,7 @@ mod tests {
 
     #[test]
     fn grammar_context_keeps_flags_in_one_word() {
-        let grammar = GrammarContext::new(true, false)
+        let grammar = GrammarContext::new(true, false, true)
             .with_async_function(true)
             .with_generator(true)
             .with_class(true)

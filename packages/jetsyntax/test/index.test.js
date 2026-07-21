@@ -231,6 +231,98 @@ describe("parse", () => {
     ]);
   });
 
+  it("materializes async function and generator expressions", () => {
+    const source = [
+      "const anonymous = async function (value) { return await load(value); };",
+      "const named = async function* stream() { yield await next(); };",
+    ].join("\n");
+    const result = parse(source, { sourceType: "script" });
+
+    expect(result.diagnostics).toEqual([]);
+    const [anonymous, named] = result.program.body.map(statement => statement.declarations[0].init);
+    expect(anonymous).toMatchObject({
+      type: "FunctionExpression",
+      id: null,
+      params: [{ type: "Identifier", name: "value" }],
+      generator: false,
+      async: true,
+    });
+    expect(source.slice(anonymous.start, anonymous.end)).toBe(
+      "async function (value) { return await load(value); }",
+    );
+    expect(named).toMatchObject({
+      type: "FunctionExpression",
+      id: { type: "Identifier", name: "stream" },
+      generator: true,
+      async: true,
+    });
+    expect(source.slice(named.start, named.end)).toBe(
+      "async function* stream() { yield await next(); }",
+    );
+  });
+
+  it("keeps escaped and line-broken async function expressions separate", () => {
+    const lineBreak = parse("const value = async\nfunction split() {}", { sourceType: "script" });
+    expect(lineBreak.diagnostics).toEqual([]);
+    expect(lineBreak.program.body).toMatchObject([
+      { declarations: [{ init: { type: "Identifier", name: "async" } }] },
+      { type: "FunctionDeclaration", async: false, generator: false },
+    ]);
+
+    const escaped = parse("const value = \\u0061sync function split() {}", {
+      sourceType: "script",
+    });
+    expect(escaped.diagnostics).not.toEqual([]);
+    expect(escaped.program.body[0].declarations[0].init.type).toBe("Identifier");
+  });
+
+  it("diagnoses async function expression early errors", () => {
+    const allowedDeclaration = parse("async function await() {}", {
+      semanticErrors: true,
+      sourceType: "script",
+    });
+    expect(allowedDeclaration.diagnostics).toEqual([]);
+
+    for (
+      const source of [
+        "const value = async function await() {};",
+        "const value = async function* await() {};",
+        "const value = async function() { var \\u0061wait; };",
+        "const value = async function() { void \\u0061wait; };",
+        "const value = async function* yield() {};",
+        "const value = async function*() { var \\u0079ield; };",
+        "const value = async function*() { void \\u0079ield; };",
+        "const value = async function(input = await source) {};",
+        "const value = async function*(input = yield source) {};",
+        "const value = async function(input = source) { 'use strict'; };",
+        "const value = async function(...inputs,) {};",
+        "const value = async function(input) { let input; };",
+        "const value = async function*() { super.value; };",
+        "(async function() {}) = value;",
+        "const value = async function*() { yield\n* source; };",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true, sourceType: "script" });
+
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
+  it("inherits super through arrows but resets it for nested functions", () => {
+    const inherited = parse(
+      "const object = { method() { return () => super.value; } };",
+      { semanticErrors: true },
+    );
+    expect(inherited.diagnostics).toEqual([]);
+
+    const reset = parse(
+      "class Child extends Parent { method() { return function() { return super.method(); }; } }",
+      { semanticErrors: true },
+    );
+    expect(reset.diagnostics).not.toEqual([]);
+  });
+
   it("materializes TypeScript function return annotations", () => {
     const source = [
       "function convert(value: Input): Namespace.Output { return value; }",

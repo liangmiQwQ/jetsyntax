@@ -151,7 +151,8 @@ impl<'s> Parser<'s> {
         let ambient = matches!(options.language, Language::TypeScriptDefinition);
         let strict =
             module || current.kind == TokenKind::String && has_use_strict_directive(source, 0);
-        let grammar = GrammarContext::new(module, ambient).with_strict(strict);
+        let grammar =
+            GrammarContext::new(module, ambient, options.semantic_errors).with_strict(strict);
         Self {
             source,
             lexer,
@@ -232,7 +233,6 @@ impl<'s> Parser<'s> {
             }
             TokenKind::Function => self.parse_function(true, false),
             TokenKind::Async if self.followed_by_token_without_line_break(TokenKind::Function) => {
-                self.bump();
                 self.parse_function(true, true)
             }
             TokenKind::Return => self.parse_return_statement(),
@@ -331,7 +331,13 @@ impl<'s> Parser<'s> {
         declaration: bool,
         asynchronous: bool,
     ) -> Result<ParsedNode, ParseError> {
-        let start = self.expect(TokenKind::Function).start;
+        let start = if asynchronous {
+            let start = self.expect(TokenKind::Async).start;
+            self.expect(TokenKind::Function);
+            start
+        } else {
+            self.expect(TokenKind::Function).start
+        };
         let generator = self.eat(TokenKind::Star).is_some();
         let id = if Self::is_identifier_name(self.current.kind) {
             Some(if declaration {
@@ -345,8 +351,15 @@ impl<'s> Parser<'s> {
             }
             None
         };
+        self.diagnose_function_name(id, declaration, asynchronous, generator);
         self.expect(TokenKind::LeftParen);
         let previous_grammar = self.enter_function_context(generator, asynchronous);
+        self.context.set_grammar(
+            self.context
+                .grammar()
+                .with_allow_super(false)
+                .with_parameters(true),
+        );
         if !declaration && let Some(id) = id {
             let name = self
                 .source
@@ -356,23 +369,19 @@ impl<'s> Parser<'s> {
                 .context
                 .declare_binding(name, BindingKind::Lexical, id.span);
         }
-        let params = self.parse_parameter_list()?.value;
+        let params = self.parse_parameter_list()?;
+        self.context
+            .set_grammar(self.context.grammar().with_parameters(false));
+        self.diagnose_rest_parameter_trailing_comma(&params);
         self.expect(TokenKind::RightParen);
-        let return_type = if self.options.language.is_typescript()
-            && let Some(colon) = self.eat(TokenKind::Colon)
-        {
-            let annotation = self.parse_type()?;
-            Some(
-                self.node(
-                    NodeTag::TS_TYPE_ANNOTATION,
-                    Span::new(colon.start, annotation.span.end),
-                    &[annotation.value()],
-                )?
-                .value(),
-            )
-        } else {
-            None
-        };
+        let return_type = self.parse_function_return_type()?;
+        let has_use_strict = self.current.kind == TokenKind::LeftBrace
+            && has_use_strict_directive(self.source, self.current.end as usize);
+        self.diagnose_strict_function_parameters(&params, has_use_strict);
+        if has_use_strict {
+            self.context
+                .set_grammar(self.context.grammar().with_strict(true));
+        }
         if self.context.grammar().ambient()
             && self.options.semantic_errors
             && self.current.kind == TokenKind::LeftBrace
@@ -403,7 +412,7 @@ impl<'s> Parser<'s> {
                 span,
                 &[
                     id,
-                    params,
+                    params.value,
                     body.value(),
                     generator,
                     asynchronous,
@@ -414,8 +423,89 @@ impl<'s> Parser<'s> {
             self.node(
                 tag,
                 span,
-                &[id, params, body.value(), generator, asynchronous],
+                &[id, params.value, body.value(), generator, asynchronous],
             )
+        }
+    }
+
+    fn parse_function_return_type(&mut self) -> Result<Option<ValueRef>, ParseError> {
+        if !self.options.language.is_typescript() {
+            return Ok(None);
+        }
+        let Some(colon) = self.eat(TokenKind::Colon) else {
+            return Ok(None);
+        };
+        let annotation = self.parse_type()?;
+        Ok(Some(
+            self.node(
+                NodeTag::TS_TYPE_ANNOTATION,
+                Span::new(colon.start, annotation.span.end),
+                &[annotation.value()],
+            )?
+            .value(),
+        ))
+    }
+
+    fn diagnose_function_name(
+        &mut self,
+        id: Option<ParsedNode>,
+        declaration: bool,
+        asynchronous: bool,
+        generator: bool,
+    ) {
+        if !self.reports_ecmascript_early_errors() {
+            return;
+        }
+        let Some(id) = id else {
+            return;
+        };
+        if asynchronous
+            && (!declaration || generator)
+            && self.static_property_name_matches(id.span, "await")
+        {
+            self.error(id.span, "async function name cannot be `await`");
+        }
+        if generator && self.static_property_name_matches(id.span, "yield") {
+            self.error(id.span, "generator function name cannot be `yield`");
+        }
+        if self.context.grammar().strict()
+            && (self.static_property_name_matches(id.span, "eval")
+                || self.static_property_name_matches(id.span, "arguments"))
+        {
+            self.error(
+                id.span,
+                "function name cannot be `eval` or `arguments` in strict mode",
+            );
+        }
+    }
+
+    fn diagnose_rest_parameter_trailing_comma(&mut self, params: &ParsedParameterList) {
+        if self.reports_ecmascript_early_errors() && params.has_rest && params.has_trailing_comma {
+            self.error(
+                self.current_span(),
+                "rest parameter cannot have a trailing comma",
+            );
+        }
+    }
+
+    fn diagnose_strict_function_parameters(
+        &mut self,
+        params: &ParsedParameterList,
+        has_use_strict: bool,
+    ) {
+        if !self.reports_ecmascript_early_errors() {
+            return;
+        }
+        if has_use_strict && !params.simple {
+            self.error(
+                self.current_span(),
+                "a function with non-simple parameters cannot contain a use strict directive",
+            );
+        }
+        if (self.context.grammar().strict() || has_use_strict)
+            && let Some(span) = self.context.current_restricted_parameter_binding()
+        {
+            self.error(span, "eval and arguments cannot be bound in strict mode");
         }
     }
 
@@ -464,7 +554,8 @@ impl<'s> Parser<'s> {
                 .with_generator(generator)
                 .with_async_function(asynchronous)
                 .with_allow_yield(generator)
-                .with_allow_await(asynchronous),
+                .with_allow_await(asynchronous)
+                .with_parameters(false),
         );
         previous
     }
@@ -484,11 +575,16 @@ impl<'s> Parser<'s> {
     ) -> Result<ParsedNode, ParseError> {
         self.expect(TokenKind::LeftParen);
         let previous_grammar = self.enter_function_context(generator, asynchronous);
-        if accessor.is_some() {
+        self.context.set_grammar(
             self.context
-                .set_grammar(self.context.grammar().with_accessor(true));
-        }
+                .grammar()
+                .with_accessor(accessor.is_some())
+                .with_allow_super(true)
+                .with_parameters(true),
+        );
         let params = self.parse_parameter_list()?;
+        self.context
+            .set_grammar(self.context.grammar().with_parameters(false));
         if accessor == Some(AccessorKind::Get) && params.count != 0 {
             self.error(self.current_span(), "getter must not have parameters");
         }
@@ -500,6 +596,7 @@ impl<'s> Parser<'s> {
                 "setter must have exactly one non-rest parameter without a trailing comma",
             );
         }
+        self.diagnose_rest_parameter_trailing_comma(&params);
         self.expect(TokenKind::RightParen);
         let has_use_strict = self.current.kind == TokenKind::LeftBrace
             && has_use_strict_directive(self.source, self.current.end as usize);
@@ -552,7 +649,8 @@ impl<'s> Parser<'s> {
             previous_grammar
                 .with_class(true)
                 .with_strict(true)
-                .with_accessor(false),
+                .with_accessor(false)
+                .with_allow_super(true),
         );
         let mut elements = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
@@ -1029,7 +1127,6 @@ impl<'s> Parser<'s> {
                 TokenKind::Async
                     if self.followed_by_token_without_line_break(TokenKind::Function) =>
                 {
-                    self.bump();
                     (self.parse_function(true, true)?, false)
                 }
                 TokenKind::Function => (self.parse_function(true, false)?, false),
@@ -1133,7 +1230,6 @@ impl<'s> Parser<'s> {
                 self.parse_module_declaration()?
             }
             TokenKind::Async if self.followed_by_token_without_line_break(TokenKind::Function) => {
-                self.bump();
                 self.parse_function(true, true)?
             }
             TokenKind::Function => self.parse_function(true, false)?,
@@ -1580,6 +1676,14 @@ impl<'s> Parser<'s> {
             self.retain_root_assignment_pattern(assignment_patterns, left.node);
             return Ok(left);
         };
+        if self.reports_ecmascript_early_errors()
+            && self.last_node_tag == Some(NodeTag::FUNCTION_EXPRESSION)
+        {
+            self.error(
+                left.span,
+                "function expressions are not valid assignment targets",
+            );
+        }
         self.bump();
         if operator == AssignmentOperator::Assign {
             self.retag_assignment_pattern(left.node)?;
@@ -1699,6 +1803,15 @@ impl<'s> Parser<'s> {
         }
         if let Some(operator) = unary_operator(self.current.kind) {
             let start = self.take().start;
+            if self.reports_ecmascript_early_errors()
+                && self.context.grammar().generator()
+                && self.current.kind == TokenKind::Yield
+            {
+                self.error(
+                    self.current_span(),
+                    "yield expressions are not valid unary-expression operands",
+                );
+            }
             let argument = self.parse_unary_expression()?;
             if operator == UnaryOperator::Delete && self.context.grammar().strict() {
                 if self.last_node_tag == Some(NodeTag::IDENTIFIER) {
@@ -1732,34 +1845,71 @@ impl<'s> Parser<'s> {
             );
         }
         if self.current.kind == TokenKind::Await {
-            let start = self.take().start;
-            let argument = self.parse_unary_expression()?;
-            return self.node(
-                NodeTag::AWAIT_EXPRESSION,
-                Span::new(start, argument.span.end),
-                &[argument.value()],
-            );
+            return self.parse_await_expression();
         }
         if self.current.kind == TokenKind::Yield {
-            let start = self.take().start;
-            let delegate = self.eat(TokenKind::Star).is_some();
-            let argument = if self.current.flags.line_break_before()
-                || matches!(
-                    self.current.kind,
-                    TokenKind::Semicolon | TokenKind::RightBrace | TokenKind::Eof
-                ) {
-                self.tape.push_null()?
-            } else {
-                self.parse_assignment_expression(true)?.value()
-            };
-            let delegate = self.tape.push_bool(delegate)?;
-            return self.node(
-                NodeTag::YIELD_EXPRESSION,
-                Span::new(start, self.previous_end(start)),
-                &[argument, delegate],
-            );
+            return self.parse_yield_expression();
         }
         self.parse_postfix_expression()
+    }
+
+    fn parse_await_expression(&mut self) -> Result<ParsedNode, ParseError> {
+        let token = self.take();
+        if self.reports_ecmascript_early_errors() && self.context.grammar().parameters() {
+            self.error(
+                Self::token_span(token),
+                "await expressions are not allowed in formal parameters",
+            );
+        }
+        let argument = self.parse_unary_expression()?;
+        self.node(
+            NodeTag::AWAIT_EXPRESSION,
+            Span::new(token.start, argument.span.end),
+            &[argument.value()],
+        )
+    }
+
+    fn parse_yield_expression(&mut self) -> Result<ParsedNode, ParseError> {
+        let token = self.take();
+        if self.reports_ecmascript_early_errors() && self.context.grammar().parameters() {
+            self.error(
+                Self::token_span(token),
+                "yield expressions are not allowed in formal parameters",
+            );
+        }
+        if self.reports_ecmascript_early_errors()
+            && self.current.kind == TokenKind::Star
+            && self.current.flags.line_break_before()
+        {
+            self.error(
+                self.current_span(),
+                "a line terminator is not allowed before `*` in a yield expression",
+            );
+        }
+        let delegate =
+            !self.current.flags.line_break_before() && self.eat(TokenKind::Star).is_some();
+        let missing_argument = matches!(
+            self.current.kind,
+            TokenKind::Semicolon | TokenKind::RightBrace | TokenKind::Eof
+        );
+        let argument = if !delegate && (self.current.flags.line_break_before() || missing_argument)
+        {
+            self.tape.push_null()?
+        } else if missing_argument {
+            self.error(
+                self.current_span(),
+                "yield delegation requires an expression",
+            );
+            self.tape.push_null()?
+        } else {
+            self.parse_assignment_expression(true)?.value()
+        };
+        let delegate = self.tape.push_bool(delegate)?;
+        self.node(
+            NodeTag::YIELD_EXPRESSION,
+            Span::new(token.start, self.previous_end(token.start)),
+            &[argument, delegate],
+        )
     }
 
     fn parse_type_assertion(&mut self) -> Result<ParsedNode, ParseError> {
@@ -1901,6 +2051,9 @@ impl<'s> Parser<'s> {
 
     fn parse_primary_expression(&mut self) -> Result<ParsedNode, ParseError> {
         match self.current.kind {
+            TokenKind::Async if self.followed_by_token_without_line_break(TokenKind::Function) => {
+                self.parse_function(false, true)
+            }
             kind if Self::is_identifier_name(kind) => self.parse_identifier_reference(),
             TokenKind::Number
             | TokenKind::BigInt
@@ -1918,6 +2071,12 @@ impl<'s> Parser<'s> {
             }
             TokenKind::Super => {
                 let token = self.take();
+                if self.reports_ecmascript_early_errors() && !self.context.grammar().allow_super() {
+                    self.error(
+                        Self::token_span(token),
+                        "super is only allowed in methods and derived constructors",
+                    );
+                }
                 if self.context.grammar().accessor() && self.current.kind == TokenKind::LeftParen {
                     self.error(
                         Self::token_span(token),
@@ -2531,6 +2690,24 @@ impl<'s> Parser<'s> {
 
     fn parse_identifier_reference(&mut self) -> Result<ParsedNode, ParseError> {
         let span = self.current_span();
+        if self.reports_ecmascript_early_errors()
+            && self.context.grammar().async_function()
+            && self.static_property_name_matches(span, "await")
+        {
+            self.error(
+                span,
+                "await cannot be used as an identifier in an async function",
+            );
+        }
+        if self.reports_ecmascript_early_errors()
+            && self.context.grammar().generator()
+            && self.static_property_name_matches(span, "yield")
+        {
+            self.error(
+                span,
+                "yield cannot be used as an identifier in a generator function",
+            );
+        }
         if self.context.grammar().strict() && self.is_strict_reserved_identifier(span) {
             self.error(
                 span,
@@ -2639,6 +2816,24 @@ impl<'s> Parser<'s> {
             .source
             .get(token.start as usize..token.end as usize)
             .unwrap_or_default();
+        if self.reports_ecmascript_early_errors()
+            && self.context.grammar().async_function()
+            && self.static_property_name_matches(Self::token_span(token), "await")
+        {
+            self.error(
+                Self::token_span(token),
+                "await cannot be bound in an async function",
+            );
+        }
+        if self.reports_ecmascript_early_errors()
+            && self.context.grammar().generator()
+            && self.static_property_name_matches(Self::token_span(token), "yield")
+        {
+            self.error(
+                Self::token_span(token),
+                "yield cannot be bound in a generator function",
+            );
+        }
         if self.context.grammar().strict()
             && (matches!(name_text, "eval" | "arguments")
                 || self.is_strict_reserved_identifier(Self::token_span(token)))
@@ -3945,6 +4140,10 @@ impl<'s> Parser<'s> {
 
     const fn reports_private_early_errors(&self) -> bool {
         !self.options.language.is_typescript() || self.options.semantic_errors
+    }
+
+    const fn reports_ecmascript_early_errors(&self) -> bool {
+        self.options.semantic_errors
     }
 
     fn source_text(&self, span: Span) -> &'s str {

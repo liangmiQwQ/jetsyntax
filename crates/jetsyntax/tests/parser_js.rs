@@ -739,6 +739,15 @@ fn parser_should_accept_async_functions_and_generators() {
             &[NodeTag::FUNCTION_DECLARATION, NodeTag::AWAIT_EXPRESSION],
         ),
         GrammarCase::script(
+            "async function expressions",
+            "const load = async function (value) { return await fetchValue(value); }; const stream = async function* named() { yield await next(); };",
+            &[
+                NodeTag::FUNCTION_EXPRESSION,
+                NodeTag::AWAIT_EXPRESSION,
+                NodeTag::YIELD_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
             "async arrow",
             "const load = async (value) => await transform(value);",
             &[
@@ -774,6 +783,155 @@ fn parser_should_accept_async_functions_and_generators() {
     ];
 
     assert_clean_cases(&cases);
+}
+
+/// Escapes and line terminators keep `async` from introducing a function expression.
+#[test]
+fn parser_should_respect_async_function_expression_introducer_boundaries() {
+    assert_clean_cases(&[GrammarCase::script(
+        "line break",
+        "const value = async\nfunction split() {}",
+        &[NodeTag::IDENTIFIER, NodeTag::FUNCTION_DECLARATION],
+    )]);
+    assert_diagnostic_cases(
+        &[GrammarCase::script(
+            "escaped async",
+            "const value = \\u0061sync function split() {}",
+            &[NodeTag::IDENTIFIER, NodeTag::FUNCTION_DECLARATION],
+        )],
+        false,
+    );
+}
+
+/// Async function expressions enforce their contextual and parameter-list early errors.
+#[test]
+fn parser_should_diagnose_async_function_expression_early_errors() {
+    let allowed_declaration = parse(
+        "async function await() {}",
+        ParseOptions {
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("async declaration named await");
+    assert!(
+        allowed_declaration.diagnostics.is_empty(),
+        "{:?}",
+        allowed_declaration.diagnostics
+    );
+
+    let cases = [
+        GrammarCase::script(
+            "await async function expression name",
+            "const value = async function await() {};",
+            &[NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "await async generator name",
+            "const value = async function* await() {};",
+            &[NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "escaped await binding",
+            "const value = async function() { var \\u0061wait; };",
+            &[NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "escaped await reference",
+            "const value = async function() { void \\u0061wait; };",
+            &[NodeTag::FUNCTION_EXPRESSION, NodeTag::UNARY_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "yield generator name",
+            "const value = async function* yield() {};",
+            &[NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "escaped yield binding",
+            "const value = async function*() { var \\u0079ield; };",
+            &[NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "escaped yield reference",
+            "const value = async function*() { void \\u0079ield; };",
+            &[NodeTag::FUNCTION_EXPRESSION, NodeTag::UNARY_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "await parameter expression",
+            "const value = async function(input = await source) {};",
+            &[NodeTag::FUNCTION_EXPRESSION, NodeTag::AWAIT_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "yield parameter expression",
+            "const value = async function*(input = yield source) {};",
+            &[NodeTag::FUNCTION_EXPRESSION, NodeTag::YIELD_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "non-simple strict parameters",
+            "const value = async function(input = source) { 'use strict'; };",
+            &[NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "rest trailing comma",
+            "const value = async function(...inputs,) {};",
+            &[NodeTag::FUNCTION_EXPRESSION, NodeTag::REST_ELEMENT],
+        ),
+        GrammarCase::script(
+            "parameter body collision",
+            "const value = async function(input) { let input; };",
+            &[NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "super property",
+            "const value = async function*() { super.value; };",
+            &[NodeTag::FUNCTION_EXPRESSION, NodeTag::SUPER],
+        ),
+        GrammarCase::script(
+            "assignment target",
+            "(async function() {}) = value;",
+            &[NodeTag::FUNCTION_EXPRESSION, NodeTag::ASSIGNMENT_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "yield star line break",
+            "const value = async function*() { yield\n* source; };",
+            &[NodeTag::FUNCTION_EXPRESSION, NodeTag::YIELD_EXPRESSION],
+        ),
+    ];
+
+    assert_diagnostic_cases(&cases, true);
+}
+
+/// Arrow functions inherit a method's `super` permission, while ordinary functions reset it.
+#[test]
+fn parser_should_track_super_permission_across_nested_functions() {
+    for source in [
+        "const object = { method() { return () => super.value; } };",
+        "class Child extends Parent { method() { return () => super.method(); } }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect(source);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect(source);
+    }
+
+    assert_diagnostic_cases(
+        &[GrammarCase::script(
+            "ordinary nested function",
+            "class Child extends Parent { method() { return function() { return super.method(); }; } }",
+            &[NodeTag::FUNCTION_EXPRESSION, NodeTag::SUPER],
+        )],
+        true,
+    );
 }
 
 /// `async function` export forms may not cross a line terminator.
