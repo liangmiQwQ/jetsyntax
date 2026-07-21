@@ -1,0 +1,17 @@
+[package]
+name = "jetsyntax"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Experimental JavaScript, TypeScript, JSX, and TSX parser"
+keywords = ["estree", "javascript", "jsx", "parser", "typescript"]
+categories = ["compilers", "parser-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+unicode-id-start.workspace = true
