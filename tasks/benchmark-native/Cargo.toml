@@ -1,0 +1,19 @@
+[package]
+name = "jetsyntax_benchmark_native"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+jetsyntax.workspace = true
+mimalloc-safe = "0.1.64"
+oxc.workspace = true
+swc_common = "24.0.0"
+swc_ecma_parser = "42.0.0"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "napi"]
+members = ["crates/*", "napi", "tasks/benchmark-native"]
 
 [workspace.package]
 version = "0.0.0-alpha.0"
@@ -15,6 +15,7 @@ jetsyntax = { path = "crates/jetsyntax", version = "0.0.0-alpha.0" }
 napi = { version = "3.11.0", default-features = false, features = ["napi9"] }
 napi-build = "2.3.2"
 napi-derive = "3.6.0"
+oxc = { version = "0.140.0", git = "https://github.com/oxc-project/oxc", rev = "d3ce2e6520cc0109851673ab24caf7a402f5a917", features = ["ast_visit", "regular_expression", "semantic", "serialize"] }
 unicode-id-start = "1.4.0"
 
 [workspace.lints.clippy]

@@ -1,0 +1,21 @@
+{
+  "name": "@jetsyntax/benchmark-napi",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prebench": "pnpm --filter jetsyntax build",
+    "bench": "node --expose-gc bench.mjs",
+    "fixtures": "node prepare.mjs",
+    "presmoke": "pnpm --filter jetsyntax build",
+    "smoke": "BENCH_WARMUPS=1 BENCH_SAMPLES=3 node --expose-gc bench.mjs",
+    "test": "node --test metrics.test.mjs"
+  },
+  "dependencies": {
+    "@swc/core": "1.15.46",
+    "jetsyntax": "workspace:*",
+    "oxc-parser": "0.140.0",
+    "react": "17.0.2",
+    "typescript": "5.1.6",
+    "yuku-parser": "0.7.2"
+  }
+}

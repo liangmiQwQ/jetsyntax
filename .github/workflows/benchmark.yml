@@ -1,0 +1,45 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: yuku-toolchain/yuku
+          ref: 217133c5db1cb65bc8f0a44281c505cd46fa7a96
+          path: yuku
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: pnpm
+      - uses: oxc-project/setup-rust@v1.0.9
+        with:
+          cache-key: benchmark
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm bench:napi
+        env:
+          BENCH_ENFORCE: 1
+          BENCH_SAMPLES: 300
+          BENCH_WARMUPS: 50
+      - run: pnpm bench:native
+        env:
+          BENCH_ENFORCE: 1
+          BENCH_SAMPLES: 300
+          BENCH_WARMUPS: 50
+          YUKU_DIR: ${{ github.workspace }}/yuku
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: reports
