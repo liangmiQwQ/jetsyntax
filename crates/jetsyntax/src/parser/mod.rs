@@ -355,6 +355,28 @@ impl<'s> Parser<'s> {
         self.function_depth = self.function_depth.saturating_sub(1);
     }
 
+    fn parse_method_function(
+        &mut self,
+        start: u32,
+        generator: bool,
+        asynchronous: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        self.expect(TokenKind::LeftParen);
+        let previous_grammar = self.enter_function_context(generator, asynchronous);
+        let params = self.parse_parameter_list()?;
+        self.expect(TokenKind::RightParen);
+        let body = self.parse_block_statement()?;
+        self.leave_function_context(previous_grammar);
+        let id = self.tape.push_null()?;
+        let generator = self.tape.push_bool(generator)?;
+        let asynchronous = self.tape.push_bool(asynchronous)?;
+        self.node(
+            NodeTag::FUNCTION_EXPRESSION,
+            Span::new(start, body.span.end),
+            &[id, params, body.value(), generator, asynchronous],
+        )
+    }
+
     fn parse_class(&mut self, declaration: bool) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Class).start;
         let id = if Self::is_identifier_name(self.current.kind) {
@@ -400,13 +422,8 @@ impl<'s> Parser<'s> {
 
     fn parse_class_element(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.current.start;
-        let is_static = if self.current.kind == TokenKind::Static {
-            self.bump();
-            true
-        } else {
-            false
-        };
-        if is_static && self.current.kind == TokenKind::LeftBrace {
+        let static_token = self.eat(TokenKind::Static);
+        if static_token.is_some() && self.current.kind == TokenKind::LeftBrace {
             let block = self.parse_block_statement()?;
             return self.node(
                 NodeTag::STATIC_BLOCK,
@@ -414,50 +431,71 @@ impl<'s> Parser<'s> {
                 &[block.value()],
             );
         }
-        let computed = self.eat(TokenKind::LeftBracket).is_some();
-        let key = if self.current.kind == TokenKind::PrivateIdentifier {
-            let token = self.take();
-            let name_span = Span::new(token.start.saturating_add(1), token.end);
-            let name_text = self
-                .source
-                .get(name_span.start as usize..name_span.end as usize)
-                .unwrap_or_default();
-            let _ = self.context.declare_private(name_text, name_span);
-            let name = self.tape.push_source_slice(name_span)?;
-            self.node(
-                NodeTag::PRIVATE_IDENTIFIER,
-                Self::token_span(token),
-                &[name],
-            )?
-        } else if matches!(self.current.kind, TokenKind::String | TokenKind::Number) {
-            self.parse_literal()?
+        let mut leading_key = None;
+        let is_static = if let Some(token) = static_token {
+            if matches!(
+                self.current.kind,
+                TokenKind::LeftParen | TokenKind::Eq | TokenKind::Semicolon | TokenKind::RightBrace
+            ) {
+                leading_key = Some(self.identifier_from_span(Self::token_span(token))?);
+                false
+            } else {
+                true
+            }
         } else {
-            self.parse_identifier()?
+            false
         };
-        if computed {
-            self.expect(TokenKind::RightBracket);
-        }
-        if self.current.kind == TokenKind::LeftParen {
+
+        let async_token = if leading_key.is_none() && self.current.kind == TokenKind::Async {
+            Some(self.take())
+        } else {
+            None
+        };
+        let generator = self.current.kind == TokenKind::Star
+            && async_token.is_none_or(|_| !self.current.flags.line_break_before());
+        let asynchronous = generator && async_token.is_some();
+        if generator {
             self.bump();
-            let previous_grammar = self.enter_function_context(false, false);
-            let params = self.parse_parameter_list()?;
-            self.expect(TokenKind::RightParen);
-            let body = self.parse_block_statement()?;
-            self.leave_function_context(previous_grammar);
-            let id = self.tape.push_null()?;
-            let generator = self.tape.push_bool(false)?;
-            let asynchronous = self.tape.push_bool(false)?;
-            let function = self.node(
-                NodeTag::FUNCTION_EXPRESSION,
-                Span::new(key.span.start, body.span.end),
-                &[id, params, body.value(), generator, asynchronous],
-            )?;
+        } else if let Some(token) = async_token {
+            leading_key = Some(self.identifier_from_span(Self::token_span(token))?);
+        }
+
+        let (key, computed) = if generator {
+            self.parse_generator_method_name(true)?
+        } else {
+            let computed = leading_key.is_none() && self.eat(TokenKind::LeftBracket).is_some();
+            let key = if let Some(key) = leading_key {
+                key
+            } else if self.current.kind == TokenKind::PrivateIdentifier {
+                self.parse_class_private_identifier()?
+            } else if matches!(self.current.kind, TokenKind::String | TokenKind::Number) {
+                self.parse_literal()?
+            } else {
+                self.parse_identifier()?
+            };
+            if computed {
+                self.expect(TokenKind::RightBracket);
+            }
+            (key, computed)
+        };
+
+        if generator && !is_static && !computed && self.source_text(key.span) == "constructor" {
+            self.error(key.span, "class constructor cannot be a generator method");
+        }
+        if generator && is_static && !computed && self.source_text(key.span) == "prototype" {
+            self.error(key.span, "static class method cannot be named `prototype`");
+        }
+        if generator && !computed && self.source_text(key.span) == "#constructor" {
+            self.error(key.span, "private name `#constructor` is not allowed");
+        }
+        if generator || self.current.kind == TokenKind::LeftParen {
+            let function = self.parse_method_function(key.span.start, generator, asynchronous)?;
             let kind = self.tape.push_u32(0)?;
             let computed = self.tape.push_bool(computed)?;
             let is_static = self.tape.push_bool(is_static)?;
             return self.node(
                 NodeTag::METHOD_DEFINITION,
-                Span::new(start, body.span.end),
+                Span::new(start, function.span.end),
                 &[key.value(), function.value(), kind, computed, is_static],
             );
         }
@@ -1718,24 +1756,46 @@ impl<'s> Parser<'s> {
                         .value(),
                 );
             } else {
-                let key = if matches!(self.current.kind, TokenKind::String | TokenKind::Number) {
-                    self.parse_literal()?
+                let property_start = self.current.start;
+                let async_token = if self.current.kind == TokenKind::Async {
+                    Some(self.take())
                 } else {
-                    self.parse_identifier()?
+                    None
                 };
-                let (value, shorthand) = if self.eat(TokenKind::Colon).is_some() {
-                    (self.parse_assignment_expression(true)?, false)
+                let generator = self.current.kind == TokenKind::Star
+                    && async_token.is_none_or(|_| !self.current.flags.line_break_before());
+                let asynchronous = generator && async_token.is_some();
+                if generator {
+                    self.bump();
+                }
+                let (key, computed) = if generator {
+                    self.parse_generator_method_name(false)?
+                } else if let Some(token) = async_token {
+                    (self.identifier_from_span(Self::token_span(token))?, false)
+                } else if matches!(self.current.kind, TokenKind::String | TokenKind::Number) {
+                    (self.parse_literal()?, false)
                 } else {
-                    (self.identifier_from_span(key.span)?, true)
+                    (self.parse_identifier()?, false)
+                };
+                let (value, method, shorthand) = if generator {
+                    (
+                        self.parse_method_function(key.span.start, true, asynchronous)?,
+                        true,
+                        false,
+                    )
+                } else if self.eat(TokenKind::Colon).is_some() {
+                    (self.parse_assignment_expression(true)?, false, false)
+                } else {
+                    (self.identifier_from_span(key.span)?, false, true)
                 };
                 let kind = self.tape.push_u32(0)?;
-                let method = self.tape.push_bool(false)?;
+                let method = self.tape.push_bool(method)?;
                 let shorthand = self.tape.push_bool(shorthand)?;
-                let computed = self.tape.push_bool(false)?;
+                let computed = self.tape.push_bool(computed)?;
                 properties.push(
                     self.node(
                         NodeTag::PROPERTY,
-                        Span::new(key.span.start, value.span.end),
+                        Span::new(property_start, value.span.end),
                         &[
                             key.value(),
                             value.value(),
@@ -1951,10 +2011,54 @@ impl<'s> Parser<'s> {
                 &[name],
             );
         }
+        self.parse_identifier_name_from(token)
+    }
+
+    fn parse_identifier_name(&mut self) -> Result<ParsedNode, ParseError> {
+        let token = self.take();
+        self.parse_identifier_name_from(token)
+    }
+
+    fn parse_identifier_name_from(&mut self, token: Token) -> Result<ParsedNode, ParseError> {
         if !Self::is_member_identifier_name(token.kind) {
             self.error(Self::token_span(token), "expected an identifier");
         }
         self.identifier_from_span(Self::token_span(token))
+    }
+
+    fn parse_class_private_identifier(&mut self) -> Result<ParsedNode, ParseError> {
+        let token = self.take();
+        let name_span = Span::new(token.start.saturating_add(1), token.end);
+        let name_text = self.source_text(name_span);
+        let _ = self.context.declare_private(name_text, name_span);
+        let name = self.tape.push_source_slice(name_span)?;
+        self.node(
+            NodeTag::PRIVATE_IDENTIFIER,
+            Self::token_span(token),
+            &[name],
+        )
+    }
+
+    fn parse_generator_method_name(
+        &mut self,
+        class_element: bool,
+    ) -> Result<(ParsedNode, bool), ParseError> {
+        if self.eat(TokenKind::LeftBracket).is_some() {
+            let key = self.parse_expression(true)?;
+            self.expect(TokenKind::RightBracket);
+            return Ok((key, true));
+        }
+        let key = if class_element && self.current.kind == TokenKind::PrivateIdentifier {
+            self.parse_class_private_identifier()?
+        } else if matches!(
+            self.current.kind,
+            TokenKind::String | TokenKind::Number | TokenKind::BigInt
+        ) {
+            self.parse_literal()?
+        } else {
+            self.parse_identifier_name()?
+        };
+        Ok((key, false))
     }
 
     fn identifier_from_span(&mut self, span: Span) -> Result<ParsedNode, ParseError> {
@@ -3050,6 +3154,12 @@ impl<'s> Parser<'s> {
         self.source
             .get(self.current.end as usize..)
             .is_some_and(|rest| rest.trim_start().starts_with(word))
+    }
+
+    fn source_text(&self, span: Span) -> &'s str {
+        self.source
+            .get(span.start as usize..span.end as usize)
+            .unwrap_or_default()
     }
 
     fn looks_like_async_arrow(&self) -> bool {

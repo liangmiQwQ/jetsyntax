@@ -469,6 +469,71 @@ fn parser_should_accept_async_functions_and_generators() {
     assert_clean_cases(&cases);
 }
 
+/// Generator methods preserve prefixes, computed names, and isolated function scopes.
+#[test]
+fn parser_should_accept_object_and_class_generator_methods() {
+    let cases = [
+        GrammarCase::script(
+            "object generator methods",
+            "const methods = { *plain(value) { yield value; }, *[key](value) { yield value; }, async *stream(value) { await load(value); yield value; }, async: asyncValue, get: getValue, set: setValue, static: staticValue };",
+            &[
+                NodeTag::OBJECT_EXPRESSION,
+                NodeTag::PROPERTY,
+                NodeTag::FUNCTION_EXPRESSION,
+                NodeTag::YIELD_EXPRESSION,
+                NodeTag::AWAIT_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
+            "class generator methods",
+            "class Methods { *plain(value) { yield value; } *[key](value) { yield value; } async *stream(value) { await load(value); yield value; } static *values(value) { yield value; } static async *entries(value) { await load(value); yield value; } static() {} async() {} get() {} set() {} }",
+            &[
+                NodeTag::CLASS_DECLARATION,
+                NodeTag::METHOD_DEFINITION,
+                NodeTag::FUNCTION_EXPRESSION,
+                NodeTag::YIELD_EXPRESSION,
+                NodeTag::AWAIT_EXPRESSION,
+            ],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
+/// Generator methods retain binding and constructor early errors.
+#[test]
+fn parser_should_diagnose_generator_method_early_errors() {
+    let cases = [
+        GrammarCase::script(
+            "duplicate object generator parameter",
+            "const methods = { *invalid(value, value) {} };",
+            &[NodeTag::PROPERTY, NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "yield class generator parameter",
+            "class Methods { *invalid(yield) {} }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "generator constructor",
+            "class Methods { *constructor() {} }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "static generator prototype",
+            "class Methods { static *prototype() {} }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::FUNCTION_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "private generator constructor",
+            "class Methods { static async *#constructor() {} }",
+            &[NodeTag::METHOD_DEFINITION, NodeTag::FUNCTION_EXPRESSION],
+        ),
+    ];
+
+    assert_diagnostic_cases(&cases, true);
+}
+
 /// Recoverable syntax errors must still return a validated program tape.
 #[test]
 fn parser_should_recover_with_a_valid_tape() {

@@ -83,4 +83,45 @@ describe("parse", () => {
       },
     });
   });
+
+  it("materializes object and class generator methods", () => {
+    const source = [
+      "const methods = { *plain(value) { yield value; }, *[key]() {}, async *stream() { await load(); } };",
+      "class Methods { static *values() {} static async *entries() {} }",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const [plain, computed, stream] = result.program.body[0].declarations[0].id.right.properties;
+    expect(plain).toMatchObject({
+      type: "Property",
+      method: true,
+      computed: false,
+      value: { type: "FunctionExpression", generator: true, async: false },
+    });
+    expect(computed).toMatchObject({
+      type: "Property",
+      method: true,
+      computed: true,
+      key: { type: "Identifier", name: "key" },
+      value: { type: "FunctionExpression", generator: true, async: false },
+    });
+    expect(stream.value).toMatchObject({
+      type: "FunctionExpression",
+      generator: true,
+      async: true,
+    });
+    const [values, entries] = result.program.body[1].body.body;
+    expect(values).toMatchObject({
+      type: "MethodDefinition",
+      static: true,
+      computed: false,
+      value: { type: "FunctionExpression", generator: true, async: false },
+    });
+    expect(entries.value).toMatchObject({
+      type: "FunctionExpression",
+      generator: true,
+      async: true,
+    });
+  });
 });
