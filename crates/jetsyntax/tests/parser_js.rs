@@ -307,8 +307,9 @@ fn parser_should_accept_binding_and_assignment_patterns() {
     assert_clean_cases(&cases);
 }
 
-/// Declaration initializers and binding-element defaults occupy distinct ESTree fields.
+/// Declaration initializers and binding-element defaults occupy distinct `ESTree` fields.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn parser_should_separate_declaration_initializers_from_binding_defaults() {
     let source = "const value = source, second = other;\
                   for (let index = 0; index < limit; index++) {}\
