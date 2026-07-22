@@ -1297,6 +1297,89 @@ describe("parse", () => {
     }
   });
 
+  it("materializes TypeScript declared variables and type-only exports", () => {
+    const source = [
+      "declare var first;",
+      "declare let second: string;",
+      "declare const third: number;",
+      "export declare var exportedFirst;",
+      "export declare let exportedSecond: string;",
+      "export declare const exportedThird: number;",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", sourceType: "module", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body.slice(0, 3)).toMatchObject([
+      { type: "VariableDeclaration", kind: "var", declare: true },
+      { type: "VariableDeclaration", kind: "let", declare: true },
+      { type: "VariableDeclaration", kind: "const", declare: true },
+    ]);
+    expect(result.program.body.slice(3)).toMatchObject([
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        declaration: { type: "VariableDeclaration", kind: "var", declare: true },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        declaration: { type: "VariableDeclaration", kind: "let", declare: true },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        declaration: { type: "VariableDeclaration", kind: "const", declare: true },
+      },
+    ]);
+    for (const statement of result.program.body) {
+      const declaration = statement.declaration ?? statement;
+      expect(source.slice(declaration.start, declaration.start + 7)).toBe("declare");
+      expect(declaration.range).toEqual([declaration.start, declaration.end]);
+    }
+
+    const ordinary = parse("var first; let second; const third = 0;", { lang: "ts" });
+    expect(ordinary.diagnostics).toEqual([]);
+    for (const declaration of ordinary.program.body) {
+      expect(declaration).not.toHaveProperty("declare");
+    }
+  });
+
+  it("keeps declare-variable syntax contextual and TypeScript-only", () => {
+    for (
+      const source of [
+        "declare; var value;",
+        "declare\nvar value;",
+        "declar\\u0065 var value;",
+        "declare v\\u0061r value;",
+        "declare const enum Choice {}",
+        "export declare\nvar value;",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts", sourceType: "module" });
+      expect(JSON.stringify(result.program), source).not.toContain("\"declare\":true");
+    }
+
+    const exported = parse("export\ndeclare var value;", {
+      lang: "ts",
+      sourceType: "module",
+    });
+    expect(exported.diagnostics).toEqual([]);
+    expect(exported.program.body[0]).toMatchObject({
+      type: "ExportNamedDeclaration",
+      exportKind: "type",
+      declaration: { type: "VariableDeclaration", declare: true },
+    });
+
+    for (const lang of ["js", "jsx"]) {
+      const result = parse("declare var value;", { lang });
+      expect(result.diagnostics, lang).not.toEqual([]);
+      expect(JSON.stringify(result.program), lang).not.toContain("\"declare\":true");
+    }
+    const compatibility = parse("declare var value;", { typescriptJsCompatibility: true });
+    expect(compatibility.diagnostics).not.toEqual([]);
+    expect(JSON.stringify(compatibility.program)).not.toContain("\"declare\":true");
+  });
+
   it("materializes top-level TypeScript overload signatures", () => {
     const source = [
       "export function overloaded<T>(value: T): T;",

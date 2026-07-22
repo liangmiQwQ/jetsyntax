@@ -475,6 +475,199 @@ fn gates_typescript_function_signatures() {
 }
 
 #[test]
+fn parses_declared_variables_and_type_only_exports() {
+    let source = [
+        "declare var first;",
+        "declare let second: string;",
+        "declare const third: number;",
+        "export declare var exportedFirst;",
+        "export declare let exportedSecond: string;",
+        "export declare const exportedThird: number;",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            ..typescript_options()
+        },
+    )
+    .expect("parse declared variables");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid declared-variable tape");
+
+    assert_eq!(NodeTag::TS_DECLARE_VARIABLE_DECLARATION.get(), 575);
+    let declarations =
+        node_fields(&parsed, NodeTag::TS_DECLARE_VARIABLE_DECLARATION).collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 6);
+    assert!(declarations.iter().all(|fields| fields.len() == 2));
+
+    let exports = node_fields(&parsed, NodeTag::EXPORT_NAMED_DECLARATION).collect::<Vec<_>>();
+    assert_eq!(exports.len(), 3);
+    for fields in exports {
+        assert!(matches!(
+            parsed.tape.value_at(fields[0]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::TS_DECLARE_VARIABLE_DECLARATION,
+                span,
+                ..
+            }) if source[span.start as usize..span.end as usize].starts_with("declare ")
+        ));
+        assert!(matches!(
+            parsed.tape.value_at(fields[4]),
+            Ok(TapeValue::U32(1))
+        ));
+    }
+}
+
+#[test]
+fn keeps_declare_variable_contextual_and_typescript_only() {
+    for language in [
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+        Language::TypeScriptDefinition,
+    ] {
+        let parsed = parse(
+            "declare var value;",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse TypeScript declared variable");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:#?}",
+            parsed.diagnostics
+        );
+        assert_node_field_count(&parsed, NodeTag::TS_DECLARE_VARIABLE_DECLARATION, 2);
+    }
+
+    for source in [
+        "declare; var value;",
+        "declare\nvar value;",
+        "declar\\u0065 var value;",
+        "declare v\\u0061r value;",
+        "declare const enum Choice {}",
+        "export declare\nvar value;",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover contextual declare");
+        parsed
+            .tape
+            .validate()
+            .expect("valid contextual recovery tape");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_DECLARE_VARIABLE_DECLARATION).count(),
+            0,
+            "{source}"
+        );
+    }
+
+    let exported = parse(
+        "export\ndeclare var value;",
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            ..typescript_options()
+        },
+    )
+    .expect("parse line break before declare");
+    assert!(
+        exported.diagnostics.is_empty(),
+        "{:#?}",
+        exported.diagnostics
+    );
+    assert_node_field_count(&exported, NodeTag::TS_DECLARE_VARIABLE_DECLARATION, 2);
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "declare var value;",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover JavaScript declare expression");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_DECLARE_VARIABLE_DECLARATION).count(),
+            0
+        );
+    }
+
+    let compatibility = parse(
+        "declare var value;",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("recover compatibility declare expression");
+    assert!(!compatibility.diagnostics.is_empty());
+    assert_eq!(
+        node_fields(&compatibility, NodeTag::TS_DECLARE_VARIABLE_DECLARATION).count(),
+        0
+    );
+}
+
+#[test]
+fn declared_variables_do_not_mask_typescript_syntax_diagnostics() {
+    for source in [
+        "declare var value: number; ++value++;",
+        "declare var value: number; value++++;",
+        "declare var values: number[]; values[01];",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("parse invalid TypeScript source");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        assert_node_field_count(&parsed, NodeTag::TS_DECLARE_VARIABLE_DECLARATION, 2);
+        parsed.tape.validate().expect("valid diagnostic tape");
+    }
+
+    for preserve_parentheses in [false, true] {
+        let parenthesized = parse(
+            "declare var value: number; ++(value++); (value++)++;",
+            ParseOptions {
+                preserve_parentheses,
+                ..typescript_options()
+            },
+        )
+        .expect("parse parenthesized updates");
+        assert!(
+            parenthesized.diagnostics.is_empty(),
+            "preserve_parentheses={preserve_parentheses}: {:#?}",
+            parenthesized.diagnostics
+        );
+    }
+
+    let sloppy_octal = parse(
+        "077;",
+        ParseOptions {
+            semantic_errors: true,
+            source_kind: SourceKind::Script,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse sloppy legacy octal");
+    assert!(sloppy_octal.diagnostics.is_empty());
+
+    let strict_octal = parse(
+        "'use strict'; 077;",
+        ParseOptions {
+            semantic_errors: true,
+            source_kind: SourceKind::Script,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse strict legacy octal");
+    assert!(!strict_octal.diagnostics.is_empty());
+}
+
+#[test]
 fn keeps_runtime_function_type_parameters_out_of_javascript() {
     for language in [Language::JavaScript, Language::JavaScriptJsx] {
         let parsed = parse(

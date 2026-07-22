@@ -191,6 +191,7 @@ for (
     [572, ["TSDeclareFunction", ["id", "params", "generator", "async", "returnType", "typeParameters"]]],
     [573, ["MethodDefinition", ["key", "value", "kind", "computed", "static"]]],
     [574, ["PropertyDefinition", ["key", "value", "computed", "static", "typeAnnotation"]]],
+    [575, ["VariableDeclaration", ["declarations", "kind"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -713,6 +714,11 @@ function decodeTapeInternal(source, tape, options, trusted) {
       case 28:
         node.declarations = array(fields[0], tag);
         node.kind = enumValue(VARIABLE_KINDS, fields[1], tag);
+        return node;
+      case 575:
+        node.declarations = array(fields[0], tag);
+        node.kind = enumValue(VARIABLE_KINDS, fields[1], tag);
+        node.declare = true;
         return node;
       case 29:
         node.id = fields[0];

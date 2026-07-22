@@ -696,6 +696,48 @@ describe("decodeTape", () => {
     expect(decoded).not.toHaveProperty("declare");
   });
 
+  it("decodes TypeScript declared-variable records", () => {
+    const source = "declare var value;";
+    const tape = new HandcraftedTape();
+    const id = tape.node(2, 12, 17, [tape.string("value")]);
+    const declarator = tape.node(29, 12, 17, [id, tape.null()]);
+    const declaration = tape.node(575, 0, source.length, [
+      tape.list([declarator]),
+      tape.integer(0),
+    ]);
+    const encoded = tape.finish(declaration);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(source, encoded, { range: true })).toMatchObject({
+        type: "VariableDeclaration",
+        start: 0,
+        end: source.length,
+        range: [0, source.length],
+        declare: true,
+        kind: "var",
+        declarations: [{
+          type: "VariableDeclarator",
+          id: { type: "Identifier", name: "value" },
+          init: null,
+        }],
+      });
+    }
+  });
+
+  it("rejects malformed TypeScript declared-variable field counts", () => {
+    for (const count of [1, 3]) {
+      const tape = new HandcraftedTape();
+      const fields = Array.from({ length: count }, () => tape.null());
+      const encoded = tape.finish(tape.node(575, 0, 0, fields));
+
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid VariableDeclaration field count ${count}; expected 2`,
+        );
+      }
+    }
+  });
+
   it("rejects malformed TypeScript declare-function field counts", () => {
     for (const count of [5, 7]) {
       const tape = new HandcraftedTape();

@@ -254,6 +254,7 @@ impl NodeTag {
     pub const TS_DECLARE_FUNCTION: Self = Self(572);
     pub const TS_MODIFIED_METHOD_DEFINITION: Self = Self(573);
     pub const TS_MODIFIED_PROPERTY_DEFINITION: Self = Self(574);
+    pub const TS_DECLARE_VARIABLE_DECLARATION: Self = Self(575);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {
@@ -657,6 +658,20 @@ impl TapeBuilder {
         let offset = node.offset() as usize;
         debug_assert_eq!((self.words[offset] & KIND_MASK) >> KIND_SHIFT, KIND_NODE);
         self.words[offset] = (self.words[offset] & !NODE_TAG_MASK) | u32::from(tag.get());
+        Ok(())
+    }
+
+    pub(crate) fn retag_node_with_span(
+        &mut self,
+        node: NodeRef,
+        tag: NodeTag,
+        span: Span,
+    ) -> Result<(), TapeError> {
+        self.validate_span(span)?;
+        self.retag_node(node, tag)?;
+        let offset = node.offset() as usize;
+        self.words[offset + 2] = span.start;
+        self.words[offset + 3] = span.end;
         Ok(())
     }
 

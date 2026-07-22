@@ -361,6 +361,9 @@ impl<'s> Parser<'s> {
             TokenKind::Var | TokenKind::Let | TokenKind::Const => {
                 self.parse_variable_declaration(true)
             }
+            TokenKind::Declare if self.starts_typescript_declare_variable_declaration() => {
+                self.parse_typescript_declare_variable_declaration()
+            }
             TokenKind::Type if self.options.language.is_typescript() => {
                 self.parse_type_alias_declaration()
             }
@@ -469,6 +472,22 @@ impl<'s> Parser<'s> {
             Span::new(keyword.start, end),
             &[declarations, kind],
         )
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_declare_variable_declaration(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Declare).start;
+        let mut declaration = self.parse_variable_declaration(true)?;
+        let span = Span::new(start, declaration.span.end);
+        self.tape.retag_node_with_span(
+            declaration.node,
+            NodeTag::TS_DECLARE_VARIABLE_DECLARATION,
+            span,
+        )?;
+        declaration.span = span;
+        self.last_node_tag = Some(NodeTag::TS_DECLARE_VARIABLE_DECLARATION);
+        Ok(declaration)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2127,6 +2146,24 @@ impl<'s> Parser<'s> {
                 ],
             );
         }
+        if self.starts_typescript_declare_variable_declaration() {
+            let declaration = self.parse_typescript_declare_variable_declaration()?;
+            let specifiers = self.tape.push_list(&[])?;
+            let source = self.tape.push_null()?;
+            let attributes = self.tape.push_list(&[])?;
+            let export_kind = self.tape.push_u32(1)?;
+            return self.node(
+                NodeTag::EXPORT_NAMED_DECLARATION,
+                Span::new(start, declaration.span.end),
+                &[
+                    declaration.value(),
+                    specifiers,
+                    source,
+                    attributes,
+                    export_kind,
+                ],
+            );
+        }
         if self.eat(TokenKind::Default).is_some() {
             let (declaration, needs_semicolon) = match self.current.kind {
                 TokenKind::Async
@@ -2986,6 +3023,14 @@ impl<'s> Parser<'s> {
             let start = self.take().start;
             let argument = self.parse_unary_expression()?;
             let assignment_target = self.last_assignment_target;
+            // TypeScript treats adjacent updates as grammar errors, but parentheses defer them to
+            // assignment-target validation.
+            if self.options.language.is_typescript()
+                && self.last_node_tag == Some(NodeTag::UPDATE_EXPRESSION)
+                && !self.typescript_update_operand_is_parenthesized(argument.span)
+            {
+                self.error(argument.span, "an update expression cannot be updated");
+            }
             self.validate_assignment_target(
                 argument.span,
                 assignment_target,
@@ -3176,6 +3221,15 @@ impl<'s> Parser<'s> {
                 TokenKind::PlusPlus | TokenKind::MinusMinus
                     if !self.current.flags.line_break_before() =>
                 {
+                    if self.options.language.is_typescript()
+                        && self.last_node_tag == Some(NodeTag::UPDATE_EXPRESSION)
+                        && !self.typescript_update_operand_is_parenthesized(expression.span)
+                    {
+                        self.error(
+                            self.current_span(),
+                            "an update expression cannot be updated",
+                        );
+                    }
                     if is_chain {
                         // The completed chain is the update operand, not the update expression's root.
                         expression = self.node(
@@ -4139,6 +4193,15 @@ impl<'s> Parser<'s> {
 
     fn parse_literal(&mut self) -> Result<ParsedNode, ParseError> {
         let token = self.take();
+        if token.flags.legacy_octal()
+            && (self.options.language.is_typescript()
+                || self.context.grammar().strict() && self.reports_ecmascript_early_errors())
+        {
+            self.error(
+                Self::token_span(token),
+                "legacy octal literals are not allowed in this context",
+            );
+        }
         let raw = self.tape.push_source_slice(Self::token_span(token))?;
         let kind = self.tape.push_u32(match token.kind {
             TokenKind::String => 1,
@@ -5747,6 +5810,40 @@ impl<'s> Parser<'s> {
         lookahead.set_position(self.current.end as usize);
         self.import_equals_type_only(lookahead.next_token())
             .is_some()
+    }
+
+    fn starts_typescript_declare_variable_declaration(&self) -> bool {
+        if !self.options.language.is_typescript()
+            || self.current.kind != TokenKind::Declare
+            || self.current.flags.escaped()
+        {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let kind = lookahead.next_token();
+        if kind.flags.line_break_before()
+            || kind.flags.escaped()
+            || !matches!(
+                kind.kind,
+                TokenKind::Var | TokenKind::Let | TokenKind::Const
+            )
+        {
+            return false;
+        }
+        kind.kind != TokenKind::Const
+            || !matches!(lookahead.next_token(), token if token.kind == TokenKind::Enum && !token.flags.escaped())
+    }
+
+    #[cold]
+    fn typescript_update_operand_is_parenthesized(&self, span: Span) -> bool {
+        let raw = self.source_text(span);
+        if raw.starts_with('(') && raw.ends_with(')') {
+            return true;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(span.end as usize);
+        lookahead.next_token().kind == TokenKind::RightParen
     }
 
     fn current_accessor_kind(&self, allow_private: bool) -> Option<AccessorKind> {
