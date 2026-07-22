@@ -219,6 +219,47 @@ describe("parse", () => {
     expect(malformed.program.type).toBe("Program");
   });
 
+  it("accepts dynamic import trailing commas without inventing options", () => {
+    const result = parse(
+      [
+        "const sourceOnly = import('source',);",
+        "const withOptions = import('data.json', { with: { type: 'json' } },);",
+      ].join("\n"),
+      { sourceType: "module" },
+    );
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      {
+        declarations: [
+          { init: { type: "ImportExpression", source: { value: "source" }, options: null } },
+        ],
+      },
+      {
+        declarations: [
+          {
+            init: {
+              type: "ImportExpression",
+              source: { value: "data.json" },
+              options: { type: "ObjectExpression" },
+            },
+          },
+        ],
+      },
+    ]);
+
+    for (
+      const source of [
+        "import(,);",
+        "import('source',,);",
+        "import('source', {}, extra);",
+        "import('source', {},,);",
+      ]
+    ) {
+      expect(parse(source, { sourceType: "script" }).diagnostics, source).not.toEqual([]);
+    }
+  });
+
   it("decodes import-dot primary expressions and their phase", () => {
     const result = parse(
       [

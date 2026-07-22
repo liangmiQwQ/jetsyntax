@@ -756,6 +756,49 @@ fn parser_should_parse_statement_leading_dynamic_import_continuations() {
     );
 }
 
+/// Import calls accept the optional trailing comma after either grammar argument.
+#[test]
+fn parser_should_accept_dynamic_import_trailing_commas() {
+    assert_clean_cases(&[
+        GrammarCase::script(
+            "trailing comma after source",
+            "import('source',); function nested(value) { return import(value,); }",
+            &[NodeTag::IMPORT_EXPRESSION],
+        ),
+        GrammarCase::module(
+            "trailing comma after options",
+            "import('data.json', { with: { type: 'json' } },);",
+            &[NodeTag::IMPORT_EXPRESSION, NodeTag::OBJECT_EXPRESSION],
+        ),
+    ]);
+
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script(
+                "missing source",
+                "import(,);",
+                &[NodeTag::IMPORT_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "missing options between commas",
+                "import('source',,);",
+                &[NodeTag::IMPORT_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "extra argument after options",
+                "import('source', {}, extra);",
+                &[NodeTag::IMPORT_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "repeated trailing comma",
+                "import('source', {},,);",
+                &[NodeTag::IMPORT_EXPRESSION],
+            ),
+        ],
+        false,
+    );
+}
+
 /// Import-dot primary expressions keep their distinct grammar and postfix continuations.
 #[test]
 fn parser_should_parse_import_dot_primary_expressions() {

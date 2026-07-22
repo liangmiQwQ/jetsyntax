@@ -2801,19 +2801,8 @@ impl<'s> Parser<'s> {
     #[allow(clippy::too_many_lines)]
     fn parse_import_declaration(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Import).start;
-        if self.eat(TokenKind::LeftParen).is_some() {
-            let source = self.parse_assignment_expression(true)?;
-            let options = if self.eat(TokenKind::Comma).is_some() {
-                self.parse_assignment_expression(true)?.value()
-            } else {
-                self.tape.push_null()?
-            };
-            let end = self.expect(TokenKind::RightParen).end;
-            let expression = self.node(
-                NodeTag::IMPORT_EXPRESSION,
-                Span::new(start, end),
-                &[source.value(), options],
-            )?;
+        if self.current.kind == TokenKind::LeftParen {
+            let expression = self.parse_import_call(start)?;
             let end = self.consume_semicolon();
             return self.node(
                 NodeTag::EXPRESSION_STATEMENT,
@@ -5259,17 +5248,27 @@ impl<'s> Parser<'s> {
                 &[meta.value(), property.value()],
             );
         }
+        self.parse_import_call(import.start)
+    }
+
+    fn parse_import_call(&mut self, start: u32) -> Result<ParsedNode, ParseError> {
         self.expect(TokenKind::LeftParen);
         let source = self.parse_assignment_expression(true)?;
         let options = if self.eat(TokenKind::Comma).is_some() {
-            self.parse_assignment_expression(true)?.value()
+            if self.current.kind == TokenKind::RightParen {
+                self.tape.push_null()?
+            } else {
+                let options = self.parse_assignment_expression(true)?.value();
+                let _ = self.eat(TokenKind::Comma);
+                options
+            }
         } else {
             self.tape.push_null()?
         };
         let end = self.expect(TokenKind::RightParen).end;
         self.node(
             NodeTag::IMPORT_EXPRESSION,
-            Span::new(import.start, end),
+            Span::new(start, end),
             &[source.value(), options],
         )
     }
