@@ -1698,6 +1698,56 @@ describe("parse", () => {
     expect(compatibility.diagnostics).toEqual([]);
     expect(compatibility.program.body[0].body.body[0].value.type).toBe("TSEmptyBodyFunctionExpression");
 
+    const newlineSource = [
+      "class IHeapObjectProperty {}",
+      "class IDirectChildrenMap {",
+      "  hasOwnProperty(objectId: number): boolean",
+      "  [objectId: number]: IHeapObjectProperty[]",
+      "  next(): void",
+      "  implemented(): Foo[Key]",
+      "  { return value; }",
+      "  tail(): void",
+      "}",
+    ].join("\n");
+    const newline = parse(newlineSource, { lang: "ts", range: true });
+    expect(newline.diagnostics).toEqual([]);
+    const newlineMembers = newline.program.body[1].body.body;
+    expect(newlineMembers).toMatchObject([
+      {
+        type: "MethodDefinition",
+        value: {
+          type: "TSEmptyBodyFunctionExpression",
+          returnType: { typeAnnotation: { type: "TSBooleanKeyword" } },
+        },
+      },
+      { type: "TSIndexSignature" },
+      { type: "MethodDefinition", value: { type: "TSEmptyBodyFunctionExpression" } },
+      {
+        type: "MethodDefinition",
+        value: {
+          type: "FunctionExpression",
+          returnType: { typeAnnotation: { type: "TSIndexedAccessType" } },
+        },
+      },
+      { type: "MethodDefinition", value: { type: "TSEmptyBodyFunctionExpression" } },
+    ]);
+    expect(newlineMembers.map(member => newlineSource.slice(member.start, member.end))).toEqual([
+      "hasOwnProperty(objectId: number): boolean",
+      "[objectId: number]: IHeapObjectProperty[]",
+      "next(): void",
+      "implemented(): Foo[Key]\n  { return value; }",
+      "tail(): void",
+    ]);
+    expect([newlineMembers[0], newlineMembers[2], newlineMembers[4]].map(method => (
+      newlineSource.slice(method.value.start, method.value.end)
+    ))).toEqual(["(objectId: number): boolean", "(): void", "(): void"]);
+    for (const member of newlineMembers) {
+      expect(member.range).toEqual([member.start, member.end]);
+      if (member.type === "MethodDefinition") {
+        expect(member.value.range).toEqual([member.value.start, member.value.end]);
+      }
+    }
+
     for (const lang of ["js", "jsx"]) {
       const standard = parse("class C { method(); }", { lang });
       expect(standard.diagnostics, lang).not.toEqual([]);

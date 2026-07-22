@@ -3450,7 +3450,7 @@ fn diagnoses_invalid_abstract_class_member_combinations() {
 }
 
 #[test]
-fn gates_bodyless_class_signatures_and_requires_explicit_semicolons() {
+fn gates_bodyless_class_signatures() {
     for language in [
         Language::TypeScript,
         Language::TypeScriptJsx,
@@ -3510,7 +3510,7 @@ fn gates_bodyless_class_signatures_and_requires_explicit_semicolons() {
     }
 
     for source in [
-        "class C { method(): Output\nnext() {} }",
+        "class C { method(): Output next() {} }",
         "class C { async method(): Promise<Output>; }",
         "class C { *method(): Iterable<Output>; }",
         "class C { get value(): Output; }",
@@ -3520,6 +3520,85 @@ fn gates_bodyless_class_signatures_and_requires_explicit_semicolons() {
         assert!(!parsed.diagnostics.is_empty(), "{source}");
         parsed.tape.validate().expect("valid excluded-form tape");
     }
+}
+
+#[test]
+fn parses_newline_terminated_class_signatures() {
+    let source = [
+        "class IHeapObjectProperty {}",
+        "class IDirectChildrenMap {",
+        "  hasOwnProperty(objectId: number): boolean",
+        "  [objectId: number]: IHeapObjectProperty[]",
+        "  next(): void",
+        "  implemented(): Foo[Key]",
+        "  { return value; }",
+        "  tail(): void",
+        "}",
+    ]
+    .join("\n");
+    let parsed =
+        parse(&source, typescript_options()).expect("parse newline-terminated class signatures");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid newline-boundary tape");
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION).count(),
+        3
+    );
+    assert_eq!(node_fields(&parsed, NodeTag::TS_INDEX_SIGNATURE).count(), 1);
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_INDEXED_ACCESS_TYPE).count(),
+        1
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::FUNCTION_EXPRESSION).count(),
+        1
+    );
+    let signature_slices = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION,
+                span,
+                ..
+            } => Some(&source[span.start as usize..span.end as usize]),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        signature_slices,
+        ["(objectId: number): boolean", "(): void", "(): void"]
+    );
+    let method_slices = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::METHOD_DEFINITION,
+                span,
+                fields,
+                ..
+            } if matches!(
+                parsed.tape.value_at(fields[1]),
+                Ok(TapeValue::Node {
+                    tag: NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION,
+                    ..
+                })
+            ) =>
+            {
+                Some(&source[span.start as usize..span.end as usize])
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        method_slices,
+        [
+            "hasOwnProperty(objectId: number): boolean",
+            "next(): void",
+            "tail(): void",
+        ]
+    );
 }
 
 #[test]

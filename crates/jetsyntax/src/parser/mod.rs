@@ -79,6 +79,10 @@ impl ParsedNode {
     const fn value(self) -> ValueRef {
         self.node.as_value()
     }
+
+    const fn end(&self) -> u32 {
+        self.span.end
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -155,6 +159,21 @@ enum MethodBodyPolicy {
     Block,
     TypeScriptSignature,
     TypeScriptAbstractSignature,
+}
+
+impl MethodBodyPolicy {
+    fn permits_bodyless(
+        self,
+        accessor: Option<AccessorKind>,
+        generator: bool,
+        asynchronous: bool,
+    ) -> bool {
+        self == Self::TypeScriptAbstractSignature
+            || self == Self::TypeScriptSignature
+                && accessor.is_none()
+                && !generator
+                && !asynchronous
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -790,8 +809,11 @@ impl<'s> Parser<'s> {
             .set_grammar(self.context.grammar().with_parameters(false));
         let rest_trailing_comma_span =
             (params.has_rest && params.has_trailing_comma).then(|| self.current_span());
-        self.expect(TokenKind::RightParen);
+        let right_paren_end = self.expect(TokenKind::RightParen).end;
         let return_type = self.parse_function_return_type()?;
+        let signature_end = return_type
+            .as_ref()
+            .map_or(right_paren_end, ParsedNode::end);
         let has_use_strict = self.current.kind == TokenKind::LeftBrace
             && has_use_strict_directive(self.source, self.current.end as usize);
         self.diagnose_strict_function_parameters(&params, has_use_strict);
@@ -804,7 +826,7 @@ impl<'s> Parser<'s> {
             && declaration
             && (self.options.language.is_typescript()
                 || self.options.syntax_extensions.typescript_js_compatibility)
-            && let Some(end) = self.consume_typescript_function_signature_terminator()
+            && let Some(end) = self.consume_typescript_function_signature_terminator(signature_end)
         {
             self.leave_function_context(previous_grammar);
             return self.node_typescript_declare_function(
@@ -823,11 +845,12 @@ impl<'s> Parser<'s> {
                     asynchronous,
                     explicit_typescript_declare: EXPLICIT_TYPESCRIPT_DECLARE,
                 },
-                return_type,
+                return_type.map(ParsedNode::value),
                 type_parameters,
                 None,
             );
         }
+        let return_type = return_type.map(ParsedNode::value);
         if !self.context.grammar().ambient()
             && let Some(span) = rest_trailing_comma_span
         {
@@ -1007,20 +1030,23 @@ impl<'s> Parser<'s> {
 
     #[cold]
     #[inline(never)]
-    fn consume_typescript_function_signature_terminator(&mut self) -> Option<u32> {
+    fn consume_typescript_function_signature_terminator(
+        &mut self,
+        implicit_end: u32,
+    ) -> Option<u32> {
         if let Some(semicolon) = self.eat(TokenKind::Semicolon) {
             Some(semicolon.end)
         } else if self.current.kind == TokenKind::RightBrace
             || self.current.kind == TokenKind::Eof
             || self.current.flags.line_break_before()
         {
-            Some(self.current.start)
+            Some(implicit_end)
         } else {
             None
         }
     }
 
-    fn parse_function_return_type(&mut self) -> Result<Option<ValueRef>, ParseError> {
+    fn parse_function_return_type(&mut self) -> Result<Option<ParsedNode>, ParseError> {
         if !self.options.language.is_typescript() {
             return Ok(None);
         }
@@ -1028,14 +1054,11 @@ impl<'s> Parser<'s> {
             return Ok(None);
         };
         let annotation = self.parse_type()?;
-        Ok(Some(
-            self.node(
-                NodeTag::TS_TYPE_ANNOTATION,
-                Span::new(colon.start, annotation.span.end),
-                &[annotation.value()],
-            )?
-            .value(),
-        ))
+        Ok(Some(self.node(
+            NodeTag::TS_TYPE_ANNOTATION,
+            Span::new(colon.start, annotation.span.end),
+            &[annotation.value()],
+        )?))
     }
 
     fn diagnose_function_name(
@@ -1208,13 +1231,16 @@ impl<'s> Parser<'s> {
         self.diagnose_method_parameter_shape(accessor, &params, self.current_span());
         let rest_trailing_comma_span =
             (params.has_rest && params.has_trailing_comma).then(|| self.current_span());
-        self.expect(TokenKind::RightParen);
+        let right_paren_end = self.expect(TokenKind::RightParen).end;
         // Only canonical constructors enable direct super calls, and their return annotations remain unsupported.
         let return_type = if self.context.grammar().allow_super_call() {
             None
         } else {
             self.parse_function_return_type()?
         };
+        let signature_end = return_type
+            .as_ref()
+            .map_or(right_paren_end, ParsedNode::end);
         if return_type.is_some()
             && accessor == Some(AccessorKind::Set)
             && self.options.semantic_errors
@@ -1241,12 +1267,9 @@ impl<'s> Parser<'s> {
             self.context
                 .set_grammar(self.context.grammar().with_strict(true));
         }
-        if (body_policy == MethodBodyPolicy::TypeScriptAbstractSignature
-            || (body_policy == MethodBodyPolicy::TypeScriptSignature
-                && accessor.is_none()
-                && !generator
-                && !asynchronous))
-            && let Some(semicolon) = self.eat(TokenKind::Semicolon)
+        if body_policy.permits_bodyless(accessor, generator, asynchronous)
+            && self.current.kind != TokenKind::LeftBrace
+            && let Some(end) = self.consume_typescript_function_signature_terminator(signature_end)
         {
             if !previous_grammar.ambient()
                 && let Some(span) = rest_trailing_comma_span
@@ -1255,11 +1278,11 @@ impl<'s> Parser<'s> {
             }
             self.leave_function_context(previous_grammar);
             return self.node_typescript_empty_body_function(
-                Span::new(signature_start, semicolon.end),
+                Span::new(signature_start, end),
                 params.value,
                 generator,
                 asynchronous,
-                return_type,
+                return_type.map(ParsedNode::value),
             );
         }
         if !previous_grammar.ambient()
@@ -1284,7 +1307,7 @@ impl<'s> Parser<'s> {
                     body.value(),
                     generator,
                     asynchronous,
-                    return_type,
+                    return_type.value(),
                 ],
             )
         } else {
@@ -5411,7 +5434,8 @@ impl<'s> Parser<'s> {
             self.parse_type_primary()?
         };
 
-        while self.eat(TokenKind::LeftBracket).is_some() {
+        while !self.current.flags.line_break_before() && self.eat(TokenKind::LeftBracket).is_some()
+        {
             if let Some(right_bracket) = self.eat(TokenKind::RightBracket) {
                 type_node = self.node(
                     NodeTag::TS_ARRAY_TYPE,
