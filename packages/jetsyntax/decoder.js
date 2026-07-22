@@ -270,7 +270,7 @@ const BINARY_OPERATORS = [
 
 const UNARY_OPERATORS = ["-", "+", "!", "~", "typeof", "void", "delete"];
 const UPDATE_OPERATORS = ["++", "--"];
-const VARIABLE_KINDS = ["var", "let", "const"];
+const VARIABLE_KINDS = ["var", "let", "const", "using", "await using"];
 const PROPERTY_KINDS = ["init", "get", "set"];
 const METHOD_KINDS = ["method", "get", "set", "constructor"];
 const IMPORT_EXPORT_KINDS = ["value", "type", "typeof"];

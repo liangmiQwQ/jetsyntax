@@ -200,6 +200,46 @@ enum TypeScriptDeclareDeclarationKind {
     Global,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum VariableDeclarationKind {
+    Var,
+    Let,
+    Const,
+    Using,
+    AwaitUsing,
+}
+
+impl VariableDeclarationKind {
+    const fn from_token(kind: TokenKind) -> Self {
+        match kind {
+            TokenKind::Let => Self::Let,
+            TokenKind::Const => Self::Const,
+            _ => Self::Var,
+        }
+    }
+
+    const fn tape_value(self) -> u32 {
+        match self {
+            Self::Var => 0,
+            Self::Let => 1,
+            Self::Const => 2,
+            Self::Using => 3,
+            Self::AwaitUsing => 4,
+        }
+    }
+
+    const fn binding_kind(self) -> BindingKind {
+        match self {
+            Self::Var => BindingKind::Var,
+            Self::Let | Self::Const | Self::Using | Self::AwaitUsing => BindingKind::Lexical,
+        }
+    }
+
+    const fn is_using(self) -> bool {
+        matches!(self, Self::Using | Self::AwaitUsing)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ImportPhase {
     Source,
@@ -350,6 +390,8 @@ struct Parser<'s> {
     context: ParserContext<'s>,
     options: ParseOptions,
     function_depth: u32,
+    using_declaration_allowed: bool,
+    class_static_block_function_depth: Option<u32>,
     // Parentheses-transparent semantic tag for immediate grammar checks, without widening ParsedNode.
     last_node_tag: Option<NodeTag>,
     last_assignment_target: AssignmentTargetType,
@@ -382,6 +424,11 @@ impl<'s> Parser<'s> {
             context: ParserContext::new(grammar),
             options,
             function_depth: 0,
+            using_declaration_allowed: matches!(
+                options.source_kind,
+                SourceKind::Module | SourceKind::Unambiguous | SourceKind::CommonJs
+            ),
+            class_static_block_function_depth: None,
             last_node_tag: None,
             last_assignment_target: AssignmentTargetType::Invalid,
             assignment_pattern_candidates: Vec::new(),
@@ -438,8 +485,19 @@ impl<'s> Parser<'s> {
             {
                 self.parse_enum_declaration(true)
             }
-            TokenKind::Var | TokenKind::Let | TokenKind::Const => {
-                self.parse_variable_declaration(true)
+            TokenKind::Var | TokenKind::Const => self.parse_variable_declaration(
+                true,
+                VariableDeclarationKind::from_token(self.current.kind),
+                false,
+            ),
+            TokenKind::Let if self.starts_let_declaration() => {
+                self.parse_variable_declaration(true, VariableDeclarationKind::Let, false)
+            }
+            TokenKind::Using if self.starts_using_declaration(false) => {
+                self.parse_variable_declaration(true, VariableDeclarationKind::Using, false)
+            }
+            TokenKind::Await if self.starts_await_using_declaration(false) => {
+                self.parse_variable_declaration(true, VariableDeclarationKind::AwaitUsing, false)
             }
             TokenKind::Declare => self.parse_typescript_declare_or_expression_statement(),
             TokenKind::Type if self.options.language.is_typescript() => {
@@ -507,7 +565,10 @@ impl<'s> Parser<'s> {
         let mut body = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
             let before = self.current.start;
-            body.push(self.parse_statement()?.value());
+            body.push(
+                self.parse_statement_with_using_declaration_allowed(true)?
+                    .value(),
+            );
             if self.current.start == before {
                 self.bump();
             }
@@ -521,59 +582,156 @@ impl<'s> Parser<'s> {
     fn parse_variable_declaration(
         &mut self,
         consume_semicolon: bool,
+        kind: VariableDeclarationKind,
+        explicit_typescript_declare: bool,
     ) -> Result<ParsedNode, ParseError> {
         let keyword = self.take();
-        let (kind, binding_kind) = match keyword.kind {
-            TokenKind::Let => (1, BindingKind::Lexical),
-            TokenKind::Const => (2, BindingKind::Lexical),
-            _ => (0, BindingKind::Var),
-        };
+        let start = keyword.start;
+        if kind == VariableDeclarationKind::AwaitUsing {
+            self.expect(TokenKind::Using);
+        }
+        if kind.is_using() && self.reports_ecmascript_early_errors() {
+            if consume_semicolon && !self.using_declaration_allowed {
+                self.error(
+                    Self::token_span(keyword),
+                    "using declarations are not allowed in this statement context",
+                );
+            }
+            if kind == VariableDeclarationKind::AwaitUsing && !self.allows_statement_await() {
+                self.error(
+                    Self::token_span(keyword),
+                    "await using is only allowed in async functions or modules",
+                );
+            }
+        }
         let mut declarations = Vec::new();
         let mut end = keyword.end;
+        let mut has_initializer = false;
         loop {
-            let id = self.parse_binding_pattern(binding_kind)?;
-            let binding_is_identifier = self.last_node_tag == Some(NodeTag::IDENTIFIER);
-            let initializer = self.eat(TokenKind::Eq);
-            let init = if let Some(equals) = initializer {
-                let initializer_start = self.current.start;
-                let expression = self.parse_assignment_expression(true)?;
-                if self.reports_ambient_declaration_errors() {
-                    self.diagnose_ambient_variable_initializer(
-                        keyword.kind,
-                        id,
-                        binding_is_identifier,
-                        equals,
-                        Span::new(
-                            initializer_start,
-                            self.current.start.max(expression.span.end),
-                        ),
-                    );
-                }
-                expression.value()
-            } else {
-                self.tape.push_null()?
-            };
-            end = self.previous_end(end);
-            let declarator = self.node(
-                NodeTag::VARIABLE_DECLARATOR,
-                Span::new(id.span.start, end),
-                &[id.value(), init],
+            let (declarator, declarator_end, initialized) = self.parse_variable_declarator(
+                kind,
+                keyword.kind,
+                consume_semicolon,
+                explicit_typescript_declare,
+                end,
             )?;
-            declarations.push(declarator.value());
+            declarations.push(declarator);
+            end = declarator_end;
+            has_initializer |= initialized;
             if self.eat(TokenKind::Comma).is_none() {
                 break;
+            }
+        }
+        if kind.is_using()
+            && self.reports_ecmascript_early_errors()
+            && matches!(self.current.kind, TokenKind::In | TokenKind::Of)
+        {
+            if self.current.kind == TokenKind::In {
+                self.error(
+                    Span::new(start, end),
+                    "using declarations are not allowed in for-in statements",
+                );
+            }
+            if declarations.len() != 1 {
+                self.error(
+                    Span::new(start, end),
+                    "for-of using declarations require exactly one binding",
+                );
+            }
+            if has_initializer {
+                self.error(
+                    Span::new(start, end),
+                    "for-of using declarations cannot have an initializer",
+                );
             }
         }
         if consume_semicolon {
             end = self.consume_semicolon();
         }
         let declarations = self.tape.push_list(&declarations)?;
-        let kind = self.tape.push_u32(kind)?;
+        let kind = self.tape.push_u32(kind.tape_value())?;
         self.node(
             NodeTag::VARIABLE_DECLARATION,
-            Span::new(keyword.start, end),
+            Span::new(start, end),
             &[declarations, kind],
         )
+    }
+
+    fn parse_variable_declarator(
+        &mut self,
+        kind: VariableDeclarationKind,
+        keyword: TokenKind,
+        consume_semicolon: bool,
+        explicit_typescript_declare: bool,
+        fallback_end: u32,
+    ) -> Result<(ValueRef, u32, bool), ParseError> {
+        let binding_token = self.current;
+        let id = self.parse_binding_pattern(kind.binding_kind())?;
+        let binding_is_identifier = self.last_node_tag == Some(NodeTag::IDENTIFIER);
+        if kind.is_using() && self.reports_ecmascript_early_errors() && !binding_is_identifier {
+            self.error(id.span, "using declarations require an identifier binding");
+        }
+        if kind.is_using()
+            && self.reports_ecmascript_early_errors()
+            && binding_is_identifier
+            && self.identifier_name_matches(
+                Self::token_span(binding_token),
+                "let",
+                binding_token.flags.escaped(),
+            )
+        {
+            self.error(
+                Self::token_span(binding_token),
+                "let cannot be bound by a using declaration",
+            );
+        }
+        let initializer = self.eat(TokenKind::Eq);
+        let init = if let Some(equals) = initializer {
+            let initializer_start = self.current.start;
+            let expression =
+                self.parse_assignment_expression(consume_semicolon || !kind.is_using())?;
+            if self.reports_ambient_declaration_errors()
+                || explicit_typescript_declare && self.options.semantic_errors
+            {
+                self.diagnose_ambient_variable_initializer(
+                    keyword,
+                    id,
+                    binding_is_identifier,
+                    equals,
+                    Span::new(
+                        initializer_start,
+                        self.current.start.max(expression.span.end),
+                    ),
+                );
+            }
+            expression.value()
+        } else {
+            if kind.is_using()
+                && self.reports_ecmascript_early_errors()
+                && !matches!(self.current.kind, TokenKind::In | TokenKind::Of)
+            {
+                self.error(id.span, "using declarations require an initializer");
+            }
+            self.tape.push_null()?
+        };
+        let end = self.previous_end(fallback_end);
+        let declarator = self.node(
+            NodeTag::VARIABLE_DECLARATOR,
+            Span::new(id.span.start, end),
+            &[id.value(), init],
+        )?;
+        Ok((declarator.value(), end, initializer.is_some()))
+    }
+
+    fn parse_statement_with_using_declaration_allowed(
+        &mut self,
+        allowed: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let previous = self.using_declaration_allowed;
+        self.using_declaration_allowed = allowed;
+        let statement = self.parse_statement();
+        self.using_declaration_allowed = previous;
+        statement
     }
 
     fn in_ambient_declaration(&self) -> bool {
@@ -681,7 +839,10 @@ impl<'s> Parser<'s> {
     #[inline(never)]
     fn parse_typescript_declare_variable_declaration(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Declare).start;
-        let mut declaration = self.parse_variable_declaration(true)?;
+        let kind = self
+            .current_variable_declaration_kind(false)
+            .unwrap_or(VariableDeclarationKind::Var);
+        let mut declaration = self.parse_variable_declaration(true, kind, true)?;
         let span = Span::new(start, declaration.span.end);
         self.tape.retag_node_with_span(
             declaration.node,
@@ -1124,7 +1285,7 @@ impl<'s> Parser<'s> {
         if (self.context.grammar().strict() || has_use_strict)
             && let Some(span) = self.context.current_restricted_parameter_binding()
         {
-            self.error(span, "eval and arguments cannot be bound in strict mode");
+            self.error(span, "restricted identifier cannot be bound in strict mode");
         }
     }
 
@@ -1268,7 +1429,7 @@ impl<'s> Parser<'s> {
         if (self.context.grammar().strict() || has_use_strict)
             && let Some(span) = self.context.current_restricted_parameter_binding()
         {
-            self.error(span, "eval and arguments cannot be bound in strict mode");
+            self.error(span, "restricted identifier cannot be bound in strict mode");
         }
         if has_use_strict {
             self.context
@@ -1804,12 +1965,7 @@ impl<'s> Parser<'s> {
         let start = self.current.start;
         let static_token = self.eat(TokenKind::Static);
         if static_token.is_some() && self.current.kind == TokenKind::LeftBrace {
-            let block = self.parse_block_statement()?;
-            return self.node(
-                NodeTag::STATIC_BLOCK,
-                Span::new(start, block.span.end),
-                &[block.value()],
-            );
+            return self.parse_class_static_block(start);
         }
         let mut leading_key = None;
         let is_static = if let Some(token) = static_token {
@@ -1899,6 +2055,19 @@ impl<'s> Parser<'s> {
         )
     }
 
+    fn parse_class_static_block(&mut self, start: u32) -> Result<ParsedNode, ParseError> {
+        let previous = self.class_static_block_function_depth;
+        self.class_static_block_function_depth = Some(self.function_depth);
+        let block = self.parse_block_statement();
+        self.class_static_block_function_depth = previous;
+        let block = block?;
+        self.node(
+            NodeTag::STATIC_BLOCK,
+            Span::new(start, block.span.end),
+            &[block.value()],
+        )
+    }
+
     #[allow(clippy::too_many_lines)]
     fn parse_typescript_class_element(
         &mut self,
@@ -1945,12 +2114,7 @@ impl<'s> Parser<'s> {
                             "static blocks cannot have TypeScript modifiers",
                         );
                     }
-                    let block = self.parse_block_statement()?;
-                    return self.node(
-                        NodeTag::STATIC_BLOCK,
-                        Span::new(start, block.span.end),
-                        &[block.value()],
-                    );
+                    return self.parse_class_static_block(start);
                 }
                 if !has_member_follower {
                     leading_key = Some(self.identifier_from_span(Self::token_span(token))?);
@@ -2834,6 +2998,12 @@ impl<'s> Parser<'s> {
         )
     }
 
+    fn diagnose_exported_using_declaration(&mut self) {
+        if self.reports_ecmascript_early_errors() {
+            self.error(self.current_span(), "using declarations cannot be exported");
+        }
+    }
+
     // Export alternatives share state and recovery rules, so keeping the grammar branch local is
     // easier to audit than distributing it across helpers.
     #[allow(clippy::too_many_lines)]
@@ -3035,14 +3205,24 @@ impl<'s> Parser<'s> {
         }
 
         let declaration = match self.current.kind {
+            TokenKind::Using if self.starts_using_declaration(false) => {
+                self.diagnose_exported_using_declaration();
+                self.parse_variable_declaration(true, VariableDeclarationKind::Using, false)?
+            }
+            TokenKind::Await if self.starts_await_using_declaration(false) => {
+                self.diagnose_exported_using_declaration();
+                self.parse_variable_declaration(true, VariableDeclarationKind::AwaitUsing, false)?
+            }
             TokenKind::Const
                 if self.options.language.is_typescript() && self.followed_by_word("enum") =>
             {
                 self.parse_enum_declaration(true)?
             }
-            TokenKind::Var | TokenKind::Let | TokenKind::Const => {
-                self.parse_variable_declaration(true)?
-            }
+            TokenKind::Var | TokenKind::Let | TokenKind::Const => self.parse_variable_declaration(
+                true,
+                VariableDeclarationKind::from_token(self.current.kind),
+                false,
+            )?,
             TokenKind::Type if self.options.language.is_typescript() => {
                 self.parse_type_alias_declaration()?
             }
@@ -3133,9 +3313,10 @@ impl<'s> Parser<'s> {
         self.expect(TokenKind::LeftParen);
         let test = self.parse_expression(true)?;
         self.expect(TokenKind::RightParen);
-        let consequent = self.parse_statement()?;
+        let consequent = self.parse_statement_with_using_declaration_allowed(false)?;
         let alternate = if self.eat(TokenKind::Else).is_some() {
-            self.parse_statement()?.value()
+            self.parse_statement_with_using_declaration_allowed(false)?
+                .value()
         } else {
             self.tape.push_null()?
         };
@@ -3154,7 +3335,7 @@ impl<'s> Parser<'s> {
         self.expect(TokenKind::RightParen);
         self.context
             .push_label(None, LabelKind::Loop, Span::new(start, start));
-        let body = self.parse_statement()?;
+        let body = self.parse_statement_with_using_declaration_allowed(false)?;
         let _ = self.context.pop_label();
         self.node(
             NodeTag::WHILE_STATEMENT,
@@ -3167,7 +3348,7 @@ impl<'s> Parser<'s> {
         let start = self.take().start;
         self.context
             .push_label(None, LabelKind::Loop, Span::new(start, start));
-        let body = self.parse_statement()?;
+        let body = self.parse_statement_with_using_declaration_allowed(false)?;
         let _ = self.context.pop_label();
         self.expect(TokenKind::While);
         self.expect(TokenKind::LeftParen);
@@ -3184,8 +3365,17 @@ impl<'s> Parser<'s> {
     fn parse_for_statement(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.take().start;
         let asynchronous = self.eat(TokenKind::Await).is_some();
+        if asynchronous && self.reports_ecmascript_early_errors() && !self.allows_statement_await()
+        {
+            self.error(
+                Span::new(start, self.current.start),
+                "for await is only allowed in async functions or modules",
+            );
+        }
         self.expect(TokenKind::LeftParen);
-        let lexical_scope = matches!(self.current.kind, TokenKind::Let | TokenKind::Const);
+        let lexical_scope = self
+            .current_variable_declaration_kind(true)
+            .is_some_and(|kind| kind != VariableDeclarationKind::Var);
         if lexical_scope {
             self.context.enter_scope(ScopeKind::Block);
         }
@@ -3202,11 +3392,11 @@ impl<'s> Parser<'s> {
         asynchronous: bool,
     ) -> Result<ParsedNode, ParseError> {
         let mut expression_init = None;
-        let init = if matches!(
-            self.current.kind,
-            TokenKind::Var | TokenKind::Let | TokenKind::Const
-        ) {
-            self.parse_variable_declaration(false)?.value()
+        let expression_let_span = (self.current.kind == TokenKind::Let
+            && !self.current.flags.escaped())
+        .then(|| self.current_span());
+        let init = if let Some(kind) = self.current_variable_declaration_kind(true) {
+            self.parse_variable_declaration(false, kind, false)?.value()
         } else if self.current.kind == TokenKind::Semicolon {
             self.tape.push_null()?
         } else {
@@ -3216,6 +3406,7 @@ impl<'s> Parser<'s> {
         };
 
         if matches!(self.current.kind, TokenKind::In | TokenKind::Of) {
+            let expression_init_is_some = expression_init.is_some();
             if let Some(expression) = expression_init {
                 let assignment_target = self.last_assignment_target;
                 let pattern = self.retag_assignment_pattern(expression.node)?;
@@ -3228,11 +3419,24 @@ impl<'s> Parser<'s> {
                 }
             }
             let operator = self.take();
+            if expression_init_is_some
+                && operator.kind == TokenKind::Of
+                && self.reports_ecmascript_early_errors()
+                && let Some(span) = expression_let_span
+            {
+                self.error(span, "a for-of expression head cannot start with let");
+            }
+            if asynchronous && operator.kind == TokenKind::In {
+                self.error(
+                    Self::token_span(operator),
+                    "for await requires an of clause",
+                );
+            }
             let right = self.parse_expression(true)?;
             self.expect(TokenKind::RightParen);
             self.context
                 .push_label(None, LabelKind::Loop, Span::new(start, start));
-            let body = self.parse_statement()?;
+            let body = self.parse_statement_with_using_declaration_allowed(false)?;
             let _ = self.context.pop_label();
             let asynchronous = self.tape.push_bool(asynchronous)?;
             return self.node(
@@ -3243,6 +3447,13 @@ impl<'s> Parser<'s> {
                 },
                 Span::new(start, body.span.end),
                 &[init, right.value(), body.value(), asynchronous],
+            );
+        }
+
+        if asynchronous {
+            self.error(
+                Span::new(start, self.current.start),
+                "for await requires an of clause",
             );
         }
 
@@ -3261,7 +3472,7 @@ impl<'s> Parser<'s> {
         self.expect(TokenKind::RightParen);
         self.context
             .push_label(None, LabelKind::Loop, Span::new(start, start));
-        let body = self.parse_statement()?;
+        let body = self.parse_statement_with_using_declaration_allowed(false)?;
         let _ = self.context.pop_label();
         self.node(
             NodeTag::FOR_STATEMENT,
@@ -3296,7 +3507,10 @@ impl<'s> Parser<'s> {
                 self.current.kind,
                 TokenKind::Case | TokenKind::Default | TokenKind::RightBrace | TokenKind::Eof
             ) {
-                consequent.push(self.parse_statement()?.value());
+                consequent.push(
+                    self.parse_statement_with_using_declaration_allowed(false)?
+                        .value(),
+                );
             }
             let end = self.previous_end(case_start);
             let consequent = self.tape.push_list(&consequent)?;
@@ -3418,7 +3632,7 @@ impl<'s> Parser<'s> {
         self.expect(TokenKind::LeftParen);
         let object = self.parse_expression(true)?;
         self.expect(TokenKind::RightParen);
-        let body = self.parse_statement()?;
+        let body = self.parse_statement_with_using_declaration_allowed(false)?;
         self.node(
             NodeTag::WITH_STATEMENT,
             Span::new(start, body.span.end),
@@ -3457,7 +3671,7 @@ impl<'s> Parser<'s> {
                 LabelKind::Statement
             };
             self.context.push_label(name, kind, expression.span);
-            let body = self.parse_statement()?;
+            let body = self.parse_statement_with_using_declaration_allowed(false)?;
             let _ = self.context.pop_label();
             return self.node(
                 NodeTag::LABELED_STATEMENT,
@@ -3578,6 +3792,11 @@ impl<'s> Parser<'s> {
                 | AssignmentOperator::Nullish => AssignmentTargetPolicy::LogicalAssignment,
                 _ => AssignmentTargetPolicy::CompoundAssignment,
             };
+            if !self.reports_ecmascript_early_errors()
+                && self.last_node_tag == Some(NodeTag::AWAIT_EXPRESSION)
+            {
+                self.error(left.span, policy.diagnostic());
+            }
             self.validate_assignment_target(left.span, assignment_target, policy);
         }
         let right = self.parse_assignment_expression(allow_in)?;
@@ -3881,6 +4100,12 @@ impl<'s> Parser<'s> {
 
     fn parse_await_expression(&mut self) -> Result<ParsedNode, ParseError> {
         let token = self.take();
+        if self.reports_ecmascript_early_errors() && self.in_class_static_block_context() {
+            self.error(
+                Self::token_span(token),
+                "await expressions are not allowed in class static blocks",
+            );
+        }
         if self.reports_ecmascript_early_errors() && self.context.grammar().parameters() {
             self.error(
                 Self::token_span(token),
@@ -5384,8 +5609,11 @@ impl<'s> Parser<'s> {
         let token = self.take();
         let span = Self::token_span(token);
         let escaped = token.flags.escaped();
-        if !Self::is_identifier_name(token.kind) {
+        if !Self::is_identifier_name(token.kind) && token.kind != TokenKind::Yield {
             self.error(span, "expected a binding identifier");
+        }
+        if token.kind == TokenKind::Enum {
+            self.error(span, "reserved word cannot be used as a binding identifier");
         }
         let name_text = self
             .source
@@ -5394,7 +5622,8 @@ impl<'s> Parser<'s> {
         let await_reserved = self.context.grammar().async_function()
             || self.context.grammar().module()
             || self.context.grammar().class() && !self.context.grammar().function();
-        if self.reports_ecmascript_early_errors()
+        if token.kind != TokenKind::Enum
+            && self.reports_ecmascript_early_errors()
             && self.is_escaped_reserved_identifier(span, escaped)
         {
             self.error(span, "reserved word cannot be used as a binding identifier");
@@ -5411,7 +5640,8 @@ impl<'s> Parser<'s> {
         {
             self.error(span, "yield cannot be bound in a generator function");
         }
-        if self.context.grammar().strict()
+        if token.kind != TokenKind::Enum
+            && self.context.grammar().strict()
             && (matches!(name_text, "eval" | "arguments")
                 || self.is_strict_reserved_identifier(span, escaped))
         {
@@ -6988,7 +7218,10 @@ impl<'s> Parser<'s> {
         let mut body = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
             let before = self.current.start;
-            body.push(self.parse_statement()?.value());
+            body.push(
+                self.parse_statement_with_using_declaration_allowed(true)?
+                    .value(),
+            );
             if self.current.start == before {
                 self.bump();
             }
@@ -7416,6 +7649,97 @@ impl<'s> Parser<'s> {
             .is_some_and(|rest| rest.trim_start().starts_with(word))
     }
 
+    fn current_variable_declaration_kind(&self, for_head: bool) -> Option<VariableDeclarationKind> {
+        match self.current.kind {
+            TokenKind::Var | TokenKind::Const => {
+                Some(VariableDeclarationKind::from_token(self.current.kind))
+            }
+            TokenKind::Let if self.starts_let_declaration() => Some(VariableDeclarationKind::Let),
+            TokenKind::Using if self.starts_using_declaration(for_head) => {
+                Some(VariableDeclarationKind::Using)
+            }
+            TokenKind::Await if self.starts_await_using_declaration(for_head) => {
+                Some(VariableDeclarationKind::AwaitUsing)
+            }
+            _ => None,
+        }
+    }
+
+    fn allows_statement_await(&self) -> bool {
+        !self.in_class_static_block_context()
+            && (self.context.grammar().async_function()
+                || matches!(
+                    self.options.source_kind,
+                    SourceKind::Module | SourceKind::Unambiguous
+                ) && self.function_depth == 0
+                    && !self.context.in_type_scope())
+    }
+
+    const fn in_class_static_block_context(&self) -> bool {
+        matches!(self.class_static_block_function_depth, Some(depth) if depth == self.function_depth)
+    }
+
+    fn starts_let_declaration(&self) -> bool {
+        if self.current.kind != TokenKind::Let || self.current.flags.escaped() {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let binding = lookahead.next_token();
+        binding.kind == TokenKind::LeftBracket || Self::starts_using_binding(binding)
+    }
+
+    fn starts_using_declaration(&self, for_head: bool) -> bool {
+        if self.current.kind != TokenKind::Using || self.current.flags.escaped() {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let binding = lookahead.next_token();
+        if binding.flags.line_break_before() || !Self::starts_using_binding(binding) {
+            return false;
+        }
+        if for_head && binding.kind == TokenKind::Of && !binding.flags.escaped() {
+            return matches!(
+                lookahead.next_token().kind,
+                TokenKind::Eq | TokenKind::Colon | TokenKind::Semicolon
+            );
+        }
+        true
+    }
+
+    fn starts_await_using_declaration(&self, for_head: bool) -> bool {
+        if self.current.kind != TokenKind::Await || self.current.flags.escaped() {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let using = lookahead.next_token();
+        if using.kind != TokenKind::Using
+            || using.flags.line_break_before()
+            || using.flags.escaped()
+        {
+            return false;
+        }
+        let binding = lookahead.next_token();
+        if binding.flags.line_break_before() || !Self::starts_using_binding(binding) {
+            return false;
+        }
+        if for_head && binding.kind == TokenKind::Of && !binding.flags.escaped() {
+            return matches!(
+                lookahead.next_token().kind,
+                TokenKind::Of | TokenKind::Eq | TokenKind::Colon | TokenKind::Semicolon
+            );
+        }
+        true
+    }
+
+    fn starts_using_binding(token: Token) -> bool {
+        (!matches!(token.kind, TokenKind::In | TokenKind::Instanceof)
+            && Self::is_member_identifier_name(token.kind))
+            || token.kind == TokenKind::LeftBrace
+    }
+
     fn followed_by_token_without_line_break(&self, kind: TokenKind) -> bool {
         if self.current.flags.escaped() {
             return false;
@@ -7639,12 +7963,27 @@ impl<'s> Parser<'s> {
             TokenKind::Function => Some(TypeScriptDeclareDeclarationKind::Function {
                 asynchronous: false,
             }),
+            TokenKind::Using => {
+                let binding = lookahead.next_token();
+                (!binding.flags.line_break_before() && Self::starts_using_binding(binding))
+                    .then_some(TypeScriptDeclareDeclarationKind::Variable)
+            }
             TokenKind::Async => {
                 let function = lookahead.next_token();
                 (function.kind == TokenKind::Function
                     && !function.flags.line_break_before()
                     && !function.flags.escaped())
                 .then_some(TypeScriptDeclareDeclarationKind::Function { asynchronous: true })
+            }
+            TokenKind::Await => {
+                let using = lookahead.next_token();
+                let binding = lookahead.next_token();
+                (using.kind == TokenKind::Using
+                    && !using.flags.line_break_before()
+                    && !using.flags.escaped()
+                    && !binding.flags.line_break_before()
+                    && Self::starts_using_binding(binding))
+                .then_some(TypeScriptDeclareDeclarationKind::Variable)
             }
             TokenKind::Namespace => {
                 let name = lookahead.next_token();

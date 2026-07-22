@@ -2631,6 +2631,42 @@ describe("parse", () => {
     expect(source.slice(result.program.body[1].start, result.program.body[1].start + 6)).toBe("export");
   });
 
+  it("allows resource declarations in TypeScript namespace statement lists", () => {
+    const result = parse(
+      "namespace N { using first = acquire(); } module M { using second = acquire(); }",
+      { lang: "ts", semanticErrors: true, sourceType: "script" },
+    );
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      { body: { body: [{ type: "VariableDeclaration", kind: "using" }] } },
+      { body: { body: [{ type: "VariableDeclaration", kind: "using" }] } },
+    ]);
+
+    const ambient = parse("declare namespace N { using resource = acquire(); }", {
+      lang: "ts",
+      semanticErrors: true,
+      sourceType: "script",
+    });
+    expect(ambient.diagnostics).toContain("initializers are not allowed in ambient contexts");
+    expect(ambient.diagnostics).not.toContain(
+      "using declarations are not allowed in this statement context",
+    );
+
+    const invalidAwait = parse(
+      "export {}; namespace N { await using resource = acquire(); "
+        + "for await (using item of source) {} }",
+      { lang: "ts", semanticErrors: true, sourceType: "module" },
+    );
+    expect(invalidAwait.diagnostics.length).toBeGreaterThanOrEqual(2);
+
+    const asyncFunction = parse(
+      "export {}; namespace N { async function f() { await using resource = acquire(); "
+        + "for await (using item of source) {} } }",
+      { lang: "ts", semanticErrors: true, sourceType: "module" },
+    );
+    expect(asyncFunction.diagnostics).toEqual([]);
+  });
+
   it("materializes explicit ambient external modules and global augmentations", () => {
     const source = [
       "declare module \"package\" { import value from \"dependency\"; export { value } from \"dependency\"; }",
@@ -4011,5 +4047,139 @@ describe("parse", () => {
       typescriptJsCompatibility: true,
     });
     expect(typescriptJs.diagnostics).toEqual([]);
+  });
+
+  it("returns ESTree resource declarations without confusing contextual using expressions", () => {
+    const source = [
+      "using sync = acquire();",
+      "for (using item of items) {}",
+      "class ResourceOwner { async method() { await using item = acquire(); } }",
+      "async function consume() {",
+      "  await using asyncResource = acquire();",
+      "  for await (await using item of items) {}",
+      "}",
+    ].join("\n");
+    const result = parse(source, { range: true, semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[0]).toMatchObject({
+      type: "VariableDeclaration",
+      kind: "using",
+      declarations: [{ id: { name: "sync" }, init: { type: "CallExpression" } }],
+      range: [0, 23],
+    });
+    expect(result.program.body[1]).toMatchObject({
+      type: "ForOfStatement",
+      await: false,
+      left: { type: "VariableDeclaration", kind: "using" },
+    });
+    expect(result.program.body[3].body.body).toMatchObject([
+      { type: "VariableDeclaration", kind: "await using" },
+      {
+        type: "ForOfStatement",
+        await: true,
+        left: { type: "VariableDeclaration", kind: "await using" },
+      },
+    ]);
+
+    const expressions = parse(
+      "var using, value, key, object, Type, let; "
+        + "using; using(value); using[key] = value; using in object; "
+        + "let in object; let instanceof Type; for (let in object) {} "
+        + "async function f() { await using\nlet in object; }",
+      { semanticErrors: true, sourceType: "script" },
+    );
+    expect(expressions.diagnostics).toEqual([]);
+    expect(expressions.program.body).toContainEqual(
+      expect.objectContaining({
+        type: "ForInStatement",
+        left: expect.objectContaining({ name: "let" }),
+      }),
+    );
+  });
+
+  it("supports TypeScript resource modifiers and reports JavaScript early errors", () => {
+    const typescript = parse(
+      "declare using sync: Disposable; export await using asyncValue: AsyncDisposable = value;",
+      { lang: "ts", semanticErrors: false, sourceType: "module" },
+    );
+    expect(typescript.diagnostics).toEqual([]);
+    expect(typescript.program.body).toMatchObject([
+      { type: "VariableDeclaration", declare: true, kind: "using" },
+      {
+        type: "ExportNamedDeclaration",
+        declaration: { type: "VariableDeclaration", kind: "await using" },
+      },
+    ]);
+
+    for (
+      const [source, sourceType] of [
+        ["using resource = value;", "script"],
+        ["function f() { await using resource = value; }", "module"],
+        ["if (ready) using resource = value;", "module"],
+        ["switch (key) { case 0: using resource = value; }", "module"],
+        ["for (using resource in values) {}", "module"],
+        ["for (using resource = value of values) {}", "module"],
+        ["for (let.member of values) {}", "script"],
+        ["function f() { using enum = null; }", "module"],
+        ["async function f() { await using enum = null; }", "module"],
+        [
+          "async function outer() { class C { static { await using resource = acquire(); "
+          + "await using\nitem = source; "
+          + "for await (item of source) {} for await (using other of source) {} } } }",
+          "module",
+        ],
+        ["async function f() { for await (using resource = value;;) {} }", "module"],
+        ["function f() { for await (using resource of values) {} }", "module"],
+        ["export using resource = value;", "module"],
+      ]
+    ) {
+      const invalid = parse(source, { semanticErrors: true, sourceType });
+      expect(invalid.diagnostics, source).not.toEqual([]);
+      expect(invalid.panicked, source).toBe(false);
+    }
+
+    expect(
+      parse("using resource = value;", {
+        semanticErrors: true,
+        sourceType: "commonjs",
+      }).diagnostics,
+    ).toEqual([]);
+
+    const contextualYield = parse(
+      "function sync() { using yield = null; for (using yield of values) {} } "
+        + "async function asynchronous() { await using yield = null; }",
+      { semanticErrors: true, sourceType: "script" },
+    );
+    expect(contextualYield.diagnostics).toEqual([]);
+
+    for (
+      const source of [
+        "'use strict'; function f() { using yield = null; } function g(yield) {}",
+        "function f(yield) { 'use strict'; }",
+        "function* f() { using yield = null; }",
+      ]
+    ) {
+      expect(parse(source, { semanticErrors: true, sourceType: "script" }).diagnostics, source)
+        .not.toEqual([]);
+    }
+
+    for (
+      const source of [
+        "async function f() { for await (item in source) {} }",
+        "async function f() { for await (using item in source) {} }",
+      ]
+    ) {
+      expect(parse(source, { semanticErrors: false, sourceType: "module" }).diagnostics, source)
+        .not.toEqual([]);
+    }
+
+    const typescriptSemanticFree = parse(
+      "function f() { for await (item of source) {} "
+        + "for await (using resource of source) {} "
+        + "for await (await using asyncResource of source) {} }",
+      { lang: "ts", semanticErrors: false, sourceType: "script" },
+    );
+    expect(typescriptSemanticFree.diagnostics).toEqual([]);
   });
 });

@@ -693,7 +693,7 @@ impl<'s> ParserContext<'s> {
 
     pub(crate) fn current_restricted_parameter_binding(&self) -> Option<Span> {
         let scope = self.scopes.last()?;
-        ["eval", "arguments"].into_iter().find_map(|name| {
+        ["eval", "arguments", "yield"].into_iter().find_map(|name| {
             let binding = scope.value_bindings.get(name)?;
             (binding.kind == BindingKind::Parameter).then_some(binding.span)
         })
@@ -846,6 +846,15 @@ impl<'s> ParserContext<'s> {
 
     #[must_use]
     pub(crate) fn resolve_break(&self, name: Option<&str>) -> bool {
+        if let Some(name) = name {
+            let function_depth = self.function_depth();
+            return self
+                .labels
+                .iter()
+                .rev()
+                .take_while(|label| label.function_depth == function_depth)
+                .any(|label| label.name == Some(name));
+        }
         self.resolve_label(name, LabelKind::supports_break)
     }
 
@@ -1122,6 +1131,10 @@ mod tests {
         assert!(context.push_label(Some("outer"), LabelKind::Loop, Span::new(0, 5)));
         assert!(context.resolve_break(None));
         assert!(context.resolve_continue(Some("outer")));
+        assert!(context.push_label(Some("branch"), LabelKind::Statement, Span::new(6, 12)));
+        assert!(context.resolve_break(Some("branch")));
+        assert!(!context.resolve_continue(Some("branch")));
+        let _ = context.pop_label();
 
         context.enter_scope(ScopeKind::Function);
         assert!(!context.resolve_break(None));

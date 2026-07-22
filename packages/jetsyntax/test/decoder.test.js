@@ -1099,6 +1099,63 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes resource declaration kinds for ordinary and declared variables", () => {
+    const source = "using sync = value; declare await using asyncValue: Resource;";
+    const tape = new HandcraftedTape();
+    const syncId = tape.node(2, 6, 10, [tape.string("sync")]);
+    const syncDeclarator = tape.node(29, 6, 18, [
+      syncId,
+      tape.node(2, 13, 18, [
+        tape.string("value"),
+      ]),
+    ]);
+    const syncDeclaration = tape.node(28, 0, 19, [
+      tape.list([syncDeclarator]),
+      tape.integer(3),
+    ]);
+    const asyncId = tape.node(2, 40, 50, [tape.string("asyncValue")]);
+    const asyncDeclarator = tape.node(29, 40, 60, [asyncId, tape.null()]);
+    const asyncDeclaration = tape.node(575, 20, source.length, [
+      tape.list([asyncDeclarator]),
+      tape.integer(4),
+    ]);
+    const program = tape.node(1, 0, source.length, [
+      tape.list([syncDeclaration, asyncDeclaration]),
+      tape.integer(1),
+    ]);
+    const encoded = tape.finish(program);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(source, encoded).body).toMatchObject([
+        {
+          type: "VariableDeclaration",
+          kind: "using",
+          declarations: [{ id: { name: "sync" }, init: { name: "value" } }],
+        },
+        {
+          type: "VariableDeclaration",
+          kind: "await using",
+          declare: true,
+          declarations: [{ id: { name: "asyncValue" }, init: null }],
+        },
+      ]);
+    }
+  });
+
+  it("rejects resource declaration enum values outside the wire schema", () => {
+    for (const tag of [28, 575]) {
+      const tape = new HandcraftedTape();
+      const declaration = tape.node(tag, 0, 0, [tape.list([]), tape.integer(5)]);
+      const encoded = tape.finish(declaration);
+
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `JetSyntax node tag ${tag} has invalid enum value 5`,
+        );
+      }
+    }
+  });
+
   it("rejects malformed TypeScript declared-variable field counts", () => {
     for (const count of [1, 3]) {
       const tape = new HandcraftedTape();

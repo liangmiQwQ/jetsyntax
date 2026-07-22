@@ -1284,6 +1284,257 @@ fn parser_should_preserve_generic_tags_and_valid_template_escapes() {
     assert!(!tags.contains(&NodeTag::INVALID_TEMPLATE_ELEMENT));
 }
 
+/// Resource declarations reuse the lexical-declaration tape shape in every language mode and
+/// remain independent from async iteration in all four for-of combinations.
+#[test]
+fn parser_should_parse_explicit_resource_declarations_in_every_language_mode() {
+    let source = concat!(
+        "{ using first = acquire(), second = acquire(); }\n",
+        "for (using classic = acquire(); ready; advance()) {}\n",
+        "for (using syncResource of syncResources) {}\n",
+        "async function consume() {\n",
+        "  await using asyncResource = acquire();\n",
+        "  for (await using asyncDisposal of syncResources) {}\n",
+        "  for await (using syncDisposal of asyncResources) {}\n",
+        "  for await (await using bothAsync of asyncResources) {}\n",
+        "}\n",
+    );
+
+    for language in [
+        Language::JavaScript,
+        Language::JavaScriptJsx,
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                language,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse resource declarations");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:?}",
+            parsed.diagnostics
+        );
+        let tags = inspect_tape("resource declarations", &parsed).expect("valid resource tape");
+        assert_eq!(
+            tags.iter()
+                .filter(|&&tag| tag == NodeTag::VARIABLE_DECLARATION)
+                .count(),
+            7,
+            "{language:?}",
+        );
+    }
+}
+
+/// Contextual `using` lookahead must preserve existing identifier expressions while reporting
+/// resource-declaration placement, binding, and for-head early errors.
+#[test]
+fn parser_should_disambiguate_and_validate_resource_declarations() {
+    let expressions = GrammarCase::script(
+        "using expressions",
+        concat!(
+            "var using, value, index, object, Type, let;\n",
+            "using; using(value); using[index] = value;\n",
+            "using in object; using instanceof Type;\n",
+            "let in object; let instanceof Type; for (let in object) {}\n",
+            "using\nlet = value;\n",
+            "using: { break using; }\n",
+            "async function f() { await using[index]; await using\nlet in object; }\n",
+        ),
+        &[
+            NodeTag::LABELED_STATEMENT,
+            NodeTag::AWAIT_EXPRESSION,
+            NodeTag::FOR_IN_STATEMENT,
+        ],
+    );
+    let parsed = parse(expressions.source, expressions.options(true)).expect("parse expressions");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    inspect_tape(expressions.name, &parsed).expect("valid expression tape");
+
+    let contextual_yield = GrammarCase::script(
+        "contextual yield resource bindings",
+        concat!(
+            "function sync() { using yield = null; for (using yield of values) {} }\n",
+            "async function asynchronous() { await using yield = null; }\n",
+        ),
+        &[NodeTag::VARIABLE_DECLARATION, NodeTag::FOR_OF_STATEMENT],
+    );
+    let parsed = parse(contextual_yield.source, contextual_yield.options(true))
+        .expect("parse contextual yield resource bindings");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    inspect_tape(contextual_yield.name, &parsed).expect("valid contextual yield resource tape");
+
+    let invalid = [
+        GrammarCase::script(
+            "script top-level using",
+            "using resource = acquire();",
+            &[NodeTag::VARIABLE_DECLARATION],
+        ),
+        GrammarCase::module(
+            "sync await using",
+            "function f() { await using resource = acquire(); }",
+            &[NodeTag::VARIABLE_DECLARATION],
+        ),
+        GrammarCase::module(
+            "resource binding restrictions",
+            concat!(
+                "{ using missing; using { value } = source; using let = source; using enum = null; }",
+                "async function f() { await using enum = null; }",
+            ),
+            &[NodeTag::VARIABLE_DECLARATION],
+        ),
+        GrammarCase::module(
+            "resource for-head restrictions",
+            "for (using item in source) {} for (using item = value of source) {}",
+            &[NodeTag::FOR_IN_STATEMENT, NodeTag::FOR_OF_STATEMENT],
+        ),
+        GrammarCase::module(
+            "for await requires for-of",
+            "async function f() { for await (using item = value;;) {} }",
+            &[NodeTag::FOR_STATEMENT],
+        ),
+        GrammarCase::module(
+            "resource statement placement",
+            "if (ready) using item = value; switch (key) { case 0: using other = value; }",
+            &[NodeTag::IF_STATEMENT, NodeTag::SWITCH_STATEMENT],
+        ),
+        GrammarCase::module(
+            "exported resource declaration",
+            "export using item = value;",
+            &[NodeTag::EXPORT_NAMED_DECLARATION],
+        ),
+        GrammarCase::script(
+            "strict contextual yield resource binding",
+            "'use strict'; function f() { using yield = null; } function g(yield) {}",
+            &[NodeTag::VARIABLE_DECLARATION],
+        ),
+        GrammarCase::script(
+            "strict body contextual yield parameter binding",
+            "function f(yield) { 'use strict'; }",
+            &[NodeTag::FUNCTION_DECLARATION],
+        ),
+        GrammarCase::script(
+            "generator contextual yield resource binding",
+            "function* f() { using yield = null; }",
+            &[NodeTag::VARIABLE_DECLARATION],
+        ),
+    ];
+    assert_diagnostic_cases(&invalid, true);
+}
+
+#[test]
+fn parser_should_validate_for_await_grammar_and_contexts() {
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::module(
+                "for await requires an async or module context",
+                concat!(
+                    "function f() {",
+                    " for await (item of source) {} for await (using resource of source) {}",
+                    " for await (await using asyncResource of source) {}",
+                    "}",
+                ),
+                &[NodeTag::FOR_OF_STATEMENT],
+            ),
+            GrammarCase::script(
+                "for-of expression head cannot start with let",
+                "for (let.member of source) {} for (let().member of source) {} for (let``.member of source) {}",
+                &[NodeTag::FOR_OF_STATEMENT],
+            ),
+            GrammarCase::module(
+                "class static blocks do not inherit async statement context",
+                concat!(
+                    "async function outer() { class C { static {",
+                    " await using resource = acquire();",
+                    " await using\nitem = source;",
+                    " for await (item of source) {}",
+                    " for await (using other of source) {}",
+                    "} } }",
+                ),
+                &[NodeTag::VARIABLE_DECLARATION, NodeTag::FOR_OF_STATEMENT],
+            ),
+        ],
+        true,
+    );
+
+    for source in [
+        "async function f() { for await (item in source) {} }",
+        "async function f() { for await (using item in source) {} }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                semantic_errors: false,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover invalid for-await-in statement");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid for-await-in tape");
+    }
+
+    for source_kind in [SourceKind::Script, SourceKind::CommonJs] {
+        let parsed = parse(
+            "for await (item of source) {}",
+            ParseOptions {
+                source_kind,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover invalid top-level for-await statement");
+        assert!(!parsed.diagnostics.is_empty(), "{source_kind:?}");
+    }
+
+    let module_block = parse(
+        concat!(
+            "{ await using resource = acquire(); for await (using item of source) {} }",
+            "class C { async method() { await using resource = acquire();",
+            " for await (using item of source) {} } }",
+            "async function wrapper() { class AwaitKey { [await key]() {} } }",
+        ),
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse module-level await syntax in a nested block");
+    assert!(
+        module_block.diagnostics.is_empty(),
+        "{:?}",
+        module_block.diagnostics
+    );
+
+    let typescript_semantic_free = parse(
+        concat!(
+            "function f() {",
+            " for await (item of source) {}",
+            " for await (using resource of source) {}",
+            " for await (await using asyncResource of source) {}",
+            "}",
+        ),
+        ParseOptions {
+            language: Language::TypeScript,
+            source_kind: SourceKind::Script,
+            semantic_errors: false,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse TypeScript for-await contexts without semantic errors");
+    assert!(
+        typescript_semantic_free.diagnostics.is_empty(),
+        "{:?}",
+        typescript_semantic_free.diagnostics
+    );
+}
+
 /// Invalid literal flags are diagnosed while runtime `RegExp` arguments remain ordinary strings.
 ///
 /// Spec: regular-expression literal flag validation is a parse-time check, unlike construction.

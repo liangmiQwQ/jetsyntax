@@ -1944,6 +1944,84 @@ fn parses_explicit_declared_namespaces_with_nested_and_qualified_names() {
 }
 
 #[test]
+fn parses_resource_declarations_in_typescript_namespace_statement_lists() {
+    let parsed = parse(
+        "namespace N { using first = acquire(); } module M { using second = acquire(); }",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse namespace resource declarations");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid namespace resource tape");
+    assert_eq!(
+        node_fields(&parsed, NodeTag::VARIABLE_DECLARATION).count(),
+        2
+    );
+
+    let ambient = parse(
+        "declare namespace N { using resource = acquire(); }",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover ambient namespace resource declaration");
+    assert!(ambient.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "initializers are not allowed in ambient contexts"
+    }));
+    assert!(ambient.diagnostics.iter().all(|diagnostic| {
+        diagnostic.message != "using declarations are not allowed in this statement context"
+    }));
+
+    let invalid_await = parse(
+        concat!(
+            "export {}; namespace N {",
+            " await using resource = acquire();",
+            " for await (using item of source) {}",
+            "}",
+        ),
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover namespace await syntax");
+    assert!(
+        invalid_await.diagnostics.len() >= 2,
+        "{:#?}",
+        invalid_await.diagnostics
+    );
+
+    let async_function = parse(
+        concat!(
+            "export {}; namespace N { async function f() {",
+            " await using resource = acquire();",
+            " for await (using item of source) {}",
+            "} }",
+        ),
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse namespace async function resource declarations");
+    assert!(
+        async_function.diagnostics.is_empty(),
+        "{:#?}",
+        async_function.diagnostics
+    );
+}
+
+#[test]
 fn keeps_declared_namespaces_contextual_and_typescript_only() {
     for language in [
         Language::TypeScript,
