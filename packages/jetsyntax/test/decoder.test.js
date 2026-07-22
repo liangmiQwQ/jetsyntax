@@ -1270,6 +1270,51 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes ambient external-module and global kinds without changing tag 527", () => {
+    const externalSource = "declare module \"empty\";";
+    const externalTape = new HandcraftedTape();
+    const raw = externalTape.source(15, 22);
+    const id = externalTape.node(4, 15, 22, [raw, externalTape.integer(1)]);
+    const external = externalTape.node(527, 0, externalSource.length, [
+      id,
+      externalTape.null(),
+      externalTape.boolean(true),
+      externalTape.integer(1),
+    ]);
+    const encodedExternal = externalTape.finish(external);
+
+    const globalSource = "declare global {}";
+    const globalTape = new HandcraftedTape();
+    const globalId = globalTape.node(2, 8, 14, [globalTape.source(8, 14)]);
+    const body = globalTape.node(540, 15, globalSource.length, [globalTape.list([])]);
+    const global = globalTape.node(527, 0, globalSource.length, [
+      globalId,
+      body,
+      globalTape.boolean(true),
+      globalTape.integer(2),
+    ]);
+    const encodedGlobal = globalTape.finish(global);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(externalSource, encodedExternal, { range: true })).toMatchObject({
+        type: "TSModuleDeclaration",
+        id: { type: "Literal", value: "empty", raw: "\"empty\"" },
+        body: null,
+        declare: true,
+        kind: "module",
+        range: [0, externalSource.length],
+      });
+      expect(decode(globalSource, encodedGlobal, { range: true })).toMatchObject({
+        type: "TSModuleDeclaration",
+        id: { type: "Identifier", name: "global" },
+        body: { type: "TSModuleBlock", body: [] },
+        declare: true,
+        kind: "global",
+        range: [0, globalSource.length],
+      });
+    }
+  });
+
   it("omits an absent mapped type readonly modifier", () => {
     const tape = new HandcraftedTape();
     const aliasId = tape.node(2, 0, 0, [tape.string("Mapped")]);

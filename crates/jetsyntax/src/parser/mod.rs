@@ -170,6 +170,8 @@ enum TypeScriptDeclareDeclarationKind {
     Function { asynchronous: bool },
     Enum { is_const: bool },
     Namespace,
+    ExternalModule,
+    Global,
 }
 
 #[derive(Clone, Copy)]
@@ -481,7 +483,7 @@ impl<'s> Parser<'s> {
             let init = if let Some(equals) = initializer {
                 let initializer_start = self.current.start;
                 let expression = self.parse_assignment_expression(true)?;
-                if self.reports_ambient_namespace_errors() {
+                if self.reports_ambient_declaration_errors() {
                     self.diagnose_ambient_variable_initializer(
                         keyword.kind,
                         id,
@@ -520,12 +522,18 @@ impl<'s> Parser<'s> {
         )
     }
 
-    fn in_ambient_namespace(&self) -> bool {
+    fn in_ambient_declaration(&self) -> bool {
         self.context.grammar().ambient() && self.context.in_type_scope()
     }
 
-    fn reports_ambient_namespace_errors(&self) -> bool {
-        self.options.semantic_errors && self.in_ambient_namespace()
+    fn reports_ambient_declaration_errors(&self) -> bool {
+        self.options.semantic_errors && self.in_ambient_declaration()
+    }
+
+    fn reports_internal_namespace_errors(&self) -> bool {
+        self.options.semantic_errors
+            && self.context.grammar().ambient()
+            && self.context.in_internal_namespace_scope()
     }
 
     #[cold]
@@ -661,6 +669,10 @@ impl<'s> Parser<'s> {
             TypeScriptDeclareDeclarationKind::Namespace => {
                 self.parse_typescript_declare_namespace()
             }
+            TypeScriptDeclareDeclarationKind::ExternalModule => {
+                self.parse_typescript_declare_external_module()
+            }
+            TypeScriptDeclareDeclarationKind::Global => self.parse_typescript_declare_global(),
         }
     }
 
@@ -1401,7 +1413,8 @@ impl<'s> Parser<'s> {
             && !self.current.flags.escaped()
             && !self.implements_is_followed_by_class_body();
         let id = if Self::is_identifier_name(self.current.kind) && !anonymous_implements_clause {
-            self.parse_binding_identifier(BindingKind::Lexical)?.value()
+            let binding = self.context.class_declaration_binding_kind();
+            self.parse_binding_identifier(binding)?.value()
         } else {
             // Default exports are the only abstract declaration form that permits an anonymous class.
             if declaration && !allow_anonymous {
@@ -1761,7 +1774,7 @@ impl<'s> Parser<'s> {
                 let has_member_follower = self.typescript_modifier_has_class_member_follower(true);
                 let token = self.take();
                 if self.current.kind == TokenKind::LeftBrace {
-                    if self.reports_ambient_namespace_errors() {
+                    if self.reports_ambient_declaration_errors() {
                         self.error(
                             Self::token_span(token),
                             "static block implementations are not allowed in ambient contexts",
@@ -1921,7 +1934,7 @@ impl<'s> Parser<'s> {
         let initializer = self.eat(TokenKind::Eq);
         let has_initializer = initializer.is_some();
         if (has_type_annotation || !modifiers.readonly)
-            && self.reports_ambient_namespace_errors()
+            && self.reports_ambient_declaration_errors()
             && let Some(equals) = initializer
         {
             self.error(
@@ -2318,7 +2331,7 @@ impl<'s> Parser<'s> {
             false,
             Some(accessor),
             false,
-            if modifiers.r#abstract || self.in_ambient_namespace() {
+            if modifiers.r#abstract || self.in_ambient_declaration() {
                 MethodBodyPolicy::TypeScriptAbstractSignature
             } else {
                 MethodBodyPolicy::Block
@@ -2368,7 +2381,7 @@ impl<'s> Parser<'s> {
         span: Span,
         accessor: bool,
     ) {
-        if has_implementation && self.reports_ambient_namespace_errors() {
+        if has_implementation && self.reports_ambient_declaration_errors() {
             self.error(
                 span,
                 if accessor {
@@ -2411,7 +2424,10 @@ impl<'s> Parser<'s> {
             );
         }
         if let Some(type_only) = self.import_equals_type_only(self.current) {
-            if self.options.source_kind == SourceKind::Script && self.options.semantic_errors {
+            if self.options.source_kind == SourceKind::Script
+                && self.options.semantic_errors
+                && !self.context.in_external_module_scope()
+            {
                 self.error(
                     Span::new(start, start.saturating_add(6)),
                     "import declarations require module source type",
@@ -2419,7 +2435,7 @@ impl<'s> Parser<'s> {
             }
             return self.parse_import_equals_declaration(start, type_only);
         }
-        if self.context.in_type_scope() {
+        if self.context.in_internal_namespace_scope() {
             self.error(
                 Span::new(start, start.saturating_add(6)),
                 "import declarations in a namespace cannot reference a module",
@@ -2512,7 +2528,7 @@ impl<'s> Parser<'s> {
         };
         let module_reference = if external {
             let reference = self.parse_external_module_reference()?;
-            if self.context.in_type_scope() {
+            if self.context.in_internal_namespace_scope() {
                 self.error(
                     reference.span,
                     "import declarations in a namespace cannot reference a module",
@@ -2624,7 +2640,7 @@ impl<'s> Parser<'s> {
         }
         // Babel emits both TypeScript-only forms as standalone statements rather than ES export wrappers.
         if self.options.language.is_typescript() && self.eat(TokenKind::Eq).is_some() {
-            if self.reports_ambient_namespace_errors() {
+            if self.reports_internal_namespace_errors() {
                 self.error(
                     Span::new(start, start.saturating_add(6)),
                     "export assignments are not allowed in internal namespaces",
@@ -2642,7 +2658,7 @@ impl<'s> Parser<'s> {
             && self.current.kind == TokenKind::As
             && !self.current.flags.escaped()
         {
-            if self.reports_ambient_namespace_errors() {
+            if self.reports_internal_namespace_errors() {
                 self.error(
                     Span::new(start, start.saturating_add(6)),
                     "namespace export declarations are not allowed in internal namespaces",
@@ -2651,6 +2667,12 @@ impl<'s> Parser<'s> {
             self.bump();
             self.expect(TokenKind::Namespace);
             let id = self.parse_identifier()?;
+            if self.options.semantic_errors {
+                let name = self.source_text(id.span);
+                let _ = self
+                    .context
+                    .declare_binding(name, BindingKind::Var, id.span);
+            }
             let end = self.consume_semicolon();
             return self.node(
                 NodeTag::TS_NAMESPACE_EXPORT_DECLARATION,
@@ -2698,7 +2720,7 @@ impl<'s> Parser<'s> {
             );
         }
         if self.eat(TokenKind::Default).is_some() {
-            if self.reports_ambient_namespace_errors() {
+            if self.reports_internal_namespace_errors() {
                 self.error(
                     Span::new(start, start.saturating_add(6)),
                     "default exports are not allowed in internal namespaces",
@@ -2731,7 +2753,7 @@ impl<'s> Parser<'s> {
             );
         }
         if self.eat(TokenKind::Star).is_some() {
-            if self.reports_ambient_namespace_errors() {
+            if self.reports_internal_namespace_errors() {
                 self.error(
                     Span::new(start, start.saturating_add(6)),
                     "export-all declarations are not allowed in internal namespaces",
@@ -2783,7 +2805,7 @@ impl<'s> Parser<'s> {
             }
             self.expect(TokenKind::RightBrace);
             let source = if self.eat(TokenKind::From).is_some() {
-                if self.reports_ambient_namespace_errors() {
+                if self.reports_internal_namespace_errors() {
                     self.error(
                         Span::new(start, start.saturating_add(6)),
                         "re-exports are not allowed in internal namespaces",
@@ -5910,6 +5932,138 @@ impl<'s> Parser<'s> {
         declaration
     }
 
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_declare_external_module(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Declare).start;
+        if self.options.semantic_errors && !self.context.allows_ambient_declaration() {
+            self.error(
+                Span::new(start, start.saturating_add(7)),
+                "ambient module declarations are only allowed at the top level of a namespace or module",
+            );
+        }
+        let previous_grammar = self.context.grammar();
+        self.context
+            .set_grammar(previous_grammar.with_ambient(true).with_strict(false));
+        let declaration = self.parse_typescript_external_module_declaration(start);
+        self.context.set_grammar(previous_grammar);
+        declaration
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_declare_global(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Declare).start;
+        if self.options.semantic_errors && !self.context.allows_global_augmentation() {
+            self.error(
+                Span::new(start, start.saturating_add(7)),
+                "global augmentations are only allowed at the top level of a namespace or module",
+            );
+        }
+        let global = self.take();
+        let id = self.typescript_module_identifier_from_token(global)?;
+        let previous_grammar = self.context.grammar();
+        self.context
+            .set_grammar(previous_grammar.with_ambient(true).with_strict(false));
+        let body = self.parse_typescript_global_module_block();
+        self.context.set_grammar(previous_grammar);
+        let body = body?;
+        let declare = self.tape.push_bool(true)?;
+        let kind = self.tape.push_u32(2)?;
+        self.node(
+            NodeTag::TS_MODULE_DECLARATION,
+            Span::new(start, body.span.end),
+            &[id.value(), body.value(), declare, kind],
+        )
+    }
+
+    fn parse_typescript_global_module_block(&mut self) -> Result<ParsedNode, ParseError> {
+        if self.current.kind == TokenKind::LeftBrace {
+            return self.parse_typescript_module_block(ScopeKind::GlobalAugmentation);
+        }
+        let start = self.current.start;
+        self.error(
+            self.current_span(),
+            "global augmentation requires a module block",
+        );
+        let end = self.consume_semicolon();
+        let body = self.tape.push_list(&[])?;
+        self.node(NodeTag::TS_MODULE_BLOCK, Span::new(start, end), &[body])
+    }
+
+    fn parse_typescript_external_module_declaration(
+        &mut self,
+        start: u32,
+    ) -> Result<ParsedNode, ParseError> {
+        self.expect(TokenKind::Module);
+        let external_name = self.current.kind == TokenKind::String;
+        let mut id = if external_name {
+            Some(self.parse_literal()?)
+        } else if self.is_typescript_namespace_binding_identifier_syntax(self.current) {
+            if self.options.semantic_errors {
+                self.error(
+                    self.current_span(),
+                    "ambient external module name must be a string literal",
+                );
+            }
+            Some(self.parse_typescript_module_binding_identifier()?)
+        } else if matches!(self.current.kind, TokenKind::Number | TokenKind::BigInt) {
+            self.error(
+                self.current_span(),
+                "ambient module name must be a string literal or identifier",
+            );
+            Some(self.parse_literal()?)
+        } else {
+            self.error(
+                self.current_span(),
+                "ambient module name must be a string literal or identifier",
+            );
+            None
+        };
+        if !external_name && id.is_some() {
+            while self.eat(TokenKind::Dot).is_some() {
+                let right = self.parse_typescript_module_identifier_name()?;
+                let left = id.expect("ambient module identifier exists");
+                id = Some(self.node(
+                    NodeTag::TS_QUALIFIED_NAME,
+                    Span::new(left.span.start, right.span.end),
+                    &[left.value(), right.value()],
+                )?);
+            }
+        }
+
+        let (body, end) = if self.current.kind == TokenKind::LeftBrace {
+            let scope = if external_name {
+                ScopeKind::ExternalModule
+            } else {
+                ScopeKind::Type
+            };
+            let body = self.parse_typescript_module_block(scope)?;
+            let end = body.span.end;
+            (body.value(), end)
+        } else {
+            if !external_name {
+                self.error(
+                    self.current_span(),
+                    "ambient namespace declaration requires a body",
+                );
+            }
+            let end = self.consume_semicolon();
+            (self.tape.push_null()?, end)
+        };
+        let id = match id {
+            Some(id) => id.value(),
+            None => self.tape.push_null()?,
+        };
+        let declare = self.tape.push_bool(true)?;
+        let kind = self.tape.push_u32(1)?;
+        self.node(
+            NodeTag::TS_MODULE_DECLARATION,
+            Span::new(start, end),
+            &[id, body, declare, kind],
+        )
+    }
+
     fn parse_module_declaration_impl<const EXPLICIT_TYPESCRIPT_DECLARE: bool>(
         &mut self,
         declaration_start: u32,
@@ -5933,8 +6087,34 @@ impl<'s> Parser<'s> {
                 &[id.value(), right.value()],
             )?;
         }
+        let module_body = self.parse_typescript_module_block(ScopeKind::Type)?;
+        let end = module_body.span.end;
+        let declare = self.tape.push_bool(EXPLICIT_TYPESCRIPT_DECLARE)?;
+        let kind = self
+            .tape
+            .push_u32(u32::from(keyword.kind == TokenKind::Module))?;
+        self.node(
+            NodeTag::TS_MODULE_DECLARATION,
+            Span::new(start, end),
+            &[id.value(), module_body.value(), declare, kind],
+        )
+    }
+
+    fn parse_typescript_module_block(
+        &mut self,
+        scope: ScopeKind,
+    ) -> Result<ParsedNode, ParseError> {
         let block_start = self.expect(TokenKind::LeftBrace).start;
-        self.context.enter_scope(ScopeKind::Type);
+        self.context.enter_scope(scope);
+        let body = self.parse_typescript_module_block_contents(block_start);
+        let _ = self.context.leave_scope();
+        body
+    }
+
+    fn parse_typescript_module_block_contents(
+        &mut self,
+        block_start: u32,
+    ) -> Result<ParsedNode, ParseError> {
         let mut body = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
             let before = self.current.start;
@@ -5944,21 +6124,11 @@ impl<'s> Parser<'s> {
             }
         }
         let end = self.expect(TokenKind::RightBrace).end;
-        let _ = self.context.leave_scope();
         let body = self.tape.push_list(&body)?;
-        let module_body = self.node(
+        self.node(
             NodeTag::TS_MODULE_BLOCK,
             Span::new(block_start, end),
             &[body],
-        )?;
-        let declare = self.tape.push_bool(EXPLICIT_TYPESCRIPT_DECLARE)?;
-        let kind = self
-            .tape
-            .push_u32(u32::from(keyword.kind == TokenKind::Module))?;
-        self.node(
-            NodeTag::TS_MODULE_DECLARATION,
-            Span::new(start, end),
-            &[id.value(), module_body.value(), declare, kind],
         )
     }
 
@@ -6507,6 +6677,20 @@ impl<'s> Parser<'s> {
                 (!name.flags.line_break_before()
                     && self.is_typescript_namespace_binding_identifier_syntax(name))
                 .then_some(TypeScriptDeclareDeclarationKind::Namespace)
+            }
+            TokenKind::Module => {
+                let name = lookahead.next_token();
+                (!name.flags.line_break_before())
+                    .then_some(TypeScriptDeclareDeclarationKind::ExternalModule)
+            }
+            TokenKind::Identifier
+                if self.identifier_name_matches(
+                    Self::token_span(follower),
+                    "global",
+                    follower.flags.escaped(),
+                ) =>
+            {
+                Some(TypeScriptDeclareDeclarationKind::Global)
             }
             _ => None,
         }

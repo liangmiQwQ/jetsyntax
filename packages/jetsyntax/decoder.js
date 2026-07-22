@@ -266,7 +266,7 @@ const METHOD_KINDS = ["method", "get", "set", "constructor"];
 const IMPORT_EXPORT_KINDS = ["value", "type", "typeof"];
 const IMPORT_PHASES = ["source", "defer"];
 const SOURCE_TYPES = ["script", "module", "commonjs"];
-const TS_MODULE_KINDS = ["namespace", "module"];
+const TS_MODULE_KINDS = ["namespace", "module", "global"];
 const TS_CLASS_MEMBER_ACCESSIBILITIES = [undefined, "public", "protected", "private"];
 
 export function decodeTape(source, tape, options = {}) {

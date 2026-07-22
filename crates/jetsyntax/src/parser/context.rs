@@ -257,6 +257,8 @@ pub enum ScopeKind {
     Class,
     Catch,
     Type,
+    ExternalModule,
+    GlobalAugmentation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -269,6 +271,8 @@ pub enum BindingKind {
     Import,
     ImportEquals,
     Type,
+    AmbientClass,
+    AmbientClassFunction,
 }
 
 impl BindingKind {
@@ -284,6 +288,11 @@ impl BindingKind {
         matches!(self, Self::Var | Self::Function)
             && matches!(other, Self::Var | Self::Function | Self::Parameter)
             || matches!(self, Self::Parameter) && matches!(other, Self::Var | Self::Function)
+            || matches!(
+                (self, other),
+                (Self::AmbientClass, Self::Function) | (Self::Function, Self::AmbientClass)
+            )
+            || matches!((self, other), (Self::Function, Self::AmbientClassFunction))
             || matches!(
                 (self, other),
                 (Self::Var, Self::ImportEquals) | (Self::ImportEquals, Self::Var)
@@ -327,6 +336,10 @@ struct Scope<'s> {
     kind: ScopeKind,
     value_bindings: HashMap<&'s str, Binding>,
     type_bindings: HashMap<&'s str, Binding>,
+    // Most scopes never export. The indirection keeps the hot scope record small and allocates
+    // only for the program/module scopes that actually declare an export.
+    #[allow(clippy::box_collection)]
+    exports: Option<Box<HashMap<&'s str, Span>>>,
     private_names: HashMap<Cow<'s, str>, PrivateDeclaration>,
     private_uses: Vec<(Cow<'s, str>, Span)>,
 }
@@ -337,6 +350,7 @@ impl Scope<'_> {
             kind,
             value_bindings: HashMap::new(),
             type_bindings: HashMap::new(),
+            exports: None,
             private_names: HashMap::new(),
             private_uses: Vec::new(),
         }
@@ -397,6 +411,12 @@ enum Mutation<'s> {
         namespace: BindingNamespace,
         name: &'s str,
     },
+    BindingChanged {
+        scope: usize,
+        namespace: BindingNamespace,
+        name: &'s str,
+        previous: Binding,
+    },
     PrivateDeclared {
         scope: usize,
         name: Cow<'s, str>,
@@ -411,7 +431,10 @@ enum Mutation<'s> {
     },
     LabelPushed,
     LabelPopped(Label<'s>),
-    ExportDeclared(&'s str),
+    ExportDeclared {
+        scope: usize,
+        name: &'s str,
+    },
 }
 
 #[derive(Debug)]
@@ -419,7 +442,6 @@ pub struct ParserContext<'s> {
     grammar: GrammarContext,
     scopes: Vec<Scope<'s>>,
     labels: Vec<Label<'s>>,
-    exports: HashMap<&'s str, Span>,
     diagnostics: Vec<Diagnostic>,
     mutations: Vec<Mutation<'s>>,
     checkpoints: Vec<usize>,
@@ -427,12 +449,11 @@ pub struct ParserContext<'s> {
 
 impl<'s> ParserContext<'s> {
     #[must_use]
-    pub(crate) fn new(grammar: GrammarContext) -> Self {
+    pub(crate) const fn new(grammar: GrammarContext) -> Self {
         Self {
             grammar,
             scopes: Vec::new(),
             labels: Vec::new(),
-            exports: HashMap::new(),
             diagnostics: Vec::new(),
             mutations: Vec::new(),
             checkpoints: Vec::new(),
@@ -471,10 +492,21 @@ impl<'s> ParserContext<'s> {
         let target = if kind.is_var_scoped() {
             self.scopes
                 .iter()
-                .rposition(|scope| matches!(scope.kind, ScopeKind::Program | ScopeKind::Function))
+                .rposition(|scope| {
+                    matches!(
+                        scope.kind,
+                        ScopeKind::Program
+                            | ScopeKind::Function
+                            | ScopeKind::Type
+                            | ScopeKind::ExternalModule
+                    )
+                })
                 .unwrap_or(0)
         } else {
-            self.scopes.len() - 1
+            self.scopes
+                .iter()
+                .rposition(|scope| scope.kind != ScopeKind::GlobalAugmentation)
+                .unwrap_or(0)
         };
         let namespace = if kind.is_type() {
             BindingNamespace::Type
@@ -535,13 +567,13 @@ impl<'s> ParserContext<'s> {
             return false;
         }
 
+        if self.merge_existing_binding(target, namespace, name, kind) {
+            return true;
+        }
         let bindings = match namespace {
             BindingNamespace::Value => &mut self.scopes[target].value_bindings,
             BindingNamespace::Type => &mut self.scopes[target].type_bindings,
         };
-        if bindings.contains_key(name) {
-            return true;
-        }
         bindings.insert(name, Binding { kind, span });
         self.record(Mutation::BindingInserted {
             scope: target,
@@ -551,16 +583,93 @@ impl<'s> ParserContext<'s> {
         true
     }
 
+    fn merge_existing_binding(
+        &mut self,
+        target: usize,
+        namespace: BindingNamespace,
+        name: &'s str,
+        kind: BindingKind,
+    ) -> bool {
+        let bindings = match namespace {
+            BindingNamespace::Value => &mut self.scopes[target].value_bindings,
+            BindingNamespace::Type => &mut self.scopes[target].type_bindings,
+        };
+        let Some(previous) = bindings.get(name).copied() else {
+            return false;
+        };
+        if matches!(
+            (kind, previous.kind),
+            (BindingKind::AmbientClass, BindingKind::Function)
+                | (BindingKind::Function, BindingKind::AmbientClass)
+        ) {
+            bindings.insert(
+                name,
+                Binding {
+                    kind: BindingKind::AmbientClassFunction,
+                    span: previous.span,
+                },
+            );
+            self.record(Mutation::BindingChanged {
+                scope: target,
+                namespace,
+                name,
+                previous,
+            });
+        }
+        true
+    }
+
     pub(crate) fn in_type_scope(&self) -> bool {
+        self.scopes.iter().any(|scope| {
+            matches!(
+                scope.kind,
+                ScopeKind::Type | ScopeKind::ExternalModule | ScopeKind::GlobalAugmentation
+            )
+        })
+    }
+
+    pub(crate) fn in_internal_namespace_scope(&self) -> bool {
         self.scopes
             .iter()
-            .any(|scope| scope.kind == ScopeKind::Type)
+            .rev()
+            .find(|scope| {
+                matches!(
+                    scope.kind,
+                    ScopeKind::Type | ScopeKind::ExternalModule | ScopeKind::GlobalAugmentation
+                )
+            })
+            .is_some_and(|scope| scope.kind != ScopeKind::ExternalModule)
+    }
+
+    pub(crate) fn in_external_module_scope(&self) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .find(|scope| {
+                matches!(
+                    scope.kind,
+                    ScopeKind::Type | ScopeKind::ExternalModule | ScopeKind::GlobalAugmentation
+                )
+            })
+            .is_some_and(|scope| scope.kind == ScopeKind::ExternalModule)
     }
 
     pub(crate) fn allows_ambient_declaration(&self) -> bool {
-        self.scopes
-            .last()
-            .is_some_and(|scope| matches!(scope.kind, ScopeKind::Program | ScopeKind::Type))
+        self.scopes.last().is_some_and(|scope| {
+            matches!(
+                scope.kind,
+                ScopeKind::Program
+                    | ScopeKind::Type
+                    | ScopeKind::ExternalModule
+                    | ScopeKind::GlobalAugmentation
+            )
+        })
+    }
+
+    pub(crate) fn allows_global_augmentation(&self) -> bool {
+        self.scopes.last().is_some_and(|scope| {
+            matches!(scope.kind, ScopeKind::Program | ScopeKind::ExternalModule)
+        })
     }
 
     pub(crate) fn function_declaration_binding_kind(&self) -> BindingKind {
@@ -571,6 +680,14 @@ impl<'s> ParserContext<'s> {
             BindingKind::BlockFunction
         } else {
             BindingKind::Function
+        }
+    }
+
+    pub(crate) fn class_declaration_binding_kind(&self) -> BindingKind {
+        if self.grammar.ambient() && self.in_type_scope() {
+            BindingKind::AmbientClass
+        } else {
+            BindingKind::Lexical
         }
     }
 
@@ -738,15 +855,36 @@ impl<'s> ParserContext<'s> {
     }
 
     pub(crate) fn declare_export(&mut self, name: &'s str, span: Span) -> bool {
-        if let Some(previous) = self.exports.get(name).copied() {
+        let target = self
+            .scopes
+            .iter()
+            .rposition(|scope| {
+                matches!(
+                    scope.kind,
+                    ScopeKind::Program | ScopeKind::Type | ScopeKind::ExternalModule
+                )
+            })
+            .unwrap_or(0);
+        if let Some(previous) = self.scopes[target]
+            .exports
+            .as_deref()
+            .and_then(|exports| exports.get(name))
+            .copied()
+        {
             self.push_diagnostic(
                 Diagnostic::error(span, format!("duplicate export `{name}`"))
                     .with_related(previous),
             );
             return false;
         }
-        self.exports.insert(name, span);
-        self.record(Mutation::ExportDeclared(name));
+        self.scopes[target]
+            .exports
+            .get_or_insert_with(Default::default)
+            .insert(name, span);
+        self.record(Mutation::ExportDeclared {
+            scope: target,
+            name,
+        });
         true
     }
 
@@ -887,6 +1025,18 @@ impl<'s> ParserContext<'s> {
                 };
                 bindings.remove(name);
             }
+            Mutation::BindingChanged {
+                scope,
+                namespace,
+                name,
+                previous,
+            } => {
+                let bindings = match namespace {
+                    BindingNamespace::Value => &mut self.scopes[scope].value_bindings,
+                    BindingNamespace::Type => &mut self.scopes[scope].type_bindings,
+                };
+                bindings.insert(name, previous);
+            }
             Mutation::PrivateDeclared { scope, name } => {
                 self.scopes[scope].private_names.remove(name.as_ref());
             }
@@ -904,8 +1054,12 @@ impl<'s> ParserContext<'s> {
                 self.labels.pop();
             }
             Mutation::LabelPopped(label) => self.labels.push(label),
-            Mutation::ExportDeclared(name) => {
-                self.exports.remove(name);
+            Mutation::ExportDeclared { scope, name } => {
+                if let Some(target) = self.scopes.get_mut(scope)
+                    && let Some(exports) = target.exports.as_deref_mut()
+                {
+                    exports.remove(name);
+                }
             }
         }
     }
@@ -1050,6 +1204,19 @@ mod tests {
 
         assert!(context.declare_private(Cow::Borrowed("value"), Span::new(12, 17)));
         assert!(context.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rollback_restores_ambient_class_function_merge_state() {
+        let mut context = ParserContext::new(GrammarContext::default());
+        context.enter_scope(ScopeKind::Type);
+        assert!(context.declare_binding("C", BindingKind::Function, Span::new(0, 1)));
+        let checkpoint = context.checkpoint();
+        assert!(context.declare_binding("C", BindingKind::AmbientClass, Span::new(2, 3)));
+        context.rollback(checkpoint);
+
+        assert!(context.declare_binding("C", BindingKind::AmbientClass, Span::new(4, 5)));
+        assert!(!context.declare_binding("C", BindingKind::AmbientClass, Span::new(6, 7)));
     }
 
     #[test]

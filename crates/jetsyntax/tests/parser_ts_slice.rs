@@ -989,6 +989,302 @@ fn keeps_declared_namespaces_contextual_and_typescript_only() {
 }
 
 #[test]
+fn parses_explicit_ambient_external_modules_and_global_augmentations() {
+    let source = [
+        r#"declare module "pack\u0061ge" { import value from "dependency"; import Alias = require("dependency"); export = Alias; export as namespace Alias; export default Alias; export { Alias } from "dependency"; export * from "dependency"; namespace Nested {} }"#,
+        r#"declare module "empty";"#,
+        "declare global\n{ function eval(): void; let shared: number; }",
+        r#"export declare module "exported" {}"#,
+        "export declare global {}",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse ambient external modules and global augmentations");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid ambient module tape");
+    let modules = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_MODULE_DECLARATION,
+                span,
+                fields,
+                ..
+            } => Some((span, fields.to_vec())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(modules.len(), 6);
+    let shorthand = modules
+        .iter()
+        .find(|(span, _)| {
+            &source[span.start as usize..span.end as usize] == r#"declare module "empty";"#
+        })
+        .expect("shorthand ambient module");
+    assert!(matches!(
+        parsed.tape.value_at(shorthand.1[1]),
+        Ok(TapeValue::Null)
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(shorthand.1[3]),
+        Ok(TapeValue::U32(1))
+    ));
+    let globals = modules
+        .iter()
+        .filter(|(_, fields)| matches!(parsed.tape.value_at(fields[3]), Ok(TapeValue::U32(2))))
+        .count();
+    assert_eq!(globals, 2);
+    assert_eq!(
+        modules
+            .iter()
+            .filter(|(_, fields)| {
+                matches!(parsed.tape.value_at(fields[3]), Ok(TapeValue::U32(1)))
+            })
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn recovers_ambient_module_heads_without_broadening_contextual_syntax() {
+    let legacy = parse("declare module Legacy.Deep {}", typescript_options())
+        .expect("parse legacy ambient internal module");
+    assert!(legacy.diagnostics.is_empty(), "{:#?}", legacy.diagnostics);
+    let fields = first_node_fields(&legacy, NodeTag::TS_MODULE_DECLARATION);
+    assert!(matches!(
+        legacy.tape.value_at(fields[3]),
+        Ok(TapeValue::U32(1))
+    ));
+
+    let semantic_legacy = parse(
+        "declare module Legacy.Deep {}",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover a legacy ambient internal module in semantic mode");
+    assert_eq!(semantic_legacy.diagnostics.len(), 1);
+    assert_eq!(
+        semantic_legacy.diagnostics[0].message,
+        "ambient external module name must be a string literal"
+    );
+    for source in ["declare module 42 {}", "declare module {}"] {
+        let parsed = parse(source, typescript_options()).expect("recover invalid ambient module");
+        assert!(parsed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "ambient module name must be a string literal or identifier"
+        }));
+        let fields = first_node_fields(&parsed, NodeTag::TS_MODULE_DECLARATION);
+        assert!(matches!(
+            parsed.tape.value_at(fields[2]),
+            Ok(TapeValue::Bool(true))
+        ));
+        assert!(matches!(
+            parsed.tape.value_at(fields[3]),
+            Ok(TapeValue::U32(1))
+        ));
+        if source == "declare module {}" {
+            assert!(matches!(
+                parsed.tape.value_at(fields[0]),
+                Ok(TapeValue::Null)
+            ));
+        }
+    }
+
+    let bodyless_global =
+        parse("declare global;", typescript_options()).expect("recover bodyless global");
+    assert_eq!(bodyless_global.diagnostics.len(), 1);
+    assert_eq!(
+        bodyless_global.diagnostics[0].message,
+        "global augmentation requires a module block"
+    );
+    let fields = first_node_fields(&bodyless_global, NodeTag::TS_MODULE_DECLARATION);
+    assert!(matches!(
+        bodyless_global.tape.value_at(fields[3]),
+        Ok(TapeValue::U32(2))
+    ));
+
+    for source in [
+        "declare\nmodule \"split\" {}",
+        "declare module\n\"split\" {}",
+        "declar\\u0065 module \"escaped\" {}",
+        "declare mod\\u0075le \"escaped\" {}",
+        "declare gl\\u006fbal {}",
+        "global {}",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover contextual syntax");
+        assert!(
+            node_fields(&parsed, NodeTag::TS_MODULE_DECLARATION).all(|fields| {
+                !matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(true)))
+            }),
+            "{source}"
+        );
+    }
+
+    for options in [
+        ParseOptions::default(),
+        ParseOptions {
+            language: Language::JavaScriptJsx,
+            ..ParseOptions::default()
+        },
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    ] {
+        let parsed = parse(r#"declare module "excluded" {}"#, options)
+            .expect("recover excluded ambient module");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_MODULE_DECLARATION).count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn merges_ambient_call_and_constructor_overloads() {
+    let ambient_constructor_overloads = parse(
+        "declare namespace M { export function RegExp(pattern: string): RegExp; export class RegExp { constructor(pattern: string); } }",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse ambient call and constructor overloads");
+    assert!(
+        ambient_constructor_overloads.diagnostics.is_empty(),
+        "{:#?}",
+        ambient_constructor_overloads.diagnostics
+    );
+
+    for source in [
+        "declare namespace M { function C(): C; class C {} class C {} }",
+        "declare namespace M { class C {} function C(): C; class C {} }",
+    ] {
+        let duplicate = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("recover a duplicate ambient class around a function overload");
+        assert_eq!(duplicate.diagnostics.len(), 1, "{source}");
+        assert_eq!(duplicate.diagnostics[0].message, "duplicate binding `C`");
+    }
+}
+
+#[test]
+fn separates_external_module_semantics_from_internal_and_global_scopes() {
+    let external = parse(
+        r#"declare module "one" { import value from "dependency"; import Alias = require("dependency"); export = Alias; export as namespace Alias; export default Alias; export { value } from "dependency"; export * from "dependency"; let shared: number; } declare module "two" { import value from "dependency"; export { value } from "dependency"; let shared: number; }"#,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse isolated external module scopes");
+    assert!(
+        external.diagnostics.is_empty(),
+        "{:#?}",
+        external.diagnostics
+    );
+
+    let nested_internal = parse(
+        r#"declare module "outer" { namespace Inner { import value from "dependency"; export * from "dependency"; } }"#,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover external forms in a nested internal namespace");
+    assert_eq!(nested_internal.diagnostics.len(), 2);
+    assert!(nested_internal.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "import declarations in a namespace cannot reference a module"
+    }));
+    assert!(nested_internal.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "export-all declarations are not allowed in internal namespaces"
+    }));
+
+    let global_collision = parse(
+        "declare global { let shared: number; function implemented() {} class C { method() {} field = 1; } } let shared: number;",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover invalid global augmentation declarations");
+    for message in [
+        "duplicate binding `shared`",
+        "function implementations are not allowed in ambient contexts",
+        "class method implementations are not allowed in ambient contexts",
+        "class property initializers are not allowed in ambient contexts",
+    ] {
+        assert!(
+            global_collision
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == message),
+            "{message}: {:#?}",
+            global_collision.diagnostics
+        );
+    }
+
+    let nested_global = parse(
+        "declare global { declare global {} }",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover a nested global augmentation");
+    assert!(nested_global.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message
+            == "global augmentations are only allowed at the top level of a namespace or module"
+    }));
+
+    let namespace_export_collision = parse(
+        "export as namespace exportedGlobal; declare global { export let exportedGlobal; }",
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover a namespace export redeclared by a global augmentation");
+    assert_eq!(namespace_export_collision.diagnostics.len(), 1);
+    assert_eq!(
+        namespace_export_collision.diagnostics[0].message,
+        "duplicate binding `exportedGlobal`"
+    );
+
+    for prefix in [r#"declare module "ambient" {}"#, "declare global {}"] {
+        let parsed = parse(
+            &format!("{prefix} function eval() {{}}"),
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("restore strict grammar after an ambient module declaration");
+        assert!(!parsed.diagnostics.is_empty(), "{prefix}");
+    }
+}
+
+#[test]
 fn scopes_declared_namespace_semantics_and_strictness() {
     let semantic_free = parse(
         "\"use strict\"; namespace public {}",

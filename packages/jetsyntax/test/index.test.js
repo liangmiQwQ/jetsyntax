@@ -1673,6 +1673,149 @@ describe("parse", () => {
     expect(source.slice(result.program.body[1].start, result.program.body[1].start + 6)).toBe("export");
   });
 
+  it("materializes explicit ambient external modules and global augmentations", () => {
+    const source = [
+      "declare module \"package\" { import value from \"dependency\"; export { value } from \"dependency\"; }",
+      "declare module \"empty\";",
+      "declare global\n{ let shared: number; }",
+      "export declare module \"exported\" {}",
+      "export declare global {}",
+    ].join("\n");
+    const result = parse(source, {
+      lang: "ts",
+      sourceType: "module",
+      semanticErrors: true,
+      range: true,
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      {
+        type: "TSModuleDeclaration",
+        declare: true,
+        kind: "module",
+        id: { type: "Literal", value: "package", raw: "\"package\"" },
+        body: {
+          type: "TSModuleBlock",
+          body: [
+            { type: "ImportDeclaration" },
+            { type: "ExportNamedDeclaration", source: { value: "dependency" } },
+          ],
+        },
+      },
+      {
+        type: "TSModuleDeclaration",
+        declare: true,
+        kind: "module",
+        id: { value: "empty" },
+        body: null,
+      },
+      {
+        type: "TSModuleDeclaration",
+        declare: true,
+        kind: "global",
+        id: { type: "Identifier", name: "global" },
+        body: { type: "TSModuleBlock", body: [{ type: "VariableDeclaration" }] },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        declaration: { type: "TSModuleDeclaration", kind: "module", declare: true },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        declaration: { type: "TSModuleDeclaration", kind: "global", declare: true },
+      },
+    ]);
+    for (
+      const declaration of [
+        result.program.body[0],
+        result.program.body[1],
+        result.program.body[2],
+        result.program.body[3].declaration,
+        result.program.body[4].declaration,
+      ]
+    ) {
+      expect(declaration.range).toEqual([declaration.start, declaration.end]);
+    }
+  });
+
+  it("recovers ambient module heads and preserves scope-specific diagnostics", () => {
+    const semanticLegacy = parse("declare module Legacy.Deep {}", {
+      lang: "ts",
+      semanticErrors: true,
+    });
+    expect(semanticLegacy.program.body[0]).toMatchObject({
+      type: "TSModuleDeclaration",
+      kind: "module",
+      declare: true,
+      id: { type: "TSQualifiedName" },
+    });
+    expect(semanticLegacy.diagnostics).toEqual([
+      "ambient external module name must be a string literal",
+    ]);
+
+    for (const source of ["declare module 42 {}", "declare module {}"]) {
+      const result = parse(source, { lang: "ts" });
+      expect(result.program.body[0]).toMatchObject({
+        type: "TSModuleDeclaration",
+        kind: "module",
+        declare: true,
+      });
+      expect(result.diagnostics).toContain(
+        "ambient module name must be a string literal or identifier",
+      );
+      if (source === "declare module {}") {
+        expect(result.program.body[0].id).toBeNull();
+      }
+    }
+    const bodylessGlobal = parse("declare global;", { lang: "ts" });
+    expect(bodylessGlobal.program.body[0]).toMatchObject({
+      type: "TSModuleDeclaration",
+      kind: "global",
+      declare: true,
+    });
+    expect(bodylessGlobal.diagnostics).toEqual([
+      "global augmentation requires a module block",
+    ]);
+
+    const scoped = parse(
+      "declare module \"outer\" { import value from \"dependency\"; namespace Inner { import nested from \"dependency\"; export * from \"dependency\"; } } declare global { let shared: number; function implemented() {} class C { method() {} } } let shared: number; declare global { declare global {} }",
+      { lang: "ts", semanticErrors: true },
+    );
+    expect(scoped.diagnostics).toEqual(expect.arrayContaining([
+      "import declarations in a namespace cannot reference a module",
+      "export-all declarations are not allowed in internal namespaces",
+      "duplicate binding `shared`",
+      "function implementations are not allowed in ambient contexts",
+      "class method implementations are not allowed in ambient contexts",
+      "global augmentations are only allowed at the top level of a namespace or module",
+    ]));
+
+    const namespaceExportCollision = parse(
+      "export as namespace exportedGlobal; declare global { export let exportedGlobal; }",
+      { lang: "ts", sourceType: "module", semanticErrors: true },
+    );
+    expect(namespaceExportCollision.diagnostics).toEqual([
+      "duplicate binding `exportedGlobal`",
+    ]);
+
+    for (
+      const source of [
+        "declare\nmodule \"split\" {}",
+        "declare module\n\"split\" {}",
+        "declar\\u0065 module \"escaped\" {}",
+        "declare mod\\u0075le \"escaped\" {}",
+        "declare gl\\u006fbal {}",
+        "global {}",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts" });
+      expect(JSON.stringify(result.program), source).not.toContain("\"declare\":true");
+    }
+  });
+
   it("keeps explicit declared namespaces contextual and TypeScript-only", () => {
     for (const lang of ["ts", "tsx", "dts"]) {
       const result = parse("declare namespace Included {}", { lang });
