@@ -258,6 +258,8 @@ impl NodeTag {
     pub const TS_ABSTRACT_METHOD_DEFINITION: Self = Self(576);
     pub const TS_ABSTRACT_PROPERTY_DEFINITION: Self = Self(577);
     pub const TS_EXPLICIT_DECLARE_FUNCTION: Self = Self(578);
+    pub const TS_CALL_SIGNATURE_DECLARATION: Self = Self(579);
+    pub const TS_CONSTRUCT_SIGNATURE_DECLARATION: Self = Self(580);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {

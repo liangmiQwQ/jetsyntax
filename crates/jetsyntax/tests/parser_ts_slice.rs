@@ -91,6 +91,7 @@ fn parses_typescript_type_families_without_diagnostics() {
                 NodeTag::TS_TYPE_LITERAL,
                 NodeTag::TS_PROPERTY_SIGNATURE,
                 NodeTag::TS_METHOD_SIGNATURE,
+                NodeTag::TS_CONSTRUCT_SIGNATURE_DECLARATION,
             ][..],
         ),
     ];
@@ -251,6 +252,149 @@ fn preserves_readonly_type_member_names_and_modifiers() {
 }
 
 #[test]
+fn parses_call_and_construct_type_members() {
+    let source = [
+        "interface Signatures {",
+        "  (): void;",
+        "  <T>(value: T): T,",
+        "  new (): Service",
+        "  new<T>(value: T): Service<T>",
+        "}",
+        "type Literal = { (); new () }",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse signature type members");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid signature-member tape");
+    let call_tag = NodeTag::TS_CALL_SIGNATURE_DECLARATION;
+    let construct_tag = NodeTag::TS_CONSTRUCT_SIGNATURE_DECLARATION;
+    assert_eq!(call_tag.get(), 579);
+    assert_eq!(construct_tag.get(), 580);
+    let signatures = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag, span, fields, ..
+            } if tag == call_tag || tag == construct_tag => Some((tag, span, fields.to_vec())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        signatures
+            .iter()
+            .map(|(tag, span, _)| (*tag, &source[span.start as usize..span.end as usize]))
+            .collect::<Vec<_>>(),
+        [
+            (call_tag, "(): void"),
+            (call_tag, "<T>(value: T): T"),
+            (construct_tag, "new (): Service"),
+            (construct_tag, "new<T>(value: T): Service<T>"),
+            (call_tag, "()"),
+            (construct_tag, "new ()"),
+        ]
+    );
+    for (_, _, fields) in &signatures {
+        assert_eq!(fields.len(), 3);
+        assert!(matches!(
+            parsed.tape.value_at(fields[1]),
+            Ok(TapeValue::List { .. })
+        ));
+    }
+    assert!(matches!(
+        parsed.tape.value_at(signatures[0].2[0]),
+        Ok(TapeValue::Null)
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(signatures[1].2[0]),
+        Ok(TapeValue::Node {
+            tag: NodeTag::TS_TYPE_PARAMETER_DECLARATION,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(signatures[4].2[2]),
+        Ok(TapeValue::Null)
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(signatures[5].2[2]),
+        Ok(TapeValue::Null)
+    ));
+}
+
+#[test]
+fn distinguishes_construct_signatures_from_new_named_members() {
+    let construct_tag = NodeTag::TS_CONSTRUCT_SIGNATURE_DECLARATION;
+    let cases = [
+        ("interface I { new: Factory }", 0, 0, false),
+        ("interface I { new }", 0, 0, false),
+        ("interface I { new?(): Factory }", 0, 1, false),
+        ("interface I { \"new\"(): Factory }", 0, 1, false),
+        ("interface I { readonly new(): Factory }", 0, 1, true),
+        ("interface I { readonly method(): Factory }", 0, 1, true),
+        ("interface I { new\n(): Factory }", 1, 0, false),
+        ("interface I { new\n<T>(): Factory }", 1, 0, false),
+    ];
+
+    for (source, constructs, methods, diagnostic) in cases {
+        let parsed = parse(source, typescript_options()).expect("parse new type member");
+        assert_eq!(
+            parsed.diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("readonly cannot modify a method signature")),
+            diagnostic,
+            "{source}: {:#?}",
+            parsed.diagnostics,
+        );
+        parsed.tape.validate().expect("valid new-member tape");
+        assert_eq!(
+            node_fields(&parsed, construct_tag).count(),
+            constructs,
+            "{source}"
+        );
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_METHOD_SIGNATURE).count(),
+            methods,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn keeps_type_signature_members_gated_and_recovers_malformed_forms() {
+    for source in [
+        "interface I { <T(value: T): T }",
+        "interface I { (public value: number): void }",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover malformed signature");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid recovered tape");
+    }
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "interface I { (): void; new (): I }",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover TypeScript signatures in JavaScript");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_CALL_SIGNATURE_DECLARATION).count(),
+            0
+        );
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_CONSTRUCT_SIGNATURE_DECLARATION).count(),
+            0
+        );
+    }
+}
+
+#[test]
 fn keeps_same_line_and_unsupported_type_members_diagnostic() {
     let same_line = parse("interface Broken { first second }", typescript_options())
         .expect("recover a missing same-line separator");
@@ -270,7 +414,6 @@ fn keeps_same_line_and_unsupported_type_members_diagnostic() {
         "interface I { field = 1; }",
         "interface I { [computed]?; }",
         "interface I { [key: string]: number; }",
-        "interface I { (): void; }",
         "interface I { get value(): string; }",
     ] {
         let parsed = parse(source, typescript_options()).expect("recover unsupported type member");

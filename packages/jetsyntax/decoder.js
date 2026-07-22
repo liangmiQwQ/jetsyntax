@@ -195,6 +195,8 @@ for (
     [576, ["TSAbstractMethodDefinition", ["key", "value", "kind", "computed", "static"]]],
     [577, ["TSAbstractPropertyDefinition", ["key", "value", "computed", "static", "typeAnnotation"]]],
     [578, ["TSDeclareFunction", ["id", "params", "generator", "async", "returnType", "typeParameters", "body"]]],
+    [579, ["TSCallSignatureDeclaration", ["typeParameters", "params", "returnType"]]],
+    [580, ["TSConstructSignatureDeclaration", ["typeParameters", "params", "returnType"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -1128,6 +1130,12 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.accessibility = null;
         node.readonly = false;
         node.static = false;
+        return node;
+      case 579:
+      case 580:
+        node.typeParameters = fields[0];
+        node.params = array(fields[1], tag);
+        node.returnType = fields[2];
         return node;
       case 537:
         node.id = fields[0];

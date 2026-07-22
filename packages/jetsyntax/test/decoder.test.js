@@ -1022,6 +1022,45 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes TypeScript call and construct signature declarations", () => {
+    const tape = new HandcraftedTape();
+    const typeParameterName = tape.node(2, 0, 0, [tape.string("T")]);
+    const typeParameter = tape.node(534, 0, 0, [
+      typeParameterName,
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.null(),
+      tape.null(),
+    ]);
+    const typeParameters = tape.node(541, 0, 0, [tape.list([typeParameter])]);
+    const returnType = tape.node(512, 0, 0, [tape.node(548, 0, 0, [])]);
+    const call = tape.node(579, 0, 0, [typeParameters, tape.list([]), returnType]);
+    const construct = tape.node(580, 0, 0, [tape.null(), tape.list([]), tape.null()]);
+    const root = tape.node(1, 0, 0, [tape.list([call, construct]), tape.integer(1)]);
+    const encoded = tape.finish(root);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode("", encoded).body).toMatchObject([
+        {
+          type: "TSCallSignatureDeclaration",
+          typeParameters: {
+            type: "TSTypeParameterDeclaration",
+            params: [{ name: { name: "T" } }],
+          },
+          params: [],
+          returnType: { typeAnnotation: { type: "TSNumberKeyword" } },
+        },
+        {
+          type: "TSConstructSignatureDeclaration",
+          typeParameters: null,
+          params: [],
+          returnType: null,
+        },
+      ]);
+    }
+  });
+
   it("decodes compound TypeScript type and declaration records", () => {
     const tape = new HandcraftedTape();
     const aliasId = tape.node(2, 0, 0, [tape.string("Shape")]);

@@ -5719,14 +5719,34 @@ impl<'s> Parser<'s> {
 
     fn parse_type_member(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.current.start;
-        let readonly = self.current_typescript_modifier_matches(TokenKind::Readonly, "readonly")
-            && self.typescript_readonly_has_type_member_follower();
-        if readonly {
-            self.bump();
+        if matches!(self.current.kind, TokenKind::Lt | TokenKind::LeftParen) {
+            return self.parse_type_signature_member(start, NodeTag::TS_CALL_SIGNATURE_DECLARATION);
         }
-        let key = self.parse_type_member_key()?;
+
+        let readonly = (self.current_typescript_modifier_matches(TokenKind::Readonly, "readonly")
+            && self.typescript_readonly_has_type_member_follower())
+        .then(|| self.take());
+        let key = if readonly.is_none() && self.current.kind == TokenKind::New {
+            let token = self.take();
+            if matches!(self.current.kind, TokenKind::Lt | TokenKind::LeftParen) {
+                return self.parse_type_signature_member(
+                    start,
+                    NodeTag::TS_CONSTRUCT_SIGNATURE_DECLARATION,
+                );
+            }
+            let name = self.tape.push_source_slice(Self::token_span(token))?;
+            self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name])?
+        } else {
+            self.parse_type_member_key()?
+        };
         let optional = self.eat(TokenKind::Question);
         if matches!(self.current.kind, TokenKind::Lt | TokenKind::LeftParen) {
+            if let Some(token) = readonly {
+                self.error(
+                    Self::token_span(token),
+                    "readonly cannot modify a method signature",
+                );
+            }
             let type_parameters = if self.current.kind == TokenKind::Lt {
                 self.parse_type_parameters()?
             } else {
@@ -5766,11 +5786,31 @@ impl<'s> Parser<'s> {
         };
         let computed = self.tape.push_bool(false)?;
         let optional = self.tape.push_bool(optional.is_some())?;
-        let readonly = self.tape.push_bool(readonly)?;
+        let readonly = self.tape.push_bool(readonly.is_some())?;
         self.node(
             NodeTag::TS_PROPERTY_SIGNATURE,
             Span::new(start, end),
             &[key.value(), annotation, computed, optional, readonly],
+        )
+    }
+
+    fn parse_type_signature_member(
+        &mut self,
+        start: u32,
+        tag: NodeTag,
+    ) -> Result<ParsedNode, ParseError> {
+        let type_parameters = self.parse_type_parameters()?;
+        let (parameters, parameters_end) = self.parse_type_signature_parameters()?;
+        let (return_type, end) = if self.eat(TokenKind::Colon).is_some() {
+            let annotation = self.parse_type_annotation()?;
+            (annotation.value(), annotation.span.end)
+        } else {
+            (self.tape.push_null()?, parameters_end)
+        };
+        self.node(
+            tag,
+            Span::new(start, end),
+            &[type_parameters, parameters, return_type],
         )
     }
 

@@ -799,6 +799,71 @@ describe("parse", () => {
     ]);
   });
 
+  it("materializes TypeScript call and construct signatures", () => {
+    const source = [
+      "interface Callable {",
+      "  <T>(value: T): T;",
+      "  new (value: number): Service",
+      "}",
+      "type Literal = { (): void, new (): Service }",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[0].body.body).toMatchObject([
+      {
+        type: "TSCallSignatureDeclaration",
+        typeParameters: {
+          type: "TSTypeParameterDeclaration",
+          params: [{ name: { name: "T" } }],
+        },
+        params: [
+          {
+            type: "Identifier",
+            name: "value",
+            typeAnnotation: { typeAnnotation: { type: "TSTypeReference" } },
+          },
+        ],
+        returnType: { typeAnnotation: { type: "TSTypeReference" } },
+      },
+      {
+        type: "TSConstructSignatureDeclaration",
+        typeParameters: null,
+        params: [
+          {
+            type: "Identifier",
+            name: "value",
+            typeAnnotation: { typeAnnotation: { type: "TSNumberKeyword" } },
+          },
+        ],
+        returnType: { typeAnnotation: { type: "TSTypeReference" } },
+      },
+    ]);
+    expect(result.program.body[1].typeAnnotation.members).toMatchObject([
+      {
+        type: "TSCallSignatureDeclaration",
+        typeParameters: null,
+        params: [],
+        returnType: { typeAnnotation: { type: "TSVoidKeyword" } },
+      },
+      {
+        type: "TSConstructSignatureDeclaration",
+        typeParameters: null,
+        params: [],
+        returnType: { typeAnnotation: { type: "TSTypeReference" } },
+      },
+    ]);
+    for (
+      const signature of [
+        ...result.program.body[0].body.body,
+        ...result.program.body[1].typeAnnotation.members,
+      ]
+    ) {
+      expect(signature.range).toEqual([signature.start, signature.end]);
+      expect(source.slice(signature.start, signature.end)).not.toMatch(/[;,]$/u);
+    }
+  });
+
   it("keeps unsupported and JavaScript type-member forms diagnostic", () => {
     const sameLine = parse("interface Broken { first second }", { lang: "ts" });
     expect(sameLine.diagnostics.some(diagnostic => diagnostic.includes("type member separator")))
@@ -813,7 +878,6 @@ describe("parse", () => {
         "interface I { field = 1; }",
         "interface I { [computed]?; }",
         "interface I { [key: string]: number; }",
-        "interface I { (): void; }",
         "interface I { get value(): string; }",
       ]
     ) {
