@@ -745,6 +745,52 @@ describe("decodeTape", () => {
     ]);
   });
 
+  it("decodes phased import expression records", () => {
+    const source = "import.source('source'); import.defer('defer', options);";
+    const tape = new HandcraftedTape();
+    const sourceRaw = tape.string("'source'");
+    const stringKind = tape.integer(1);
+    const sourceLiteral = tape.node(4, 14, 22, [sourceRaw, stringKind]);
+    const noOptions = tape.null();
+    const sourcePhase = tape.integer(0);
+    const sourceImport = tape.node(74, 0, 23, [sourceLiteral, noOptions, sourcePhase]);
+    const sourceStatement = tape.node(5, 0, 24, [sourceImport]);
+
+    const deferRaw = tape.string("'defer'");
+    const deferLiteral = tape.node(4, 38, 45, [deferRaw, stringKind]);
+    const optionsName = tape.string("options");
+    const options = tape.node(2, 47, 54, [optionsName]);
+    const deferPhase = tape.integer(1);
+    const deferImport = tape.node(74, 25, 55, [deferLiteral, options, deferPhase]);
+    const deferStatement = tape.node(5, 25, 56, [deferImport]);
+    const body = tape.list([sourceStatement, deferStatement]);
+    const sourceType = tape.integer(1);
+    const program = tape.node(1, 0, source.length, [body, sourceType]);
+
+    expect(decodeTape(source, tape.finish(program)).body).toMatchObject([
+      { expression: { type: "ImportExpression", phase: "source", options: null } },
+      {
+        expression: {
+          type: "ImportExpression",
+          phase: "defer",
+          options: { type: "Identifier", name: "options" },
+        },
+      },
+    ]);
+  });
+
+  it("rejects invalid phased import expression records", () => {
+    const tape = new HandcraftedTape();
+    const source = tape.null();
+    const options = tape.null();
+    const invalidPhase = tape.integer(2);
+    const root = tape.node(74, 0, 0, [source, options, invalidPhase]);
+
+    expect(() => decodeTape("", tape.finish(root))).toThrow(
+      "JetSyntax node tag 74 has invalid enum value 2",
+    );
+  });
+
   it("bounds recovery patterns that temporarily wrap expression nodes", () => {
     const source = "value";
     const tape = new HandcraftedTape();

@@ -172,6 +172,7 @@ impl NodeTag {
     pub const SUPER: Self = Self(71);
     pub const PARENTHESIZED_EXPRESSION: Self = Self(72);
     pub const IMPORT_ATTRIBUTE: Self = Self(73);
+    pub const PHASE_IMPORT_EXPRESSION: Self = Self(74);
 
     pub const JSX_IDENTIFIER: Self = Self(256);
     pub const JSX_MEMBER_EXPRESSION: Self = Self(257);

@@ -661,6 +661,122 @@ fn parser_should_parse_statement_leading_dynamic_import_continuations() {
     );
 }
 
+/// Import-dot primary expressions keep their distinct grammar and postfix continuations.
+#[test]
+fn parser_should_parse_import_dot_primary_expressions() {
+    assert_clean_cases(&[
+        GrammarCase::module(
+            "metadata and phased imports",
+            "import.meta;\
+             function nested() { return import.source('source').then(use); }\
+             import.defer('defer', { with: { type: 'json' } })();\
+             import/* dot */./* phase */source('tag')``;",
+            &[
+                NodeTag::META_PROPERTY,
+                NodeTag::PHASE_IMPORT_EXPRESSION,
+                NodeTag::MEMBER_EXPRESSION,
+                NodeTag::CALL_EXPRESSION,
+                NodeTag::TAGGED_TEMPLATE_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
+            "phased imports in scripts",
+            "import.source('source'); import.defer('defer');",
+            &[NodeTag::PHASE_IMPORT_EXPRESSION],
+        ),
+        GrammarCase::module(
+            "ordinary and static import guards",
+            "import('dynamic'); import source from 'static';",
+            &[NodeTag::IMPORT_EXPRESSION, NodeTag::IMPORT_DECLARATION],
+        ),
+    ]);
+}
+
+/// Malformed import-dot forms recover without accepting escaped contextual names.
+#[test]
+fn parser_should_recover_malformed_import_dot_primary_expressions() {
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script(
+                "metadata in scripts",
+                "import.meta;",
+                &[NodeTag::META_PROPERTY],
+            ),
+            GrammarCase::module(
+                "unknown metadata property",
+                "import.unknown;",
+                &[NodeTag::META_PROPERTY],
+            ),
+            GrammarCase::module(
+                "escaped metadata property",
+                "import.m\\u0065ta;",
+                &[NodeTag::META_PROPERTY],
+            ),
+            GrammarCase::script(
+                "escaped phase name",
+                "import.sour\\u0063e('source');",
+                &[NodeTag::META_PROPERTY, NodeTag::CALL_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "missing phase call",
+                "typeof import.source;",
+                &[NodeTag::PHASE_IMPORT_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "missing phase argument",
+                "import.source();",
+                &[NodeTag::PHASE_IMPORT_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "extra phase argument",
+                "import.defer('source', {}, extra);",
+                &[NodeTag::PHASE_IMPORT_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "spread phase argument",
+                "import.source(...arguments);",
+                &[NodeTag::PHASE_IMPORT_EXPRESSION, NodeTag::SPREAD_ELEMENT],
+            ),
+            GrammarCase::module(
+                "static phase declarations remain excluded",
+                "import source binding from 'source'; import defer * as ns from 'defer';",
+                &[NodeTag::IMPORT_DECLARATION],
+            ),
+        ],
+        false,
+    );
+}
+
+/// Phased imports are never valid assignment, rest-binding, or direct `new` targets.
+#[test]
+fn parser_should_restrict_import_dot_early_error_positions() {
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script(
+                "phase assignment target",
+                "import.source('source') = value;",
+                &[NodeTag::PHASE_IMPORT_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "phase rest binding",
+                "function f(...import.defer('source')) {}",
+                &[NodeTag::REST_ELEMENT],
+            ),
+            GrammarCase::script(
+                "direct phase new callee",
+                "new import.source('source');",
+                &[NodeTag::NEW_EXPRESSION, NodeTag::PHASE_IMPORT_EXPRESSION],
+            ),
+            GrammarCase::script(
+                "direct phase new callee property",
+                "new import.defer('source').then;",
+                &[NodeTag::NEW_EXPRESSION, NodeTag::PHASE_IMPORT_EXPRESSION],
+            ),
+        ],
+        true,
+    );
+}
+
 /// Line terminators before `=>` stay invalid, and truncated bodies retain a recoverable tape.
 #[test]
 fn parser_should_recover_invalid_zero_parameter_arrow_functions() {

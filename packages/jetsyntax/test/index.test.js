@@ -219,6 +219,77 @@ describe("parse", () => {
     expect(malformed.program.type).toBe("Program");
   });
 
+  it("decodes import-dot primary expressions and their phase", () => {
+    const result = parse(
+      [
+        "import.meta;",
+        "import.source('source').then(use);",
+        "import.defer('defer', { with: { type: 'json' } })();",
+      ].join("\n"),
+      { sourceType: "module" },
+    );
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      {
+        expression: {
+          type: "MetaProperty",
+          meta: { type: "Identifier", name: "import" },
+          property: { type: "Identifier", name: "meta" },
+        },
+      },
+      {
+        expression: {
+          type: "CallExpression",
+          callee: {
+            type: "MemberExpression",
+            object: { type: "ImportExpression", phase: "source", options: null },
+          },
+        },
+      },
+      {
+        expression: {
+          type: "CallExpression",
+          callee: {
+            type: "ImportExpression",
+            phase: "defer",
+            source: { type: "Literal", value: "defer" },
+            options: { type: "ObjectExpression" },
+          },
+        },
+      },
+    ]);
+  });
+
+  it("recovers malformed import-dot forms with focused diagnostics", () => {
+    const malformed = parse(
+      [
+        "import.source();",
+        "import.defer('source', {}, extra);",
+        "import.source(...arguments);",
+        "new import.defer('source').then;",
+        "import.source('source') = value;",
+        "function f(...import.defer('source')) {}",
+      ].join("\n"),
+      { semanticErrors: true },
+    );
+    expect(malformed.diagnostics.length).toBeGreaterThanOrEqual(6);
+    expect(malformed.program.type).toBe("Program");
+
+    for (
+      const [source, options] of [
+        ["import.meta;", { sourceType: "script" }],
+        ["import.unknown;", { sourceType: "module" }],
+        ["import.m\\u0065ta;", { sourceType: "module" }],
+        ["import.sour\\u0063e('source');", { sourceType: "script" }],
+      ]
+    ) {
+      const result = parse(source, options);
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type, source).toBe("Program");
+    }
+  });
+
   it("diagnoses escaped reserved identifiers only in reference and binding positions", () => {
     for (
       const source of [

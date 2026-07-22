@@ -118,6 +118,7 @@ for (
     [70, ["ExportSpecifier", ["local", "exported"]]],
     [71, ["Super", []]],
     [72, ["ParenthesizedExpression", ["expression"]]],
+    [74, ["ImportExpression", ["source", "options", "phase"]]],
     [256, ["JSXIdentifier", ["name"]]],
     [259, ["JSXElement", ["openingElement", "closingElement", "children"]]],
     [261, ["JSXOpeningElement", ["name", "attributes", "selfClosing"]]],
@@ -249,6 +250,7 @@ const VARIABLE_KINDS = ["var", "let", "const"];
 const PROPERTY_KINDS = ["init", "get", "set"];
 const METHOD_KINDS = ["method", "get", "set", "constructor"];
 const IMPORT_EXPORT_KINDS = ["value", "type", "typeof"];
+const IMPORT_PHASES = ["source", "defer"];
 const SOURCE_TYPES = ["script", "module", "commonjs"];
 const TS_MODULE_KINDS = ["namespace", "module"];
 
@@ -1090,6 +1092,11 @@ function decodeTapeInternal(source, tape, options, trusted) {
       case 558:
         node.expression = fields[0];
         node.typeArguments = fields[1];
+        return node;
+      case 74:
+        node.source = fields[0];
+        node.options = fields[1];
+        node.phase = enumValue(IMPORT_PHASES, fields[2], tag);
         return node;
       default:
         throw new Error(`missing ESTree decoder for JetSyntax node tag ${tag}`);

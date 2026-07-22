@@ -150,6 +150,28 @@ impl AccessorKind {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ImportPhase {
+    Source,
+    Defer,
+}
+
+impl ImportPhase {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Defer => "defer",
+        }
+    }
+
+    const fn wire_value(self) -> u32 {
+        match self {
+            Self::Source => 0,
+            Self::Defer => 1,
+        }
+    }
+}
+
 struct ParsedParameterList {
     value: ValueRef,
     count: usize,
@@ -3012,13 +3034,8 @@ impl<'s> Parser<'s> {
                 &[meta.value(), property.value()],
             );
         }
-        let direct_import_call = if self.current.kind == TokenKind::Import {
-            let mut lookahead = Lexer::new(self.source);
-            lookahead.set_position(self.current.end as usize);
-            lookahead.next_token().kind == TokenKind::LeftParen
-        } else {
-            false
-        };
+        let direct_import_call =
+            self.current.kind == TokenKind::Import && self.import_starts_direct_call();
         let callee = self.parse_postfix_expression_until_call(true)?;
         if direct_import_call {
             self.error(
@@ -3043,8 +3060,34 @@ impl<'s> Parser<'s> {
     fn parse_import_expression_or_meta(&mut self) -> Result<ParsedNode, ParseError> {
         let import = self.take();
         if self.eat(TokenKind::Dot).is_some() {
+            let property_token = self.current;
+            let property_span = Self::token_span(property_token);
+            let property_name =
+                (!property_token.flags.escaped()).then(|| self.source_text(property_span));
+            let is_meta = property_name == Some("meta");
+            let phase = match property_name {
+                Some("source") => Some(ImportPhase::Source),
+                Some("defer") => Some(ImportPhase::Defer),
+                _ => None,
+            };
+            if let Some(phase) = phase {
+                self.bump();
+                return self.parse_phase_import_expression(import.start, property_span.end, phase);
+            }
+
             let property = self.parse_identifier()?;
             let meta = self.identifier_from_span(Self::token_span(import))?;
+            if !is_meta {
+                self.error(
+                    property.span,
+                    "the import meta-property must be `import.meta`",
+                );
+            } else if !matches!(
+                self.options.source_kind,
+                SourceKind::Module | SourceKind::Unambiguous
+            ) {
+                self.error(property.span, "import.meta is only allowed in modules");
+            }
             return self.node(
                 NodeTag::META_PROPERTY,
                 Span::new(import.start, property.span.end),
@@ -3063,6 +3106,84 @@ impl<'s> Parser<'s> {
             NodeTag::IMPORT_EXPRESSION,
             Span::new(import.start, end),
             &[source.value(), options],
+        )
+    }
+
+    fn parse_phase_import_expression(
+        &mut self,
+        start: u32,
+        property_end: u32,
+        phase: ImportPhase,
+    ) -> Result<ParsedNode, ParseError> {
+        if self.eat(TokenKind::LeftParen).is_none() {
+            self.error(
+                self.current_span(),
+                format!("`import.{}` must be called", phase.name()),
+            );
+            let source = self.tape.push_null()?;
+            let options = self.tape.push_null()?;
+            let phase = self.tape.push_u32(phase.wire_value())?;
+            return self.node(
+                NodeTag::PHASE_IMPORT_EXPRESSION,
+                Span::new(start, property_end),
+                &[source, options, phase],
+            );
+        }
+
+        let mut arguments = Vec::new();
+        let mut argument_count = 0_usize;
+        while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
+            let tape_checkpoint = self.tape.checkpoint();
+            let assignment_patterns = self.assignment_pattern_checkpoint();
+            let argument = if let Some(spread) = self.eat(TokenKind::Ellipsis) {
+                self.error(
+                    Self::token_span(spread),
+                    format!(
+                        "spread arguments are not allowed in `import.{}`",
+                        phase.name()
+                    ),
+                );
+                let argument = self.parse_assignment_expression(true)?;
+                self.node(NodeTag::SPREAD_ELEMENT, argument.span, &[argument.value()])?
+            } else {
+                self.parse_assignment_expression(true)?
+            };
+            argument_count += 1;
+            if arguments.len() < 2 {
+                arguments.push(argument.value());
+            } else {
+                self.tape.rollback(tape_checkpoint)?;
+                self.rollback_assignment_patterns(assignment_patterns);
+            }
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RightParen).end;
+        if !(1..=2).contains(&argument_count) {
+            self.error(
+                Span::new(start, end),
+                format!(
+                    "`import.{}` requires exactly one or two arguments",
+                    phase.name()
+                ),
+            );
+        }
+        let source = if let Some(&source) = arguments.first() {
+            source
+        } else {
+            self.tape.push_null()?
+        };
+        let options = if let Some(&options) = arguments.get(1) {
+            options
+        } else {
+            self.tape.push_null()?
+        };
+        let phase = self.tape.push_u32(phase.wire_value())?;
+        self.node(
+            NodeTag::PHASE_IMPORT_EXPRESSION,
+            Span::new(start, end),
+            &[source, options, phase],
         )
     }
 
@@ -4644,6 +4765,31 @@ impl<'s> Parser<'s> {
     fn import_starts_expression(&self) -> bool {
         let mut lookahead = Lexer::new(self.source);
         lookahead.set_position(self.current.end as usize);
+        matches!(
+            lookahead.next_token().kind,
+            TokenKind::LeftParen | TokenKind::Dot
+        )
+    }
+
+    fn import_starts_direct_call(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let punctuation = lookahead.next_token();
+        if punctuation.kind == TokenKind::LeftParen {
+            return true;
+        }
+        if punctuation.kind != TokenKind::Dot {
+            return false;
+        }
+        let property = lookahead.next_token();
+        if property.flags.escaped()
+            || !matches!(
+                self.source_text(Self::token_span(property)),
+                "source" | "defer"
+            )
+        {
+            return false;
+        }
         lookahead.next_token().kind == TokenKind::LeftParen
     }
 
