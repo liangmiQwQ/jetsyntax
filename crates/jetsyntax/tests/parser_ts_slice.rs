@@ -509,6 +509,198 @@ fn recovers_noncanonical_index_parameters_by_semantic_mode() {
 }
 
 #[test]
+fn parses_typescript_class_index_signatures_and_modifiers() {
+    let source = [
+        "class Dictionary {",
+        "  [key: string]: number;",
+        "  readonly [index: number]: string;",
+        "  static\n  [name: string]: unknown;",
+        "  static readonly [symbol: symbol]: boolean,",
+        "}",
+        "declare namespace N { class Ambient { [key: string]: number } }",
+        "class Generic<T> { [key: string]: T }",
+        "const Expression = class { [key: string]: unknown };",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse class index signatures");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid class-index tape");
+    let signatures = node_fields(&parsed, NodeTag::TS_INDEX_SIGNATURE).collect::<Vec<_>>();
+    assert_eq!(signatures.len(), 7);
+    let readonly = signatures
+        .iter()
+        .map(|fields| matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(true))))
+        .collect::<Vec<_>>();
+    let static_members = signatures
+        .iter()
+        .map(|fields| matches!(parsed.tape.value_at(fields[3]), Ok(TapeValue::Bool(true))))
+        .collect::<Vec<_>>();
+    assert_eq!(readonly, [false, true, false, true, false, false, false]);
+    assert_eq!(
+        static_members,
+        [false, false, true, true, false, false, false]
+    );
+}
+
+#[test]
+fn recovers_invalid_class_index_modifiers_by_semantic_mode() {
+    let invalid = [
+        "class Invalid extends Base {",
+        "  readonly static [order: string]: number;",
+        "  abstract [abstracted: string]: number;",
+        "  declare [declared: string]: number;",
+        "  private [privateKey: string]: number;",
+        "  override [overridden: string]: number;",
+        "  export [exported: string]: number;",
+        "  declare readonly [declaredReadonly: string]: number;",
+        "  export static readonly [exportedStatic: string]: number;",
+        "  export\n  [exportedLine: string]: number;",
+        "}",
+    ]
+    .join("\n");
+    let syntax = parse(&invalid, typescript_options()).expect("recover class index modifiers");
+    assert!(syntax.diagnostics.is_empty(), "{:#?}", syntax.diagnostics);
+    let flags = syntax
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_INDEX_SIGNATURE,
+                flags,
+                ..
+            } => Some(flags),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(flags, [0, 4, 8, 3, 16, 32, 8, 32, 32]);
+
+    let semantic = parse(
+        &invalid,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("diagnose class index modifiers");
+    for message in [
+        "TypeScript class member modifiers are out of order",
+        "class index signatures cannot have the abstract modifier",
+        "class index signatures cannot have the declare modifier",
+        "class index signatures cannot have an accessibility modifier",
+        "class index signatures cannot have the override modifier",
+        "class index signatures cannot have the export modifier",
+    ] {
+        assert!(
+            semantic
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == message),
+            "{message}: {:#?}",
+            semantic.diagnostics
+        );
+    }
+}
+
+#[test]
+fn distinguishes_class_index_signatures_from_computed_fields_and_javascript() {
+    let ambiguous = parse(
+        "class Computed { [plain]: number; [assigned = 0]: number; [x ? y : z]: number; readonly\n[line: string]: number; readonly [computed]: number; static [alsoComputed]: number }",
+        typescript_options(),
+    )
+    .expect("keep computed class fields distinct");
+    assert!(
+        ambiguous.diagnostics.is_empty(),
+        "{:#?}",
+        ambiguous.diagnostics
+    );
+    assert_eq!(
+        node_fields(&ambiguous, NodeTag::TS_INDEX_SIGNATURE).count(),
+        1
+    );
+
+    let modifier_boundaries = parse(
+        "class C { declare\n[plain: string]: number; declare r\\u0065adonly [escaped: string]: number; }",
+        typescript_options(),
+    )
+    .expect("preserve class index modifier boundaries");
+    assert!(
+        modifier_boundaries.diagnostics.is_empty(),
+        "{:#?}",
+        modifier_boundaries.diagnostics
+    );
+    assert_eq!(
+        node_fields(&modifier_boundaries, NodeTag::PROPERTY_DEFINITION).count(),
+        1
+    );
+    let signatures =
+        node_fields(&modifier_boundaries, NodeTag::TS_INDEX_SIGNATURE).collect::<Vec<_>>();
+    assert_eq!(signatures.len(), 2);
+    assert!(matches!(
+        modifier_boundaries.tape.value_at(signatures[0][2]),
+        Ok(TapeValue::Bool(false))
+    ));
+    assert!(matches!(
+        modifier_boundaries.tape.value_at(signatures[1][2]),
+        Ok(TapeValue::Bool(true))
+    ));
+    let flags = modifier_boundaries
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_INDEX_SIGNATURE,
+                flags,
+                ..
+            } => Some(flags),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(flags, [0, 8]);
+
+    for source in [
+        "async function f() { class C { [await: string]: number } }",
+        "function* f() { class C { [yield: string]: number } }",
+    ] {
+        let reserved = parse(source, typescript_options()).expect("recover reserved class index");
+        assert!(!reserved.diagnostics.is_empty(), "{source}");
+        assert_eq!(
+            node_fields(&reserved, NodeTag::TS_INDEX_SIGNATURE).count(),
+            0
+        );
+    }
+
+    let javascript = parse("class C { [key: string]: number }", ParseOptions::default())
+        .expect("recover class index syntax in JavaScript");
+    assert!(!javascript.diagnostics.is_empty());
+    assert_eq!(
+        node_fields(&javascript, NodeTag::TS_INDEX_SIGNATURE).count(),
+        0
+    );
+
+    let compatibility = parse(
+        "class C { [key: string]: number }",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse class index syntax in TypeScript JavaScript compatibility mode");
+    assert!(
+        compatibility.diagnostics.is_empty(),
+        "{:#?}",
+        compatibility.diagnostics
+    );
+    assert_eq!(
+        node_fields(&compatibility, NodeTag::TS_INDEX_SIGNATURE).count(),
+        1
+    );
+}
+
+#[test]
 fn parses_untyped_parameters_in_type_signatures() {
     let source = [
         "type Callback = (value, optional?) => void;",

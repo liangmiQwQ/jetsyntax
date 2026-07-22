@@ -252,6 +252,18 @@ impl TypeScriptModifiers {
         };
         accessibility | ((self.readonly as u8) << 2) | ((self.r#override as u8) << 3)
     }
+
+    const fn index_signature_flags(self, declare: bool, export: bool) -> u8 {
+        let accessibility = match self.accessibility {
+            Some(accessibility) => accessibility.wire_value(),
+            None => 0,
+        };
+        accessibility
+            | ((self.r#abstract as u8) << 2)
+            | ((declare as u8) << 3)
+            | ((self.r#override as u8) << 4)
+            | ((export as u8) << 5)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -259,6 +271,19 @@ struct TypeScriptClassMemberContext {
     modifiers: TypeScriptModifiers,
     class_abstract: bool,
     class_has_super: bool,
+}
+
+#[derive(Clone, Copy)]
+enum TypeScriptIndexSignatureContext {
+    TypeMember {
+        readonly: bool,
+        in_interface: bool,
+    },
+    ClassMember {
+        readonly: bool,
+        static_member: bool,
+        flags: u8,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -1756,6 +1781,8 @@ impl<'s> Parser<'s> {
         let mut last_modifier_rank = None;
         let mut leading_key = None;
         let mut is_static = false;
+        let mut index_declare = false;
+        let mut index_export = false;
 
         // Parse the contextual TypeScript prelude without stealing modifier-shaped member names.
         loop {
@@ -1860,6 +1887,32 @@ impl<'s> Parser<'s> {
                 modifiers.readonly = true;
                 continue;
             }
+            if self.current_typescript_modifier_matches(TokenKind::Declare, "declare")
+                && self.typescript_modifier_precedes_class_index_signature(false, is_static)
+            {
+                let token = self.take();
+                if index_declare && self.options.semantic_errors {
+                    self.error(
+                        Self::token_span(token),
+                        "duplicate TypeScript class member modifier",
+                    );
+                }
+                index_declare = true;
+                continue;
+            }
+            if self.current_typescript_modifier_matches(TokenKind::Export, "export")
+                && self.typescript_modifier_precedes_class_index_signature(true, is_static)
+            {
+                let token = self.take();
+                if index_export && self.options.semantic_errors {
+                    self.error(
+                        Self::token_span(token),
+                        "duplicate TypeScript class member modifier",
+                    );
+                }
+                index_export = true;
+                continue;
+            }
             break;
         }
         let member_context = TypeScriptClassMemberContext {
@@ -1867,6 +1920,28 @@ impl<'s> Parser<'s> {
             class_abstract,
             class_has_super,
         };
+
+        if leading_key.is_none()
+            && self.current.kind == TokenKind::LeftBracket
+            && self.looks_like_index_signature(true)
+        {
+            let flags = modifiers.index_signature_flags(index_declare, index_export);
+            let signature = self.parse_index_signature(
+                start,
+                TypeScriptIndexSignatureContext::ClassMember {
+                    readonly: modifiers.readonly,
+                    static_member: is_static,
+                    flags,
+                },
+            )?;
+            self.diagnose_typescript_class_index_signature_modifiers(
+                modifiers,
+                index_declare,
+                index_export,
+                signature.span,
+            );
+            return Ok(signature);
+        }
 
         // Resolve contextual accessor and async introducers before parsing the property name.
         if leading_key.is_none()
@@ -5750,7 +5825,13 @@ impl<'s> Parser<'s> {
         if self.current.kind == TokenKind::LeftBracket
             && (readonly.is_some() || self.looks_like_index_signature(in_interface))
         {
-            return self.parse_index_signature(start, readonly.is_some(), in_interface);
+            return self.parse_index_signature(
+                start,
+                TypeScriptIndexSignatureContext::TypeMember {
+                    readonly: readonly.is_some(),
+                    in_interface,
+                },
+            );
         }
         let key = if readonly.is_none() && self.current.kind == TokenKind::New {
             let token = self.take();
@@ -5843,14 +5924,28 @@ impl<'s> Parser<'s> {
     fn parse_index_signature(
         &mut self,
         start: u32,
-        readonly: bool,
-        in_interface: bool,
+        context: TypeScriptIndexSignatureContext,
     ) -> Result<ParsedNode, ParseError> {
+        let (readonly, static_member, restricted_parameter_names, flags, class_member) =
+            match context {
+                TypeScriptIndexSignatureContext::TypeMember {
+                    readonly,
+                    in_interface,
+                } => (readonly, false, in_interface, 0, false),
+                TypeScriptIndexSignatureContext::ClassMember {
+                    readonly,
+                    static_member,
+                    flags,
+                } => (readonly, static_member, true, flags, true),
+            };
         let left_bracket = self.expect(TokenKind::LeftBracket);
         let mut parameters = Vec::new();
         let mut trailing_comma = None;
         while !matches!(self.current.kind, TokenKind::RightBracket | TokenKind::Eof) {
-            parameters.push(self.parse_index_signature_parameter(in_interface)?.value());
+            parameters.push(
+                self.parse_index_signature_parameter(restricted_parameter_names)?
+                    .value(),
+            );
             let Some(comma) = self.eat(TokenKind::Comma) else {
                 break;
             };
@@ -5874,20 +5969,36 @@ impl<'s> Parser<'s> {
                 );
             }
         }
-        let (type_annotation, end) = if self.eat(TokenKind::Colon).is_some() {
+        let (type_annotation, mut end) = if self.eat(TokenKind::Colon).is_some() {
             let annotation = self.parse_type_annotation()?;
             (annotation.value(), annotation.span.end)
         } else {
             (self.tape.push_null()?, bracket_end)
         };
+        if class_member {
+            if matches!(self.current.kind, TokenKind::Semicolon | TokenKind::Comma) {
+                end = self.take().end;
+            } else if self.current.kind != TokenKind::RightBrace
+                && self.current.kind != TokenKind::Eof
+                && !self.current.flags.line_break_before()
+            {
+                self.error(self.current_span(), "expected a semicolon or line break");
+            }
+        }
         let parameters = self.tape.push_list(&parameters)?;
         let readonly = self.tape.push_bool(readonly)?;
-        let static_member = self.tape.push_bool(false)?;
-        self.node(
-            NodeTag::TS_INDEX_SIGNATURE,
-            Span::new(start, end),
+        let static_member = self.tape.push_bool(static_member)?;
+        let tag = NodeTag::TS_INDEX_SIGNATURE;
+        let span = Span::new(start, end);
+        let node = self.tape.push_node(
+            tag,
+            span,
+            flags,
             &[parameters, type_annotation, readonly, static_member],
-        )
+        )?;
+        self.last_node_tag = Some(tag);
+        self.last_assignment_target = AssignmentTargetType::Invalid;
+        Ok(ParsedNode { node, span })
     }
 
     fn parse_index_signature_parameter(
@@ -7192,6 +7303,50 @@ impl<'s> Parser<'s> {
             ) || Self::is_property_name_start(follower.kind, true))
     }
 
+    fn typescript_modifier_precedes_class_index_signature(
+        &self,
+        mut allow_line_break: bool,
+        mut static_seen: bool,
+    ) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        loop {
+            let follower = lookahead.next_token();
+            if !allow_line_break && follower.flags.line_break_before() {
+                return false;
+            }
+            if follower.kind == TokenKind::LeftBracket {
+                return self.lexer_is_at_index_signature_parameter(&mut lookahead, true);
+            }
+
+            let span = Self::token_span(follower);
+            let escaped = follower.kind == TokenKind::Identifier && follower.flags.escaped();
+            let modifier_matches = |kind, name| {
+                follower.kind == kind || escaped && self.identifier_name_matches(span, name, true)
+            };
+            if modifier_matches(TokenKind::Static, "static") {
+                if static_seen {
+                    return false;
+                }
+                static_seen = true;
+                allow_line_break = true;
+            } else if modifier_matches(TokenKind::Export, "export") {
+                allow_line_break = true;
+            } else if modifier_matches(TokenKind::Public, "public")
+                || modifier_matches(TokenKind::Protected, "protected")
+                || modifier_matches(TokenKind::Private, "private")
+                || modifier_matches(TokenKind::Abstract, "abstract")
+                || modifier_matches(TokenKind::Override, "override")
+                || modifier_matches(TokenKind::Readonly, "readonly")
+                || modifier_matches(TokenKind::Declare, "declare")
+            {
+                allow_line_break = false;
+            } else {
+                return false;
+            }
+        }
+    }
+
     fn diagnose_typescript_modifier_order(
         &mut self,
         rank: u8,
@@ -7240,6 +7395,48 @@ impl<'s> Parser<'s> {
             self.error(
                 key_span,
                 "private class elements cannot have an accessibility modifier",
+            );
+        }
+    }
+
+    fn diagnose_typescript_class_index_signature_modifiers(
+        &mut self,
+        modifiers: TypeScriptModifiers,
+        declare: bool,
+        export: bool,
+        span: Span,
+    ) {
+        if !self.options.semantic_errors {
+            return;
+        }
+        if modifiers.accessibility.is_some() {
+            self.error(
+                span,
+                "class index signatures cannot have an accessibility modifier",
+            );
+        }
+        if modifiers.r#abstract {
+            self.error(
+                span,
+                "class index signatures cannot have the abstract modifier",
+            );
+        }
+        if declare {
+            self.error(
+                span,
+                "class index signatures cannot have the declare modifier",
+            );
+        }
+        if modifiers.r#override {
+            self.error(
+                span,
+                "class index signatures cannot have the override modifier",
+            );
+        }
+        if export {
+            self.error(
+                span,
+                "class index signatures cannot have the export modifier",
             );
         }
     }

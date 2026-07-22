@@ -1085,6 +1085,51 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes compact TypeScript index signature modifier flags", () => {
+    const tape = new HandcraftedTape();
+    const signature = tape.node(581, 0, 0, [
+      tape.list([]),
+      tape.null(),
+      tape.boolean(true),
+      tape.boolean(true),
+    ], 0x3F);
+    const encoded = tape.finish(signature);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode("", encoded)).toMatchObject({
+        type: "TSIndexSignature",
+        parameters: [],
+        typeAnnotation: null,
+        accessibility: "private",
+        abstract: true,
+        declare: true,
+        override: true,
+        export: true,
+        readonly: true,
+        static: true,
+      });
+    }
+  });
+
+  it("rejects malformed TypeScript index signature modifier flags", () => {
+    for (const flags of [0x40, 0xFF]) {
+      const tape = new HandcraftedTape();
+      const signature = tape.node(581, 0, 0, [
+        tape.list([]),
+        tape.null(),
+        tape.boolean(false),
+        tape.boolean(false),
+      ], flags);
+      const encoded = tape.finish(signature);
+
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid TypeScript index signature modifier flags ${flags} for tag 581`,
+        );
+      }
+    }
+  });
+
   it("decodes compound TypeScript type and declaration records", () => {
     const tape = new HandcraftedTape();
     const aliasId = tape.node(2, 0, 0, [tape.string("Shape")]);

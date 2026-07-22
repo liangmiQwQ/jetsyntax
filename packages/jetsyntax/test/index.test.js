@@ -1025,6 +1025,123 @@ describe("parse", () => {
     }
   });
 
+  it("materializes TypeScript class index signatures and modifier recovery", () => {
+    const source = [
+      "class Dictionary {",
+      "  [key: string]: number;",
+      "  readonly [index: number]: string;",
+      "  static\n  [name: string]: unknown;",
+      "  static readonly [symbol: symbol]: boolean,",
+      "}",
+      "declare namespace N { class Ambient { [key: string]: number } }",
+      "class Generic<T> { [key: string]: T }",
+      "const Expression = class { [key: string]: unknown };",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const signatures = [
+      ...result.program.body[0].body.body,
+      ...result.program.body[1].body.body[0].body.body,
+      ...result.program.body[2].body.body,
+      ...result.program.body[3].declarations[0].init.body.body,
+    ];
+    expect(signatures).toMatchObject([
+      { type: "TSIndexSignature", readonly: false, static: false },
+      { type: "TSIndexSignature", readonly: true, static: false },
+      { type: "TSIndexSignature", readonly: false, static: true },
+      { type: "TSIndexSignature", readonly: true, static: true },
+      { type: "TSIndexSignature", readonly: false, static: false },
+      { type: "TSIndexSignature", readonly: false, static: false },
+      { type: "TSIndexSignature", readonly: false, static: false },
+    ]);
+    expect(signatures.map(signature => source.slice(signature.start, signature.end))).toEqual([
+      "[key: string]: number;",
+      "readonly [index: number]: string;",
+      "static\n  [name: string]: unknown;",
+      "static readonly [symbol: symbol]: boolean,",
+      "[key: string]: number",
+      "[key: string]: T",
+      "[key: string]: unknown",
+    ]);
+    for (const signature of signatures) expect(signature.range).toEqual([signature.start, signature.end]);
+
+    const invalid = [
+      "class Invalid extends Base {",
+      "  readonly static [order: string]: number;",
+      "  abstract [abstracted: string]: number;",
+      "  declare [declared: string]: number;",
+      "  private [privateKey: string]: number;",
+      "  override [overridden: string]: number;",
+      "  export [exported: string]: number;",
+      "  declare readonly [declaredReadonly: string]: number;",
+      "  export static readonly [exportedStatic: string]: number;",
+      "  export\n  [exportedLine: string]: number;",
+      "}",
+    ].join("\n");
+    const syntax = parse(invalid, { lang: "ts" });
+    expect(syntax.diagnostics).toEqual([]);
+    expect(syntax.program.body[0].body.body).toMatchObject([
+      { type: "TSIndexSignature", readonly: true, static: true },
+      { type: "TSIndexSignature", abstract: true },
+      { type: "TSIndexSignature", declare: true },
+      { type: "TSIndexSignature", accessibility: "private" },
+      { type: "TSIndexSignature", override: true },
+      { type: "TSIndexSignature", export: true },
+      { type: "TSIndexSignature", declare: true, readonly: true },
+      { type: "TSIndexSignature", export: true, static: true, readonly: true },
+      { type: "TSIndexSignature", export: true },
+    ]);
+    const semantic = parse(invalid, { lang: "ts", semanticErrors: true });
+    expect(semantic.diagnostics).toEqual(expect.arrayContaining([
+      "TypeScript class member modifiers are out of order",
+      "class index signatures cannot have the abstract modifier",
+      "class index signatures cannot have the declare modifier",
+      "class index signatures cannot have an accessibility modifier",
+      "class index signatures cannot have the override modifier",
+      "class index signatures cannot have the export modifier",
+    ]));
+
+    const boundaries = parse(
+      "class C { declare\n[plain: string]: number; declare r\\u0065adonly [escaped: string]: number; }",
+      { lang: "ts" },
+    );
+    expect(boundaries.diagnostics).toEqual([]);
+    expect(boundaries.program.body[0].body.body).toMatchObject([
+      { type: "PropertyDefinition", key: { name: "declare" } },
+      { type: "TSIndexSignature", readonly: false },
+      { type: "TSIndexSignature", declare: true, readonly: true },
+    ]);
+
+    const ambiguous = parse(
+      "class Computed { [plain]: number; [assigned = 0]: number; [x ? y : z]: number; readonly\n[line: string]: number; readonly [computed]: number; static [alsoComputed]: number }",
+      { lang: "ts" },
+    );
+    expect(ambiguous.diagnostics).toEqual([]);
+    expect(JSON.stringify(ambiguous.program).match(/TSIndexSignature/gu)).toHaveLength(1);
+
+    for (
+      const reserved of [
+        "async function f() { class C { [await: string]: number } }",
+        "function* f() { class C { [yield: string]: number } }",
+      ]
+    ) {
+      const recovered = parse(reserved, { lang: "ts" });
+      expect(recovered.diagnostics, reserved).not.toEqual([]);
+      expect(JSON.stringify(recovered.program), reserved).not.toContain("TSIndexSignature");
+    }
+
+    const javascript = parse("class C { [key: string]: number }");
+    expect(javascript.diagnostics).not.toEqual([]);
+    expect(JSON.stringify(javascript.program)).not.toContain("TSIndexSignature");
+
+    const compatibility = parse("class C { [key: string]: number }", {
+      typescriptJsCompatibility: true,
+    });
+    expect(compatibility.diagnostics).toEqual([]);
+    expect(compatibility.program.body[0].body.body[0].type).toBe("TSIndexSignature");
+  });
+
   it("materializes untyped TypeScript signature parameters", () => {
     const source = [
       "type Callback = (this, value, optional?) => void;",

@@ -1139,6 +1139,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.returnType = fields[2];
         return node;
       case 581:
+        decodeTypeScriptIndexSignatureModifiers(node, record, tag);
         node.parameters = array(fields[0], tag);
         node.typeAnnotation = fields[1];
         node.readonly = boolean(fields[2], tag);
@@ -1361,6 +1362,19 @@ function decodeTypeScriptClassMemberModifiers(node, record, tag, allowEmpty = fa
   if (accessibility !== 0) node.accessibility = TS_CLASS_MEMBER_ACCESSIBILITIES[accessibility];
   if ((flags & 0x04) !== 0) node.readonly = true;
   if ((flags & 0x08) !== 0) node.override = true;
+}
+
+function decodeTypeScriptIndexSignatureModifiers(node, record, tag) {
+  const flags = (record & NODE_FLAGS_MASK) >>> 16;
+  if ((flags & ~0x3F) !== 0) {
+    throw new Error(`invalid TypeScript index signature modifier flags ${flags} for tag ${tag}`);
+  }
+  const accessibility = flags & 0x03;
+  if (accessibility !== 0) node.accessibility = TS_CLASS_MEMBER_ACCESSIBILITIES[accessibility];
+  if ((flags & 0x04) !== 0) node.abstract = true;
+  if ((flags & 0x08) !== 0) node.declare = true;
+  if ((flags & 0x10) !== 0) node.override = true;
+  if ((flags & 0x20) !== 0) node.export = true;
 }
 
 function lastRegexpSlash(raw) {
