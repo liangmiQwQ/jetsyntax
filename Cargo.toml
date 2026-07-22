@@ -12,6 +12,7 @@ repository = "https://github.com/liangmiQwQ/jetsyntax"
 
 [workspace.dependencies]
 jetsyntax = { path = "crates/jetsyntax", version = "0.0.0-alpha.0" }
+mimalloc-safe = "0.1.64"
 napi = { version = "3.11.0", default-features = false, features = ["napi9"] }
 napi-build = "2.3.2"
 napi-derive = "3.6.0"

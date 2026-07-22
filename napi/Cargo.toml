@@ -16,6 +16,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jetsyntax.workspace = true
+mimalloc-safe.workspace = true
 napi.workspace = true
 napi-derive.workspace = true
 

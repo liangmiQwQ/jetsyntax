@@ -1,6 +1,10 @@
 use jetsyntax::{Language, ParseOptions, SourceKind, SyntaxExtensions, parse};
+use mimalloc_safe::MiMalloc;
 use napi::bindgen_prelude::Uint32Array;
 use napi_derive::napi;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[napi(object)]
 #[derive(Default)]
