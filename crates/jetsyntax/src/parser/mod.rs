@@ -157,6 +157,12 @@ enum MethodBodyPolicy {
 }
 
 #[derive(Clone, Copy)]
+struct FunctionFlags {
+    generator: bool,
+    asynchronous: bool,
+}
+
+#[derive(Clone, Copy)]
 enum ImportPhase {
     Source,
     Defer,
@@ -486,6 +492,26 @@ impl<'s> Parser<'s> {
             self.context
                 .set_grammar(self.context.grammar().with_strict(true));
         }
+        // Checking for a block first keeps the ordinary function path to one token comparison.
+        if self.current.kind != TokenKind::LeftBrace
+            && declaration
+            && (self.options.language.is_typescript()
+                || self.options.syntax_extensions.typescript_js_compatibility)
+            && let Some(end) = self.consume_typescript_function_signature_terminator()
+        {
+            self.leave_function_context(previous_grammar);
+            return self.node_typescript_declare_function(
+                Span::new(start, end),
+                id.map(ParsedNode::value),
+                params.value,
+                FunctionFlags {
+                    generator,
+                    asynchronous,
+                },
+                return_type,
+                type_parameters,
+            );
+        }
         if self.context.grammar().ambient()
             && self.options.semantic_errors
             && self.current.kind == TokenKind::LeftBrace
@@ -538,6 +564,63 @@ impl<'s> Parser<'s> {
             (None, None) => 5,
         };
         self.node(tag, span, &fields[..field_count])
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn node_typescript_declare_function(
+        &mut self,
+        span: Span,
+        id: Option<ValueRef>,
+        params: ValueRef,
+        flags: FunctionFlags,
+        return_type: Option<ValueRef>,
+        type_parameters: Option<ValueRef>,
+    ) -> Result<ParsedNode, ParseError> {
+        let id = if let Some(id) = id {
+            id
+        } else {
+            self.tape.push_null()?
+        };
+        let generator = self.tape.push_bool(flags.generator)?;
+        let asynchronous = self.tape.push_bool(flags.asynchronous)?;
+        let return_type = if let Some(return_type) = return_type {
+            return_type
+        } else {
+            self.tape.push_null()?
+        };
+        let type_parameters = if let Some(type_parameters) = type_parameters {
+            type_parameters
+        } else {
+            self.tape.push_null()?
+        };
+        self.node(
+            NodeTag::TS_DECLARE_FUNCTION,
+            span,
+            &[
+                id,
+                params,
+                generator,
+                asynchronous,
+                return_type,
+                type_parameters,
+            ],
+        )
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn consume_typescript_function_signature_terminator(&mut self) -> Option<u32> {
+        if let Some(semicolon) = self.eat(TokenKind::Semicolon) {
+            Some(semicolon.end)
+        } else if self.current.kind == TokenKind::RightBrace
+            || self.current.kind == TokenKind::Eof
+            || self.current.flags.line_break_before()
+        {
+            Some(self.current.start)
+        } else {
+            None
+        }
     }
 
     fn parse_function_return_type(&mut self) -> Result<Option<ValueRef>, ParseError> {

@@ -1032,7 +1032,6 @@ describe("parse", () => {
       const [source, options] of [
         ["function predicate(value: unknown): value is string { return true; }", { lang: "ts" }],
         ["function assertion(value: unknown): asserts value {}", { lang: "ts" }],
-        ["function overload(): string;", { lang: "ts" }],
         ["declare function declared(): string;", { lang: "ts" }],
         ["function missing(): ; {}", { lang: "ts" }],
         ["function javascript(): string {}", { lang: "js" }],
@@ -1176,6 +1175,106 @@ describe("parse", () => {
     const objectMethod = parse("const value = { method(); };", { lang: "ts" });
     expect(objectMethod.diagnostics).not.toEqual([]);
     expect(JSON.stringify(objectMethod.program)).not.toContain("TSEmptyBodyFunctionExpression");
+  });
+
+  it("materializes top-level TypeScript overload signatures", () => {
+    const source = [
+      "export function overloaded<T>(value: T): T;",
+      "export function overloaded(value: string): string;",
+      "function overloaded(value) { return value; }",
+      "function following(): void {}",
+      "export { overloaded };",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", sourceType: "module", range: true, semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const first = result.program.body[0].declaration;
+    const second = result.program.body[1].declaration;
+    expect(first).toMatchObject({
+      type: "TSDeclareFunction",
+      id: { type: "Identifier", name: "overloaded" },
+      params: [{
+        type: "Identifier",
+        name: "value",
+        typeAnnotation: { typeAnnotation: { type: "TSTypeReference" } },
+      }],
+      generator: false,
+      async: false,
+      returnType: { typeAnnotation: { type: "TSTypeReference" } },
+      typeParameters: {
+        type: "TSTypeParameterDeclaration",
+        params: [{ name: { name: "T" } }],
+      },
+    });
+    expect(first).not.toHaveProperty("body");
+    expect(first).not.toHaveProperty("declare");
+    expect(source.slice(first.start, first.end)).toBe("function overloaded<T>(value: T): T;");
+    expect(first.range).toEqual([first.start, first.end]);
+    expect(second).toMatchObject({
+      type: "TSDeclareFunction",
+      returnType: { typeAnnotation: { type: "TSStringKeyword" } },
+    });
+    expect(second).not.toHaveProperty("typeParameters");
+    expect(result.program.body[2]).toMatchObject({
+      type: "FunctionDeclaration",
+      body: { type: "BlockStatement" },
+    });
+    expect(result.program.body[3]).toMatchObject({
+      type: "FunctionDeclaration",
+      returnType: { typeAnnotation: { type: "TSVoidKeyword" } },
+    });
+    expect(result.program.body[4]).toMatchObject({
+      type: "ExportNamedDeclaration",
+      specifiers: [{ local: { name: "overloaded" } }],
+    });
+
+    for (const lang of ["ts", "tsx", "dts"]) {
+      const typed = parse("function signature(value: Input): Output;", { lang });
+      expect(typed.diagnostics, lang).toEqual([]);
+      expect(typed.program.body[0].type).toBe("TSDeclareFunction");
+    }
+    const compatibility = parse("function signature();", { typescriptJsCompatibility: true });
+    expect(compatibility.diagnostics).toEqual([]);
+    expect(compatibility.program.body[0].type).toBe("TSDeclareFunction");
+
+    const extended = parse(
+      [
+        "async function asynchronous(): Promise<void>;",
+        "function* generator(): Iterable<void>;",
+        "function outer() { function nested(): void; }",
+        "function lineBreak(): void",
+        "function following() {}",
+        "function eof(): void",
+      ].join("\n"),
+      { lang: "ts" },
+    );
+    expect(extended.diagnostics).toEqual([]);
+    expect(extended.program.body[0]).toMatchObject({
+      type: "TSDeclareFunction",
+      async: true,
+      generator: false,
+    });
+    expect(extended.program.body[1]).toMatchObject({
+      type: "TSDeclareFunction",
+      async: false,
+      generator: true,
+    });
+    expect(extended.program.body[2].body.body[0].type).toBe("TSDeclareFunction");
+    expect(extended.program.body[3].type).toBe("TSDeclareFunction");
+    expect(extended.program.body[5].type).toBe("TSDeclareFunction");
+
+    for (
+      const [source, options] of [
+        ["function signature();", { lang: "js" }],
+        ["function signature();", { lang: "jsx" }],
+        ["const expression = function named(): void;", { lang: "ts" }],
+        ["function signature(): void const value = 1;", { lang: "ts" }],
+      ]
+    ) {
+      const excluded = parse(source, options);
+      expect(excluded.diagnostics, source).not.toEqual([]);
+      expect(JSON.stringify(excluded.program), source).not.toContain("TSDeclareFunction");
+    }
   });
 
   it("keeps unsupported method return forms diagnostic", () => {

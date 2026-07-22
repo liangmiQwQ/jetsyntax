@@ -188,6 +188,7 @@ for (
     [569, ["ClassDeclaration", ["id", "superClass", "body", "implements", "typeParameters"]]],
     [570, ["ClassExpression", ["id", "superClass", "body", "implements", "typeParameters"]]],
     [571, ["TSEmptyBodyFunctionExpression", ["id", "params", "generator", "async", "returnType"]]],
+    [572, ["TSDeclareFunction", ["id", "params", "generator", "async", "returnType", "typeParameters"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -1051,6 +1052,14 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.expression = false;
         node.declare = false;
         if (fields[4] !== null) node.returnType = fields[4];
+        return node;
+      case 572:
+        node.id = fields[0];
+        node.params = array(fields[1], tag);
+        node.generator = boolean(fields[2], tag);
+        node.async = boolean(fields[3], tag);
+        if (fields[4] !== null) node.returnType = fields[4];
+        if (fields[5] !== null) node.typeParameters = fields[5];
         return node;
       case 531:
         node.typeAnnotation = fields[0];

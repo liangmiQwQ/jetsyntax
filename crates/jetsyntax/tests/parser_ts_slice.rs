@@ -306,6 +306,175 @@ fn parses_runtime_function_type_parameters() {
 }
 
 #[test]
+fn parses_top_level_typescript_function_signatures_and_restores_context() {
+    let source = [
+        "export function overloaded<T>(value: T): T;",
+        "export function overloaded(value: string): string;",
+        "function overloaded(value) { return value; }",
+        "function following(): void {}",
+        "export { overloaded };",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse top-level function signatures");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid function-signature tape");
+    assert_eq!(NodeTag::TS_DECLARE_FUNCTION.get(), 572);
+    let signatures = node_fields(&parsed, NodeTag::TS_DECLARE_FUNCTION).collect::<Vec<_>>();
+    assert_eq!(signatures.len(), 2);
+    assert!(signatures.iter().all(|fields| fields.len() == 6));
+    assert!(matches!(
+        parsed.tape.value_at(signatures[0][5]),
+        Ok(TapeValue::Node {
+            tag: NodeTag::TS_TYPE_PARAMETER_DECLARATION,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(signatures[1][5]),
+        Ok(TapeValue::Null)
+    ));
+    let TapeValue::Node { span, .. } = parsed
+        .tape
+        .value_at(signatures[0][4])
+        .expect("signature return annotation")
+    else {
+        panic!("signature return annotation is not a node");
+    };
+    assert_eq!(&source[span.start as usize..span.end as usize], ": T");
+    assert_eq!(
+        node_fields(&parsed, NodeTag::FUNCTION_DECLARATION).count(),
+        2
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::EXPORT_NAMED_DECLARATION).count(),
+        3
+    );
+}
+
+#[test]
+fn parses_nested_generator_async_and_asi_function_signatures() {
+    let source = [
+        "async function asynchronous(): Promise<void>;",
+        "function* generator(): Iterable<void>;",
+        "function outer() { function nested(): void; }",
+        "function lineBreak(): void",
+        "function following() {}",
+        "function eof(): void",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse extended function signatures");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid extended-signature tape");
+
+    let signatures = node_fields(&parsed, NodeTag::TS_DECLARE_FUNCTION).collect::<Vec<_>>();
+    assert_eq!(signatures.len(), 5);
+    assert!(
+        signatures
+            .iter()
+            .any(|fields| matches!(parsed.tape.value_at(fields[3]), Ok(TapeValue::Bool(true))))
+    );
+    assert!(
+        signatures
+            .iter()
+            .any(|fields| matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(true))))
+    );
+}
+
+#[test]
+fn gates_typescript_function_signatures() {
+    for language in [
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+        Language::TypeScriptDefinition,
+    ] {
+        let parsed = parse(
+            "function signature(value: Input): Output;",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse TypeScript function signature");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:#?}",
+            parsed.diagnostics
+        );
+        assert_node_field_count(&parsed, NodeTag::TS_DECLARE_FUNCTION, 6);
+    }
+
+    let compatibility = parse(
+        "function signature();",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse compatibility function signature");
+    assert!(
+        compatibility.diagnostics.is_empty(),
+        "{:#?}",
+        compatibility.diagnostics
+    );
+    assert_node_field_count(&compatibility, NodeTag::TS_DECLARE_FUNCTION, 6);
+
+    for (source, options) in [
+        (
+            "function signature();",
+            ParseOptions {
+                language: Language::JavaScript,
+                ..ParseOptions::default()
+            },
+        ),
+        (
+            "function signature();",
+            ParseOptions {
+                language: Language::JavaScriptJsx,
+                ..ParseOptions::default()
+            },
+        ),
+        (
+            "const expression = function named(): void;",
+            typescript_options(),
+        ),
+        (
+            "function signature(): void const value = 1;",
+            typescript_options(),
+        ),
+    ] {
+        let parsed = parse(source, options).expect("recover excluded function signature");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid excluded-signature tape");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_DECLARE_FUNCTION).count(),
+            0,
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn keeps_runtime_function_type_parameters_out_of_javascript() {
     for language in [Language::JavaScript, Language::JavaScriptJsx] {
         let parsed = parse(
@@ -437,7 +606,6 @@ fn limits_function_return_annotations_to_supported_typescript_bodies() {
             "assertion",
             "function assertText(value: unknown): asserts value { }",
         ),
-        ("overload", "function convert(): string;"),
         ("declare", "declare function convert(): string;"),
         ("missing type", "function missing(): ; {}"),
     ];

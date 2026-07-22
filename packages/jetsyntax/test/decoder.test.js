@@ -650,6 +650,66 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes TypeScript declare-function records", () => {
+    const source = "function f<T>(value): void;";
+    const tape = new HandcraftedTape();
+    const id = tape.node(2, 9, 10, [tape.string("f")]);
+    const parameter = tape.node(2, 11, 12, [tape.string("value")]);
+    const returnType = tape.node(512, 13, 19, [tape.node(555, 15, 19, [])]);
+    const typeParameterName = tape.node(2, 10, 11, [tape.string("T")]);
+    const typeParameter = tape.node(534, 10, 11, [
+      typeParameterName,
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.null(),
+      tape.null(),
+    ]);
+    const typeParameters = tape.node(541, 10, 13, [tape.list([typeParameter])]);
+    const signature = tape.node(572, 0, source.length, [
+      id,
+      tape.list([parameter]),
+      tape.boolean(false),
+      tape.boolean(false),
+      returnType,
+      typeParameters,
+    ]);
+
+    const decoded = decodeTape(source, tape.finish(signature), { range: true });
+    expect(decoded).toMatchObject({
+      type: "TSDeclareFunction",
+      id: { type: "Identifier", name: "f" },
+      params: [{ type: "Identifier", name: "value" }],
+      generator: false,
+      async: false,
+      returnType: {
+        type: "TSTypeAnnotation",
+        typeAnnotation: { type: "TSVoidKeyword" },
+      },
+      typeParameters: {
+        type: "TSTypeParameterDeclaration",
+        params: [{ type: "TSTypeParameter", name: { name: "T" } }],
+      },
+      range: [0, source.length],
+    });
+    expect(decoded).not.toHaveProperty("body");
+    expect(decoded).not.toHaveProperty("declare");
+  });
+
+  it("rejects malformed TypeScript declare-function field counts", () => {
+    for (const count of [5, 7]) {
+      const tape = new HandcraftedTape();
+      const fields = Array.from({ length: count }, () => tape.null());
+      const encoded = tape.finish(tape.node(572, 0, 0, fields));
+
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid TSDeclareFunction field count ${count}; expected 6`,
+        );
+      }
+    }
+  });
+
   it("rejects malformed class field counts", () => {
     for (
       const [tag, count, expected] of [
