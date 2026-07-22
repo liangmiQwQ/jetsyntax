@@ -182,6 +182,9 @@ for (
     [563, ["TSImportEqualsDeclaration", ["id", "moduleReference", "importKind"]]],
     [564, ["TSExternalModuleReference", ["expression"]]],
     [565, ["NewExpression", ["callee", "arguments", "typeArguments"]]],
+    [566, ["TSClassImplements", ["expression", "typeArguments"]]],
+    [567, ["ClassDeclaration", ["id", "superClass", "body", "implements"]]],
+    [568, ["ClassExpression", ["id", "superClass", "body", "implements"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -1016,6 +1019,17 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.callee = fields[0];
         node.arguments = array(fields[1], tag);
         node.typeArguments = fields[2];
+        return node;
+      case 566:
+        node.expression = fields[0];
+        node.typeArguments = fields[1];
+        return node;
+      case 567:
+      case 568:
+        node.id = fields[0];
+        node.superClass = fields[1];
+        node.body = fields[2];
+        node.implements = array(fields[3], tag);
         return node;
       case 531:
         node.typeAnnotation = fields[0];

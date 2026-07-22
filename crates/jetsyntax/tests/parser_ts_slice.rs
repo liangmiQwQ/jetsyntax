@@ -1,5 +1,5 @@
 use jetsyntax::{
-    Language, ParseOptions, ParseResult, parse,
+    Language, ParseOptions, ParseResult, SourceKind, SyntaxExtensions, parse,
     tape::{NodeTag, TapeValue},
 };
 
@@ -1174,6 +1174,254 @@ fn rolls_back_malformed_generic_new_speculation_without_stale_records() {
         assert_eq!(
             first_node_fields(&parsed, NodeTag::TS_NEW_EXPRESSION).len(),
             3
+        );
+    }
+}
+
+#[test]
+fn parses_typescript_class_implements_clauses_and_preserves_legacy_class_records() {
+    let source = [
+        "class Plain {}",
+        "class Derived extends Base implements One, Namespace.Two<Map<Key, Value>>, Constructor<<T>(value: T) => T> {}",
+        "(class implements Anonymous<Inner<Value>> {});",
+        "class Reordered implements First extends Base implements Second {}",
+        "class Repeated extends Base extends Discarded implements Third {}",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse class implements clauses");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid class-implements tape");
+
+    assert_node_field_count(&parsed, NodeTag::CLASS_DECLARATION, 3);
+    assert!(node_fields(&parsed, NodeTag::TS_CLASS_DECLARATION).all(|fields| fields.len() == 4));
+    assert_node_field_count(&parsed, NodeTag::TS_CLASS_EXPRESSION, 4);
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_CLASS_IMPLEMENTS).count(),
+        7
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_CLASS_IMPLEMENTS,
+        0,
+        NodeTag::MEMBER_EXPRESSION,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_CLASS_IMPLEMENTS,
+        1,
+        NodeTag::TS_TYPE_PARAMETER_INSTANTIATION,
+    );
+
+    let spans = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node {
+                tag: NodeTag::TS_CLASS_IMPLEMENTS,
+                span,
+                ..
+            } => Some(&source[span.start as usize..span.end as usize]),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spans,
+        [
+            "One",
+            "Namespace.Two<Map<Key, Value>>",
+            "Constructor<<T>(value: T) => T>",
+            "Anonymous<Inner<Value>>",
+            "First",
+            "Second",
+            "Third",
+        ]
+    );
+
+    let super_classes = node_fields(&parsed, NodeTag::TS_CLASS_DECLARATION)
+        .map(|fields| {
+            let TapeValue::Node { span, .. } = parsed
+                .tape
+                .value_at(fields[1])
+                .expect("implemented class super class")
+            else {
+                panic!("implemented class super class is not a node");
+            };
+            &source[span.start as usize..span.end as usize]
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(super_classes, ["Base", "Base", "Base"]);
+}
+
+#[test]
+fn recovers_typescript_class_heritage_ambiguities_by_semantic_mode() {
+    let source = "class Empty implements {} class Generic implements Box<> {} class Repeat implements A implements B extends Base {}";
+    let syntax_only = parse(source, typescript_options()).expect("syntax-only heritage parse");
+    assert!(
+        syntax_only.diagnostics.is_empty(),
+        "{:#?}",
+        syntax_only.diagnostics
+    );
+    syntax_only.tape.validate().expect("valid syntax-only tape");
+    assert_eq!(
+        node_fields(&syntax_only, NodeTag::TS_CLASS_DECLARATION).count(),
+        3
+    );
+
+    let semantic = parse(
+        source,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("semantic heritage parse");
+    assert!(
+        semantic
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "implements list cannot be empty")
+    );
+    assert!(
+        semantic
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "type argument list cannot be empty")
+    );
+    semantic.tape.validate().expect("valid semantic tape");
+
+    let object_heritage = parse("class C2 extends { foo: string; } {}", typescript_options())
+        .expect("recover nonempty object heritage");
+    assert!(!object_heritage.diagnostics.is_empty());
+    object_heritage
+        .tape
+        .validate()
+        .expect("valid object-heritage recovery tape");
+    assert_child_tag(
+        &object_heritage,
+        NodeTag::CLASS_DECLARATION,
+        1,
+        NodeTag::OBJECT_EXPRESSION,
+    );
+
+    let named = parse(
+        "class implements {}",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            ..typescript_options()
+        },
+    )
+    .expect("parse class named implements");
+    assert!(named.diagnostics.is_empty(), "{:#?}", named.diagnostics);
+    assert_node_field_count(&named, NodeTag::CLASS_DECLARATION, 3);
+    assert_eq!(
+        node_fields(&named, NodeTag::TS_CLASS_DECLARATION).count(),
+        0
+    );
+
+    let anonymous = parse("(class implements Interface {});", typescript_options())
+        .expect("parse anonymous class implements clause");
+    assert!(
+        anonymous.diagnostics.is_empty(),
+        "{:#?}",
+        anonymous.diagnostics
+    );
+    let fields = first_node_fields(&anonymous, NodeTag::TS_CLASS_EXPRESSION);
+    assert!(matches!(
+        anonymous.tape.value_at(fields[0]),
+        Ok(TapeValue::Null { .. })
+    ));
+
+    let escaped = parse(
+        r"class C impl\u0065ments Interface {}",
+        typescript_options(),
+    )
+    .expect("reject escaped implements clause");
+    assert!(!escaped.diagnostics.is_empty());
+    escaped
+        .tape
+        .validate()
+        .expect("valid escaped recovery tape");
+    assert_eq!(
+        node_fields(&escaped, NodeTag::TS_CLASS_IMPLEMENTS).count(),
+        0
+    );
+
+    let malformed = parse(
+        "class Malformed implements , Namespace.Interface<> {}",
+        typescript_options(),
+    )
+    .expect("recover malformed heritage");
+    assert!(!malformed.diagnostics.is_empty());
+    malformed
+        .tape
+        .validate()
+        .expect("valid malformed recovery tape");
+    assert_node_field_count(&malformed, NodeTag::TS_CLASS_DECLARATION, 4);
+}
+
+#[test]
+fn gates_class_implements_to_typescript_capable_dialects() {
+    for language in [
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+        Language::TypeScriptDefinition,
+    ] {
+        let parsed = parse(
+            "class C implements Interface {}",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse TypeScript-capable class");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:#?}",
+            parsed.diagnostics
+        );
+        assert_node_field_count(&parsed, NodeTag::TS_CLASS_DECLARATION, 4);
+    }
+
+    let compatibility = parse(
+        "class C implements Interface {}",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse TypeScript JavaScript compatibility class");
+    assert!(
+        compatibility.diagnostics.is_empty(),
+        "{:#?}",
+        compatibility.diagnostics
+    );
+    assert_node_field_count(&compatibility, NodeTag::TS_CLASS_DECLARATION, 4);
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "class C implements Interface {}",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover standard JavaScript class");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid JavaScript recovery tape");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_CLASS_IMPLEMENTS).count(),
+            0
+        );
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_CLASS_DECLARATION).count(),
+            0
         );
     }
 }

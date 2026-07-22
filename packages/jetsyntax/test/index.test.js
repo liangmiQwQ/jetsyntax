@@ -830,6 +830,87 @@ describe("parse", () => {
     expect(shiftAssign.program.body[0].expression.left.left).not.toHaveProperty("typeArguments");
   });
 
+  it("materializes TypeScript class implements clauses without widening plain classes", () => {
+    const source = [
+      "class Plain {}",
+      "class Derived extends Base implements First, Namespace.Second<Map<Key, Value>> {}",
+      "const Anonymous = class implements Callable<Argument> {};",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const [plain, derived, anonymousDeclaration] = result.program.body;
+    expect(plain).toMatchObject({
+      type: "ClassDeclaration",
+      id: { name: "Plain" },
+      superClass: null,
+    });
+    expect(plain).not.toHaveProperty("implements");
+    expect(derived).toMatchObject({
+      type: "ClassDeclaration",
+      superClass: { name: "Base" },
+      implements: [
+        {
+          type: "TSClassImplements",
+          expression: { name: "First" },
+          typeArguments: null,
+        },
+        {
+          type: "TSClassImplements",
+          expression: {
+            type: "MemberExpression",
+            object: { name: "Namespace" },
+            property: { name: "Second" },
+            computed: false,
+          },
+          typeArguments: {
+            type: "TSTypeParameterInstantiation",
+            params: [{
+              typeName: { name: "Map" },
+              typeArguments: { params: [{}, {}] },
+            }],
+          },
+        },
+      ],
+    });
+    expect(source.slice(derived.implements[1].start, derived.implements[1].end)).toBe(
+      "Namespace.Second<Map<Key, Value>>",
+    );
+    expect(derived.implements[1].range).toEqual([
+      derived.implements[1].start,
+      derived.implements[1].end,
+    ]);
+    expect(anonymousDeclaration.declarations[0].init).toMatchObject({
+      type: "ClassExpression",
+      id: null,
+      implements: [{ expression: { name: "Callable" } }],
+    });
+
+    for (const semanticErrors of [false, true]) {
+      const parsed = parse("class Empty implements {} class Generic implements Box<> {}", {
+        lang: "ts",
+        semanticErrors,
+      });
+      expect(parsed.diagnostics.length === 0).toBe(!semanticErrors);
+      expect(parsed.program.body).toMatchObject([
+        { implements: [] },
+        { implements: [{ typeArguments: { params: [] } }] },
+      ]);
+    }
+
+    const compatibility = parse("class Compatible implements Interface {}", {
+      typescriptJsCompatibility: true,
+    });
+    expect(compatibility.diagnostics).toEqual([]);
+    expect(compatibility.program.body[0]).toHaveProperty("implements");
+
+    for (const lang of ["js", "jsx"]) {
+      const standard = parse("class Standard implements Interface {}", { lang });
+      expect(standard.diagnostics, lang).not.toEqual([]);
+      expect(standard.program.body[0], lang).not.toHaveProperty("implements");
+    }
+  });
+
   it("materializes optional TypeScript value parameters", () => {
     const source = [
       "function declared(required: Input, optional?: Output, inferred?) {}",

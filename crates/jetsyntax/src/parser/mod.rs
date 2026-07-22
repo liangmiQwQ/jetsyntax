@@ -816,6 +816,11 @@ impl<'s> Parser<'s> {
 
     fn parse_class(&mut self, declaration: bool) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Class).start;
+        if self.options.language.is_typescript()
+            || self.options.syntax_extensions.typescript_js_compatibility
+        {
+            return self.parse_typescript_class(start, declaration);
+        }
         let id = if Self::is_identifier_name(self.current.kind) {
             self.parse_binding_identifier(BindingKind::Lexical)?.value()
         } else {
@@ -861,6 +866,175 @@ impl<'s> Parser<'s> {
             Span::new(start, end),
             &[id, super_class, body.value()],
         )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn parse_typescript_class(
+        &mut self,
+        start: u32,
+        declaration: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        // 1. Distinguish a class named `implements` from an anonymous implementation clause.
+        let anonymous_implements_clause = self.current.kind == TokenKind::Implements
+            && !self.current.flags.escaped()
+            && !self.implements_is_followed_by_class_body();
+        let id = if Self::is_identifier_name(self.current.kind) && !anonymous_implements_clause {
+            self.parse_binding_identifier(BindingKind::Lexical)?.value()
+        } else {
+            if declaration {
+                self.error(self.current_span(), "class declaration requires a name");
+            }
+            self.tape.push_null()?
+        };
+
+        // 2. Recover reordered and repeated clauses while retaining the first base and merging implementation lists.
+        let mut super_class = None;
+        let mut implementations = Vec::new();
+        let mut saw_extends = false;
+        let mut saw_implements = false;
+        while !self.current.flags.escaped() {
+            match self.current.kind {
+                TokenKind::Extends => {
+                    let keyword = self.take();
+                    if self.options.semantic_errors && saw_extends {
+                        self.error(Self::token_span(keyword), "extends clause already seen");
+                    }
+                    if self.options.semantic_errors && saw_implements {
+                        self.error(
+                            Self::token_span(keyword),
+                            "extends clause must precede implements clause",
+                        );
+                    }
+                    saw_extends = true;
+                    let empty_clause = match self.current.kind {
+                        TokenKind::LeftBrace => self.left_brace_is_followed_by_right_brace(),
+                        TokenKind::Eof | TokenKind::Extends => true,
+                        TokenKind::Implements => !self.current.flags.escaped(),
+                        _ => false,
+                    };
+                    if empty_clause {
+                        if self.options.semantic_errors {
+                            self.error(self.current_span(), "extends clause cannot be empty");
+                        }
+                        continue;
+                    }
+                    let discarded_base = super_class.is_some().then(|| {
+                        (
+                            self.tape.checkpoint(),
+                            self.assignment_pattern_checkpoint(),
+                            self.last_node_tag,
+                            self.last_assignment_target,
+                        )
+                    });
+                    let base = self.parse_assignment_expression(true)?;
+                    if let Some((
+                        tape,
+                        assignment_patterns,
+                        last_node_tag,
+                        last_assignment_target,
+                    )) = discarded_base
+                    {
+                        self.tape.rollback(tape)?;
+                        self.rollback_assignment_patterns(assignment_patterns);
+                        self.last_node_tag = last_node_tag;
+                        self.last_assignment_target = last_assignment_target;
+                    } else {
+                        super_class = Some(base.value());
+                    }
+                }
+                TokenKind::Implements => {
+                    let keyword = self.take();
+                    if self.options.semantic_errors && saw_implements {
+                        self.error(Self::token_span(keyword), "implements clause already seen");
+                    }
+                    saw_implements = true;
+                    let before = implementations.len();
+                    loop {
+                        if matches!(
+                            self.current.kind,
+                            TokenKind::LeftBrace
+                                | TokenKind::Eof
+                                | TokenKind::Extends
+                                | TokenKind::Implements
+                        ) && !self.current.flags.escaped()
+                        {
+                            break;
+                        }
+                        if let Some(comma) = self.eat(TokenKind::Comma) {
+                            self.error(Self::token_span(comma), "expected an implemented type");
+                            continue;
+                        }
+                        implementations.push(
+                            self.parse_heritage(
+                                NodeTag::TS_CLASS_IMPLEMENTS,
+                                self.options.semantic_errors,
+                            )?
+                            .value(),
+                        );
+                        if self.eat(TokenKind::Comma).is_none() {
+                            break;
+                        }
+                    }
+                    if self.options.semantic_errors && implementations.len() == before {
+                        self.error(self.current_span(), "implements list cannot be empty");
+                    }
+                }
+                _ => break,
+            }
+        }
+        let super_class = if let Some(super_class) = super_class {
+            super_class
+        } else {
+            self.tape.push_null()?
+        };
+
+        // 3. Parse the body under the same strict class grammar as the JavaScript path.
+        let body_start = self.expect(TokenKind::LeftBrace).start;
+        self.context.enter_scope(ScopeKind::Class);
+        let previous_grammar = self.context.grammar();
+        self.context.set_grammar(
+            previous_grammar
+                .with_class(true)
+                .with_strict(true)
+                .with_accessor(false)
+                .with_allow_super(true)
+                .with_allow_super_call(false),
+        );
+        let mut elements = Vec::new();
+        while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
+            if self.eat(TokenKind::Semicolon).is_some() {
+                continue;
+            }
+            elements.push(self.parse_class_element()?.value());
+        }
+        let end = self.expect(TokenKind::RightBrace).end;
+        self.context.set_grammar(previous_grammar);
+        let _ = self.context.leave_scope();
+        let elements = self.tape.push_list(&elements)?;
+        let body = self.node(NodeTag::CLASS_BODY, Span::new(body_start, end), &[elements])?;
+        // 4. Keep classes without implementations on the legacy three-field wire tags.
+        if saw_implements {
+            let implementations = self.tape.push_list(&implementations)?;
+            self.node(
+                if declaration {
+                    NodeTag::TS_CLASS_DECLARATION
+                } else {
+                    NodeTag::TS_CLASS_EXPRESSION
+                },
+                Span::new(start, end),
+                &[id, super_class, body.value(), implementations],
+            )
+        } else {
+            self.node(
+                if declaration {
+                    NodeTag::CLASS_DECLARATION
+                } else {
+                    NodeTag::CLASS_EXPRESSION
+                },
+                Span::new(start, end),
+                &[id, super_class, body.value()],
+            )
+        }
     }
 
     fn parse_class_element(&mut self) -> Result<ParsedNode, ParseError> {
@@ -4374,6 +4548,14 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_interface_heritage(&mut self) -> Result<ParsedNode, ParseError> {
+        self.parse_heritage(NodeTag::TS_INTERFACE_HERITAGE, false)
+    }
+
+    fn parse_heritage(
+        &mut self,
+        tag: NodeTag,
+        diagnose_empty_type_arguments: bool,
+    ) -> Result<ParsedNode, ParseError> {
         let start = self.current.start;
         let mut expression = self.parse_type_identifier()?;
         while self.eat(TokenKind::Dot).is_some() {
@@ -4386,13 +4568,20 @@ impl<'s> Parser<'s> {
                 &[expression.value(), right.value(), computed, optional],
             )?;
         }
+        if self.current.kind == TokenKind::ShiftLeft {
+            self.current.kind = TokenKind::Lt;
+            self.current.end = self.current.start + 1;
+            self.lexer.set_position(self.current.end as usize);
+        }
         let (type_arguments, end) = if self.current.kind == TokenKind::Lt {
-            self.parse_type_arguments()?
+            let (arguments, end, _, _) =
+                self.parse_type_arguments_impl(diagnose_empty_type_arguments)?;
+            (arguments, end)
         } else {
             (self.tape.push_null()?, expression.span.end)
         };
         self.node(
-            NodeTag::TS_INTERFACE_HERITAGE,
+            tag,
             Span::new(start, end),
             &[expression.value(), type_arguments],
         )
@@ -4905,6 +5094,18 @@ impl<'s> Parser<'s> {
             return false;
         }
         lookahead.next_token().kind == TokenKind::LeftParen
+    }
+
+    fn implements_is_followed_by_class_body(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        lookahead.next_token().kind == TokenKind::LeftBrace
+    }
+
+    fn left_brace_is_followed_by_right_brace(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        lookahead.next_token().kind == TokenKind::RightBrace
     }
 
     const fn can_follow_new_type_arguments(&self) -> bool {

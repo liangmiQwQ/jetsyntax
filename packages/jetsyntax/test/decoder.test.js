@@ -444,6 +444,84 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes legacy and TypeScript class-implements records", () => {
+    const source = "class Plain {} class Derived implements Interface<Input> {}";
+    const tape = new HandcraftedTape();
+    const plainId = tape.node(2, 6, 11, [tape.string("Plain")]);
+    const plainBody = tape.node(59, 12, 14, [tape.list([])]);
+    const plain = tape.node(57, 0, 14, [plainId, tape.null(), plainBody]);
+
+    const derivedId = tape.node(2, 21, 28, [tape.string("Derived")]);
+    const interfaceName = tape.node(2, 40, 49, [tape.string("Interface")]);
+    const inputName = tape.node(2, 50, 55, [tape.string("Input")]);
+    const inputType = tape.node(513, 50, 55, [inputName, tape.null()]);
+    const typeArguments = tape.node(542, 49, 56, [tape.list([inputType])]);
+    const implementation = tape.node(566, 40, 56, [interfaceName, typeArguments]);
+    const derivedBody = tape.node(59, source.length - 2, source.length, [tape.list([])]);
+    const derived = tape.node(567, 15, source.length, [
+      derivedId,
+      tape.null(),
+      derivedBody,
+      tape.list([implementation]),
+    ]);
+    const program = tape.node(1, 0, source.length, [
+      tape.list([plain, derived]),
+      tape.integer(0),
+    ]);
+
+    const decoded = decodeTape(source, tape.finish(program), { range: true });
+    expect(decoded.body[0]).toMatchObject({
+      type: "ClassDeclaration",
+      id: { name: "Plain" },
+      superClass: null,
+      body: { type: "ClassBody", body: [] },
+    });
+    expect(decoded.body[0]).not.toHaveProperty("implements");
+    expect(decoded.body[1]).toMatchObject({
+      type: "ClassDeclaration",
+      id: { name: "Derived" },
+      implements: [{
+        type: "TSClassImplements",
+        start: 40,
+        end: 56,
+        range: [40, 56],
+        expression: { name: "Interface" },
+        typeArguments: {
+          type: "TSTypeParameterInstantiation",
+          params: [{ typeName: { name: "Input" } }],
+        },
+      }],
+    });
+  });
+
+  it("rejects malformed class-implements field counts", () => {
+    for (
+      const [tag, count, expected] of [
+        [57, 4, 3],
+        [58, 2, 3],
+        [566, 1, 2],
+        [566, 3, 2],
+        [567, 3, 4],
+        [568, 5, 4],
+      ]
+    ) {
+      const tape = new HandcraftedTape();
+      const fields = Array.from({ length: count }, () => tape.null());
+      const encoded = tape.finish(tape.node(tag, 0, 0, fields));
+      const type = tag === 566
+        ? "TSClassImplements"
+        : tag === 58 || tag === 568
+        ? "ClassExpression"
+        : "ClassDeclaration";
+
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid ${type} field count ${count}; expected ${expected}`,
+        );
+      }
+    }
+  });
+
   it("decodes compound TypeScript type and declaration records", () => {
     const tape = new HandcraftedTape();
     const aliasId = tape.node(2, 0, 0, [tape.string("Shape")]);

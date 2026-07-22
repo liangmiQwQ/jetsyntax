@@ -245,6 +245,9 @@ impl NodeTag {
     pub const TS_IMPORT_EQUALS_DECLARATION: Self = Self(563);
     pub const TS_EXTERNAL_MODULE_REFERENCE: Self = Self(564);
     pub const TS_NEW_EXPRESSION: Self = Self(565);
+    pub const TS_CLASS_IMPLEMENTS: Self = Self(566);
+    pub const TS_CLASS_DECLARATION: Self = Self(567);
+    pub const TS_CLASS_EXPRESSION: Self = Self(568);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {
