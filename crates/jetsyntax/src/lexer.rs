@@ -225,6 +225,12 @@ pub struct LexError {
     pub message: &'static str,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct LexerCheckpoint {
+    position: usize,
+    error_len: usize,
+}
+
 /// Stateful on-demand lexer.
 pub struct Lexer<'s> {
     source: &'s str,
@@ -257,6 +263,20 @@ impl<'s> Lexer<'s> {
     #[must_use]
     pub fn errors(&self) -> &[LexError] {
         &self.errors
+    }
+
+    #[must_use]
+    pub(crate) const fn checkpoint(&self) -> LexerCheckpoint {
+        LexerCheckpoint {
+            position: self.position,
+            error_len: self.errors.len(),
+        }
+    }
+
+    pub(crate) fn rollback(&mut self, checkpoint: LexerCheckpoint) {
+        debug_assert!(checkpoint.error_len <= self.errors.len());
+        self.position = checkpoint.position;
+        self.errors.truncate(checkpoint.error_len);
     }
 
     #[must_use]

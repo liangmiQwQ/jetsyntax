@@ -3043,6 +3043,11 @@ impl<'s> Parser<'s> {
                 "import calls cannot be used directly as new callees",
             );
         }
+        if self.options.language.is_typescript()
+            && matches!(self.current.kind, TokenKind::Lt | TokenKind::ShiftLeft)
+        {
+            return self.parse_typescript_new_expression(start, callee);
+        }
         let arguments = if self.eat(TokenKind::LeftParen).is_some() {
             let arguments = self.parse_argument_list()?;
             self.expect(TokenKind::RightParen);
@@ -3050,6 +3055,92 @@ impl<'s> Parser<'s> {
         } else {
             self.tape.push_list(&[])?
         };
+        self.node(
+            NodeTag::NEW_EXPRESSION,
+            Span::new(start, self.previous_end(callee.span.end)),
+            &[callee.value(), arguments],
+        )
+    }
+
+    #[cold]
+    fn parse_typescript_new_expression(
+        &mut self,
+        start: u32,
+        callee: ParsedNode,
+    ) -> Result<ParsedNode, ParseError> {
+        debug_assert!(self.options.language.is_typescript());
+        debug_assert!(matches!(
+            self.current.kind,
+            TokenKind::Lt | TokenKind::ShiftLeft
+        ));
+
+        // Type arguments overlap relational expressions, so every speculative side effect must roll back together.
+        let current = self.current;
+        let lexer = self.lexer.checkpoint();
+        let tape = self.tape.checkpoint();
+        let context = self.context.checkpoint();
+        let assignment_patterns = self.assignment_pattern_checkpoint();
+        let last_node_tag = self.last_node_tag;
+        let last_assignment_target = self.last_assignment_target;
+
+        if self.current.kind == TokenKind::ShiftLeft {
+            self.current.kind = TokenKind::Lt;
+            self.current.end = self.current.start + 1;
+            self.lexer.set_position(self.current.end as usize);
+        }
+        let (type_arguments, end, closed, compound_closer) = self.parse_new_type_arguments()?;
+        if closed && compound_closer.is_none() && self.can_follow_new_type_arguments() {
+            self.context.commit(context);
+            if self.current.kind == TokenKind::Dot {
+                self.error(
+                    self.current_span(),
+                    "property access cannot directly follow new-expression type arguments",
+                );
+            }
+            if self.current.kind == TokenKind::QuestionDot {
+                self.error(
+                    self.current_span(),
+                    "an optional chain cannot directly follow a new expression",
+                );
+            }
+            let (arguments, end) = if self.eat(TokenKind::LeftParen).is_some() {
+                let arguments = self.parse_argument_list()?;
+                let right_paren = self.expect(TokenKind::RightParen);
+                let end = if right_paren.kind == TokenKind::RightParen {
+                    right_paren.end
+                } else {
+                    right_paren.start.max(callee.span.end)
+                };
+                (arguments, end)
+            } else {
+                (self.tape.push_list(&[])?, end)
+            };
+            return self.node(
+                NodeTag::TS_NEW_EXPRESSION,
+                Span::new(start, end),
+                &[callee.value(), arguments, type_arguments],
+            );
+        }
+
+        self.tape.rollback(tape)?;
+        self.context.rollback(context);
+        self.lexer.rollback(lexer);
+        self.current = current;
+        self.rollback_assignment_patterns(assignment_patterns);
+        self.last_node_tag = last_node_tag;
+        self.last_assignment_target = last_assignment_target;
+        if let Some(token) = compound_closer.filter(|token| {
+            matches!(
+                token.kind,
+                TokenKind::ShiftRightEq | TokenKind::ShiftRightUnsignedEq
+            )
+        }) {
+            self.error(
+                Self::token_span(token),
+                "invalid assignment target after a new expression",
+            );
+        }
+        let arguments = self.tape.push_list(&[])?;
         self.node(
             NodeTag::NEW_EXPRESSION,
             Span::new(start, self.previous_end(callee.span.end)),
@@ -3907,14 +3998,37 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_type_arguments(&mut self) -> Result<(ValueRef, u32), ParseError> {
+        let (arguments, end, _, _) = self.parse_type_arguments_impl(false)?;
+        Ok((arguments, end))
+    }
+
+    fn parse_new_type_arguments(
+        &mut self,
+    ) -> Result<(ValueRef, u32, bool, Option<Token>), ParseError> {
+        self.parse_type_arguments_impl(true)
+    }
+
+    fn parse_type_arguments_impl(
+        &mut self,
+        diagnose_empty: bool,
+    ) -> Result<(ValueRef, u32, bool, Option<Token>), ParseError> {
         let start = self.expect(TokenKind::Lt).start;
         let mut arguments = Vec::new();
+        if diagnose_empty && self.current_is_type_greater() {
+            self.error(self.current_span(), "type argument list cannot be empty");
+        }
         while !self.current_is_type_greater() && self.current.kind != TokenKind::Eof {
             arguments.push(self.parse_type()?.value());
             if self.eat(TokenKind::Comma).is_none() {
                 break;
             }
         }
+        let closed = self.current_is_type_greater();
+        let compound_closer = matches!(
+            self.current.kind,
+            TokenKind::GtEq | TokenKind::ShiftRightEq | TokenKind::ShiftRightUnsignedEq
+        )
+        .then_some(self.current);
         let end = self.expect_type_greater();
         let arguments = self.tape.push_list(&arguments)?;
         let instantiation = self.node(
@@ -3922,7 +4036,7 @@ impl<'s> Parser<'s> {
             Span::new(start, end),
             &[arguments],
         )?;
-        Ok((instantiation.value(), end))
+        Ok((instantiation.value(), end, closed, compound_closer))
     }
 
     fn parse_type_parameters(&mut self) -> Result<ValueRef, ParseError> {
@@ -4793,6 +4907,24 @@ impl<'s> Parser<'s> {
         lookahead.next_token().kind == TokenKind::LeftParen
     }
 
+    const fn can_follow_new_type_arguments(&self) -> bool {
+        match self.current.kind {
+            TokenKind::LeftParen => true,
+            TokenKind::NoSubstitutionTemplate
+            | TokenKind::TemplateHead
+            | TokenKind::Lt
+            | TokenKind::Gt
+            | TokenKind::Plus
+            | TokenKind::Minus => false,
+            kind => {
+                self.current.flags.line_break_before()
+                    || binary_binding(kind, true).is_some()
+                    || matches!(kind, TokenKind::As | TokenKind::Satisfies)
+                    || !Self::is_expression_start(kind)
+            }
+        }
+    }
+
     fn import_equals_type_only(&self, first: Token) -> Option<bool> {
         if !self.options.language.is_typescript() || !Self::is_identifier_name(first.kind) {
             return None;
@@ -5055,6 +5187,45 @@ impl<'s> Parser<'s> {
                 TokenKind::LeftBracket | TokenKind::String | TokenKind::Number | TokenKind::BigInt
             )
             || Self::is_member_identifier_name(kind)
+    }
+
+    const fn is_expression_start(kind: TokenKind) -> bool {
+        Self::is_identifier_name(kind)
+            || matches!(
+                kind,
+                TokenKind::PrivateIdentifier
+                    | TokenKind::Number
+                    | TokenKind::BigInt
+                    | TokenKind::String
+                    | TokenKind::RegExp
+                    | TokenKind::NoSubstitutionTemplate
+                    | TokenKind::TemplateHead
+                    | TokenKind::True
+                    | TokenKind::False
+                    | TokenKind::Null
+                    | TokenKind::This
+                    | TokenKind::Super
+                    | TokenKind::Function
+                    | TokenKind::Class
+                    | TokenKind::LeftParen
+                    | TokenKind::LeftBracket
+                    | TokenKind::LeftBrace
+                    | TokenKind::New
+                    | TokenKind::Import
+                    | TokenKind::Slash
+                    | TokenKind::SlashEq
+                    | TokenKind::Plus
+                    | TokenKind::Minus
+                    | TokenKind::Bang
+                    | TokenKind::Tilde
+                    | TokenKind::Delete
+                    | TokenKind::Typeof
+                    | TokenKind::Void
+                    | TokenKind::PlusPlus
+                    | TokenKind::MinusMinus
+                    | TokenKind::Lt
+                    | TokenKind::At
+            )
     }
 
     const fn is_identifier_name(kind: TokenKind) -> bool {

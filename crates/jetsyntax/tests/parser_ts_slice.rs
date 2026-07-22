@@ -995,6 +995,190 @@ fn malformed_typescript_declarations_recover_to_valid_tapes() {
 }
 
 #[test]
+fn parses_direct_generic_new_expressions_without_widening_javascript_records() {
+    let source = [
+        "new Plain();",
+        "new Factory<Input>(value);",
+        "new Namespace.Factory<Map<Key, Value>>;",
+        "new Factory<<T>(value: T) => void>();",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse generic new expressions");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid generic-new tape");
+
+    assert_eq!(first_node_fields(&parsed, NodeTag::NEW_EXPRESSION).len(), 2);
+    let expressions = node_fields(&parsed, NodeTag::TS_NEW_EXPRESSION).collect::<Vec<_>>();
+    assert_eq!(expressions.len(), 3);
+    assert!(expressions.iter().all(|fields| fields.len() == 3));
+    for fields in &expressions {
+        assert!(matches!(
+            parsed.tape.value_at(fields[2]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::TS_TYPE_PARAMETER_INSTANTIATION,
+                ..
+            })
+        ));
+    }
+
+    let TapeValue::Node { span, .. } = parsed
+        .tape
+        .value_at(expressions[0][2])
+        .expect("type arguments")
+    else {
+        panic!("type arguments are not a node");
+    };
+    assert_eq!(&source[span.start as usize..span.end as usize], "<Input>");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn disambiguates_direct_generic_new_expressions_from_relational_expressions() {
+    for source in [
+        "new A<T>();",
+        "new A<T>;",
+        "new A < B >\nC;",
+        "new A<T> * value;",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("parse generic new expression");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect("valid generic-new tape");
+        assert_eq!(
+            first_node_fields(&parsed, NodeTag::TS_NEW_EXPRESSION).len(),
+            3
+        );
+    }
+
+    for source in ["new A < B > C;", "new A<T> + value;"] {
+        let parsed = parse(source, typescript_options()).expect("parse relational expression");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect("valid relational tape");
+        assert_eq!(first_node_fields(&parsed, NodeTag::NEW_EXPRESSION).len(), 2);
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_TYPE_PARAMETER_INSTANTIATION).count(),
+            0
+        );
+        assert_eq!(node_fields(&parsed, NodeTag::TS_NEW_EXPRESSION).count(), 0);
+    }
+
+    let greater_equal = parse("new A<T>=value;", typescript_options())
+        .expect("parse greater-than-or-equal relational expression");
+    assert!(
+        greater_equal.diagnostics.is_empty(),
+        "{:#?}",
+        greater_equal.diagnostics
+    );
+    greater_equal
+        .tape
+        .validate()
+        .expect("valid relational tape");
+    assert_eq!(
+        first_node_fields(&greater_equal, NodeTag::NEW_EXPRESSION).len(),
+        2
+    );
+    assert_eq!(
+        node_fields(&greater_equal, NodeTag::TS_TYPE_PARAMETER_INSTANTIATION).count(),
+        0
+    );
+    assert_eq!(
+        node_fields(&greater_equal, NodeTag::TS_NEW_EXPRESSION).count(),
+        0
+    );
+
+    let shift_assign = parse("new A<T>>=value;", typescript_options())
+        .expect("recover shift assignment expression");
+    assert!(!shift_assign.diagnostics.is_empty());
+    shift_assign
+        .tape
+        .validate()
+        .expect("valid shift-assignment recovery tape");
+    assert_eq!(
+        first_node_fields(&shift_assign, NodeTag::NEW_EXPRESSION).len(),
+        2
+    );
+    assert_eq!(
+        node_fields(&shift_assign, NodeTag::TS_TYPE_PARAMETER_INSTANTIATION).count(),
+        0
+    );
+    assert_eq!(
+        node_fields(&shift_assign, NodeTag::TS_NEW_EXPRESSION).count(),
+        0
+    );
+
+    let tsx = parse(
+        "new A<T>();",
+        ParseOptions {
+            language: Language::TypeScriptJsx,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse TSX generic new expression");
+    assert!(tsx.diagnostics.is_empty(), "{:#?}", tsx.diagnostics);
+    assert_eq!(first_node_fields(&tsx, NodeTag::TS_NEW_EXPRESSION).len(), 3);
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "new A<T>();",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover JavaScript angle expression");
+        parsed
+            .tape
+            .validate()
+            .expect("valid JavaScript recovery tape");
+        assert!(node_fields(&parsed, NodeTag::NEW_EXPRESSION).all(|fields| fields.len() == 2));
+        assert_eq!(node_fields(&parsed, NodeTag::TS_NEW_EXPRESSION).count(), 0);
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_TYPE_PARAMETER_INSTANTIATION).count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn rolls_back_malformed_generic_new_speculation_without_stale_records() {
+    let malformed = parse(r"new A<\x + value;", typescript_options())
+        .expect("recover malformed relational expression");
+    assert!(!malformed.diagnostics.is_empty());
+    malformed.tape.validate().expect("valid rollback tape");
+    assert_eq!(
+        malformed
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message == "identifier escape must use Unicode syntax")
+            .count(),
+        1,
+        "lexical errors must not leak from the speculative branch"
+    );
+    assert_eq!(
+        node_fields(&malformed, NodeTag::TS_TYPE_PARAMETER_INSTANTIATION).count(),
+        0,
+        "missing `>` must discard speculative type nodes"
+    );
+
+    for source in ["new A<>();", "new A<T>.value;", "new A<T>?.value;"] {
+        let parsed = parse(source, typescript_options()).expect("recover invalid generic new");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid recovery tape");
+        assert_eq!(
+            first_node_fields(&parsed, NodeTag::TS_NEW_EXPRESSION).len(),
+            3
+        );
+    }
+}
+
+#[test]
 fn emits_babel_8_typescript_schema_wrappers() {
     let source = "type Box<T> = Promise<T>; type Text = string; type Flags<S> = { readonly [K in keyof S]?: S[K] }; interface Repository<T> extends Base<T> {} enum Choice { First } namespace Library.Core {}";
     let parsed = parse(source, typescript_options()).expect("parse");

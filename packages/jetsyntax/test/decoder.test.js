@@ -377,6 +377,73 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes legacy and generic new-expression field counts", () => {
+    const source = "new Plain(); new Factory<Input>(value);";
+    const tape = new HandcraftedTape();
+    const plainCallee = tape.node(2, 4, 9, [tape.string("Plain")]);
+    const plain = tape.node(42, 0, 11, [plainCallee, tape.list([])]);
+    const plainStatement = tape.node(5, 0, 12, [plain]);
+
+    const genericCallee = tape.node(2, 17, 24, [tape.string("Factory")]);
+    const typeName = tape.node(2, 25, 30, [tape.string("Input")]);
+    const typeReference = tape.node(513, 25, 30, [typeName, tape.null()]);
+    const typeArguments = tape.node(542, 24, 31, [tape.list([typeReference])]);
+    const argument = tape.node(2, 32, 37, [tape.string("value")]);
+    const generic = tape.node(565, 13, source.length - 1, [
+      genericCallee,
+      tape.list([argument]),
+      typeArguments,
+    ]);
+    const genericStatement = tape.node(5, 13, source.length, [generic]);
+    const program = tape.node(1, 0, source.length, [
+      tape.list([plainStatement, genericStatement]),
+      tape.integer(0),
+    ]);
+
+    const decoded = decodeTape(source, tape.finish(program), { range: true });
+    expect(decoded.body[0].expression).toMatchObject({
+      type: "NewExpression",
+      callee: { name: "Plain" },
+      arguments: [],
+    });
+    expect(decoded.body[0].expression).not.toHaveProperty("typeArguments");
+    expect(decoded.body[1].expression).toMatchObject({
+      type: "NewExpression",
+      start: 13,
+      end: source.length - 1,
+      range: [13, source.length - 1],
+      callee: { name: "Factory" },
+      arguments: [{ name: "value" }],
+      typeArguments: {
+        type: "TSTypeParameterInstantiation",
+        start: 24,
+        end: 31,
+        params: [{ type: "TSTypeReference", typeName: { name: "Input" } }],
+      },
+    });
+  });
+
+  it("rejects malformed new-expression field counts", () => {
+    for (
+      const [tag, count, expected] of [
+        [42, 1, 2],
+        [42, 3, 2],
+        [565, 2, 3],
+        [565, 4, 3],
+      ]
+    ) {
+      const tape = new HandcraftedTape();
+      const fields = Array.from({ length: count }, () => tape.null());
+      const encoded = tape.finish(tape.node(tag, 0, 0, fields));
+
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid NewExpression field count ${count}; expected ${expected}`,
+        );
+      }
+    }
+  });
+
   it("decodes compound TypeScript type and declaration records", () => {
     const tape = new HandcraftedTape();
     const aliasId = tape.node(2, 0, 0, [tape.string("Shape")]);

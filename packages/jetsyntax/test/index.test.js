@@ -750,6 +750,86 @@ describe("parse", () => {
     });
   });
 
+  it("materializes direct TypeScript generic new expressions", () => {
+    const source = [
+      "new Plain();",
+      "new Factory<Input>(value);",
+      "new Namespace.Factory<Map<Key, Value>>;",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const [plain, generic, nested] = result.program.body.map(statement => statement.expression);
+    expect(plain).toMatchObject({
+      type: "NewExpression",
+      callee: { type: "Identifier", name: "Plain" },
+      arguments: [],
+    });
+    expect(plain).not.toHaveProperty("typeArguments");
+    expect(generic).toMatchObject({
+      type: "NewExpression",
+      callee: { name: "Factory" },
+      arguments: [{ name: "value" }],
+      typeArguments: {
+        type: "TSTypeParameterInstantiation",
+        params: [{ type: "TSTypeReference", typeName: { name: "Input" } }],
+      },
+    });
+    expect(source.slice(generic.start, generic.end)).toBe("new Factory<Input>(value)");
+    expect(source.slice(generic.typeArguments.start, generic.typeArguments.end)).toBe("<Input>");
+    expect(nested).toMatchObject({
+      type: "NewExpression",
+      callee: {
+        type: "MemberExpression",
+        object: { name: "Namespace" },
+        property: { name: "Factory" },
+      },
+      typeArguments: {
+        params: [{ typeName: { name: "Map" }, typeArguments: { params: [{}, {}] } }],
+      },
+    });
+
+    const empty = parse("new Factory<>();", { lang: "ts" });
+    expect(empty.diagnostics).not.toEqual([]);
+    expect(empty.program.body[0].expression.typeArguments).toMatchObject({
+      type: "TSTypeParameterInstantiation",
+      params: [],
+    });
+
+    const tsx = parse("new Factory<Input>();", { lang: "tsx" });
+    expect(tsx.diagnostics).toEqual([]);
+    expect(tsx.program.body[0].expression).toHaveProperty("typeArguments");
+
+    const relational = parse("new Factory<Input>=value;", { lang: "ts" });
+    expect(relational.diagnostics).toEqual([]);
+    expect(relational.program.body[0].expression).toMatchObject({
+      type: "BinaryExpression",
+      operator: ">=",
+      left: {
+        type: "BinaryExpression",
+        operator: "<",
+        left: { type: "NewExpression", callee: { name: "Factory" } },
+        right: { name: "Input" },
+      },
+      right: { name: "value" },
+    });
+    expect(relational.program.body[0].expression.left.left).not.toHaveProperty("typeArguments");
+
+    const shiftAssign = parse("new Factory<Input>>=value;", { lang: "ts" });
+    expect(shiftAssign.diagnostics).not.toEqual([]);
+    expect(shiftAssign.program.body[0].expression).toMatchObject({
+      type: "AssignmentExpression",
+      operator: ">>=",
+      left: {
+        type: "BinaryExpression",
+        operator: "<",
+        left: { type: "NewExpression", callee: { name: "Factory" } },
+      },
+      right: { name: "value" },
+    });
+    expect(shiftAssign.program.body[0].expression.left.left).not.toHaveProperty("typeArguments");
+  });
+
   it("materializes optional TypeScript value parameters", () => {
     const source = [
       "function declared(required: Input, optional?: Output, inferred?) {}",
