@@ -444,6 +444,211 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes TypeScript generic postfix expressions", () => {
+    const callText = "fn<Input>(value)";
+    const optionalText = "fn?.<Output>(next)";
+    const taggedText = "tag<Result>`value`";
+    const instantiationText = "factory<Item>";
+    const source = `${callText}; ${optionalText}; ${taggedText}; ${instantiationText};`;
+    const callTypeArgumentsStart = source.indexOf("<Input>");
+    const optionalTypeArgumentsStart = source.indexOf("<Output>");
+    const taggedTypeArgumentsStart = source.indexOf("<Result>");
+    const instantiationTypeArgumentsStart = source.indexOf("<Item>");
+    const tape = new HandcraftedTape();
+
+    function typeArguments(text, name) {
+      const start = source.indexOf(text);
+      const end = start + text.length;
+      const nameStart = start + 1;
+      const nameNode = tape.node(2, nameStart, nameStart + name.length, [tape.string(name)]);
+      const reference = tape.node(513, nameStart, nameStart + name.length, [
+        nameNode,
+        tape.null(),
+      ]);
+      return tape.node(542, start, end, [tape.list([reference])]);
+    }
+
+    const callStart = source.indexOf(callText);
+    const callCallee = tape.node(2, callStart, callStart + 2, [tape.string("fn")]);
+    const callTypeArguments = typeArguments("<Input>", "Input");
+    const callArgumentStart = source.indexOf("value", callStart);
+    const callArgument = tape.node(2, callArgumentStart, callArgumentStart + 5, [
+      tape.string("value"),
+    ]);
+    const call = tape.node(584, callStart, callStart + callText.length, [
+      callCallee,
+      tape.list([callArgument]),
+      tape.boolean(false),
+      callTypeArguments,
+    ]);
+    const callStatement = tape.node(5, callStart, callStart + callText.length + 1, [call]);
+
+    const optionalStart = source.indexOf(optionalText);
+    const optionalCallee = tape.node(2, optionalStart, optionalStart + 2, [tape.string("fn")]);
+    const optionalTypeArguments = typeArguments("<Output>", "Output");
+    const optionalArgumentStart = source.indexOf("next", optionalStart);
+    const optionalArgument = tape.node(2, optionalArgumentStart, optionalArgumentStart + 4, [
+      tape.string("next"),
+    ]);
+    const optionalCall = tape.node(584, optionalStart, optionalStart + optionalText.length, [
+      optionalCallee,
+      tape.list([optionalArgument]),
+      tape.boolean(true),
+      optionalTypeArguments,
+    ]);
+    const chain = tape.node(45, optionalStart, optionalStart + optionalText.length, [optionalCall]);
+    const optionalStatement = tape.node(5, optionalStart, optionalStart + optionalText.length + 1, [
+      chain,
+    ]);
+
+    const taggedStart = source.indexOf(taggedText);
+    const taggedTag = tape.node(2, taggedStart, taggedStart + 3, [tape.string("tag")]);
+    const taggedTypeArguments = typeArguments("<Result>", "Result");
+    const quasiStart = source.indexOf("`value`", taggedStart);
+    const element = tape.node(49, quasiStart + 1, quasiStart + 6, [
+      tape.string("value"),
+      tape.boolean(true),
+    ]);
+    const quasi = tape.node(48, quasiStart, quasiStart + 7, [
+      tape.list([element]),
+      tape.list([]),
+    ]);
+    const tagged = tape.node(585, taggedStart, taggedStart + taggedText.length, [
+      taggedTag,
+      quasi,
+      taggedTypeArguments,
+    ]);
+    const taggedStatement = tape.node(5, taggedStart, taggedStart + taggedText.length + 1, [
+      tagged,
+    ]);
+
+    const instantiationStart = source.indexOf(instantiationText);
+    const instantiated = tape.node(2, instantiationStart, instantiationStart + 7, [
+      tape.string("factory"),
+    ]);
+    const instantiationTypeArguments = typeArguments("<Item>", "Item");
+    const instantiation = tape.node(
+      586,
+      instantiationStart,
+      instantiationStart + instantiationText.length,
+      [instantiated, instantiationTypeArguments],
+    );
+    const instantiationStatement = tape.node(
+      5,
+      instantiationStart,
+      instantiationStart + instantiationText.length + 1,
+      [instantiation],
+    );
+    const program = tape.node(1, 0, source.length, [
+      tape.list([callStatement, optionalStatement, taggedStatement, instantiationStatement]),
+      tape.integer(0),
+    ]);
+    const encoded = tape.finish(program);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      const decoded = decode(source, encoded, { range: true });
+      expect(decoded.body).toMatchObject([
+        {
+          expression: {
+            type: "CallExpression",
+            start: callStart,
+            end: callStart + callText.length,
+            range: [callStart, callStart + callText.length],
+            callee: { name: "fn" },
+            arguments: [{ name: "value" }],
+            optional: false,
+            typeArguments: {
+              type: "TSTypeParameterInstantiation",
+              start: callTypeArgumentsStart,
+              end: callTypeArgumentsStart + 7,
+              range: [callTypeArgumentsStart, callTypeArgumentsStart + 7],
+              params: [{ typeName: { name: "Input" } }],
+            },
+          },
+        },
+        {
+          expression: {
+            type: "ChainExpression",
+            start: optionalStart,
+            end: optionalStart + optionalText.length,
+            range: [optionalStart, optionalStart + optionalText.length],
+            expression: {
+              type: "CallExpression",
+              start: optionalStart,
+              end: optionalStart + optionalText.length,
+              range: [optionalStart, optionalStart + optionalText.length],
+              optional: true,
+              callee: { name: "fn" },
+              arguments: [{ name: "next" }],
+              typeArguments: {
+                type: "TSTypeParameterInstantiation",
+                start: optionalTypeArgumentsStart,
+                end: optionalTypeArgumentsStart + 8,
+                range: [optionalTypeArgumentsStart, optionalTypeArgumentsStart + 8],
+                params: [{ typeName: { name: "Output" } }],
+              },
+            },
+          },
+        },
+        {
+          expression: {
+            type: "TaggedTemplateExpression",
+            start: taggedStart,
+            end: taggedStart + taggedText.length,
+            range: [taggedStart, taggedStart + taggedText.length],
+            tag: { name: "tag" },
+            quasi: { type: "TemplateLiteral" },
+            typeArguments: {
+              type: "TSTypeParameterInstantiation",
+              start: taggedTypeArgumentsStart,
+              end: taggedTypeArgumentsStart + 8,
+              range: [taggedTypeArgumentsStart, taggedTypeArgumentsStart + 8],
+              params: [{ typeName: { name: "Result" } }],
+            },
+          },
+        },
+        {
+          expression: {
+            type: "TSInstantiationExpression",
+            start: instantiationStart,
+            end: instantiationStart + instantiationText.length,
+            range: [instantiationStart, instantiationStart + instantiationText.length],
+            expression: { name: "factory" },
+            typeArguments: {
+              type: "TSTypeParameterInstantiation",
+              start: instantiationTypeArgumentsStart,
+              end: instantiationTypeArgumentsStart + 6,
+              range: [instantiationTypeArgumentsStart, instantiationTypeArgumentsStart + 6],
+              params: [{ typeName: { name: "Item" } }],
+            },
+          },
+        },
+      ]);
+    }
+  });
+
+  it("rejects malformed TypeScript generic postfix field counts", () => {
+    for (
+      const [tag, type, expected] of [
+        [584, "CallExpression", 4],
+        [585, "TaggedTemplateExpression", 3],
+        [586, "TSInstantiationExpression", 2],
+      ]
+    ) {
+      for (const count of [expected - 1, expected + 1]) {
+        const tape = new HandcraftedTape();
+        const fields = Array.from({ length: count }, () => tape.null());
+        const encoded = tape.finish(tape.node(tag, 0, 0, fields));
+
+        for (const decode of [decodeTape, decodeTrustedTape]) {
+          expect(() => decode("", encoded)).toThrow(
+            `invalid ${type} field count ${count}; expected ${expected}`,
+          );
+        }
+      }
+    }
+  });
+
   it("decodes legacy and TypeScript class-implements records", () => {
     const source = "class Plain {} class Derived implements Interface<Input> {}";
     const tape = new HandcraftedTape();

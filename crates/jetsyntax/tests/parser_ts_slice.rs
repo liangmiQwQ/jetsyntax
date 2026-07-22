@@ -4662,20 +4662,434 @@ fn gates_and_recovers_typescript_superclass_type_arguments() {
             .iter()
             .any(|diagnostic| diagnostic.message == "type argument list cannot be empty")
     );
+}
+
+#[test]
+fn updates_superclass_recovery_for_generic_expression_support() {
+    let generic_call = parse(
+        "class GenericCall extends factory<Input>() {}",
+        typescript_options(),
+    )
+    .expect("parse generic-call superclass");
+    assert!(
+        generic_call.diagnostics.is_empty(),
+        "{:#?}",
+        generic_call.diagnostics
+    );
+    generic_call
+        .tape
+        .validate()
+        .expect("valid generic-call tape");
+    assert_node_field_count(&generic_call, NodeTag::TS_CALL_EXPRESSION, 4);
+    assert_eq!(
+        node_fields(
+            &generic_call,
+            NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION
+        )
+        .count(),
+        0
+    );
+
+    let member = parse(
+        "class InstantiationMember extends Base<Input>.Member {}",
+        typescript_options(),
+    )
+    .expect("recover property access after an instantiation");
+    assert!(!member.diagnostics.is_empty());
+    member.tape.validate().expect("valid recovery tape");
+    assert_node_field_count(&member, NodeTag::TS_INSTANTIATION_EXPRESSION, 2);
+    assert_eq!(
+        node_fields(&member, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION).count(),
+        0
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parses_typescript_generic_calls_tags_and_instantiation_expressions() {
+    let source = [
+        "const call = factory<Input>(value);",
+        "const optional = service?.method<Result<T>>(value);",
+        "const directOptional = service?.<Input>(value);",
+        "const tagged = tag<Input>`value`;",
+        "const instantiation = factory<Input>;",
+        "const nested = factory<Input>(value).next<Output>();",
+        "const chainedInstantiation = service?.method<Input>;",
+        "const empty = factory<>;",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse generic expressions");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid generic-expression tape");
+
+    assert_eq!(NodeTag::TS_CALL_EXPRESSION.get(), 584);
+    assert_eq!(NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION.get(), 585);
+    assert_eq!(NodeTag::TS_INSTANTIATION_EXPRESSION.get(), 586);
+    assert_eq!(node_fields(&parsed, NodeTag::TS_CALL_EXPRESSION).count(), 5);
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION).count(),
+        1
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_INSTANTIATION_EXPRESSION).count(),
+        3
+    );
+    assert!(parsed.tape.validation().all(|record| {
+        !matches!(
+            record.expect("valid record").value,
+            TapeValue::Node {
+                tag: NodeTag::TS_CALL_EXPRESSION
+                    | NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION
+                    | NodeTag::TS_INSTANTIATION_EXPRESSION,
+                flags: 1..,
+                ..
+            }
+        )
+    }));
+    assert!(
+        node_fields(&parsed, NodeTag::TS_CALL_EXPRESSION).all(|fields| {
+            fields.len() == 4
+                && matches!(
+                    parsed.tape.value_at(fields[3]),
+                    Ok(TapeValue::Node {
+                        tag: NodeTag::TS_TYPE_PARAMETER_INSTANTIATION,
+                        ..
+                    })
+                )
+        })
+    );
+    assert!(
+        node_fields(&parsed, NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION).all(|fields| {
+            fields.len() == 3
+                && matches!(
+                    parsed.tape.value_at(fields[2]),
+                    Ok(TapeValue::Node {
+                        tag: NodeTag::TS_TYPE_PARAMETER_INSTANTIATION,
+                        ..
+                    })
+                )
+        })
+    );
+    assert!(
+        node_fields(&parsed, NodeTag::TS_INSTANTIATION_EXPRESSION).all(|fields| {
+            fields.len() == 2
+                && matches!(
+                    parsed.tape.value_at(fields[1]),
+                    Ok(TapeValue::Node {
+                        tag: NodeTag::TS_TYPE_PARAMETER_INSTANTIATION,
+                        ..
+                    })
+                )
+        })
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_CALL_EXPRESSION)
+            .filter(|fields| matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(true))))
+            .count(),
+        1
+    );
+
+    let spans = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag:
+                    NodeTag::TS_CALL_EXPRESSION
+                    | NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION
+                    | NodeTag::TS_INSTANTIATION_EXPRESSION,
+                span,
+                ..
+            } => Some(&source[span.start as usize..span.end as usize]),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for expected in [
+        "factory<Input>(value)",
+        "service?.method<Result<T>>(value)",
+        "service?.<Input>(value)",
+        "tag<Input>`value`",
+        "factory<Input>",
+        "factory<Input>(value).next<Output>()",
+        "service?.method<Input>",
+        "factory<>",
+    ] {
+        assert!(spans.contains(&expected), "missing exact span {expected:?}");
+    }
+
+    let chained = node_fields(&parsed, NodeTag::TS_INSTANTIATION_EXPRESSION)
+        .find(|fields| {
+            matches!(
+                parsed.tape.value_at(fields[0]),
+                Ok(TapeValue::Node {
+                    tag: NodeTag::CHAIN_EXPRESSION,
+                    ..
+                })
+            )
+        })
+        .expect("optional chain is nested inside standalone instantiation");
+    assert!(matches!(
+        parsed.tape.value_at(chained[0]),
+        Ok(TapeValue::Node {
+            tag: NodeTag::CHAIN_EXPRESSION,
+            ..
+        })
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn preserves_typescript_generic_expression_ambiguities_and_diagnostics() {
+    for source in [
+        "f<T>(x);",
+        "tag<T>`x`;",
+        "f<T>;",
+        "f<T> * x;",
+        "f<T> << x;",
+        "f<T> / x;",
+        "f<T> && x;",
+        "f<T> ?? x;",
+        "f<T> ? x : y;",
+        "f<T> as unknown;",
+        "f<T>\nx;",
+        "f<<T>(value: T) => void>();",
+        "f<keyof T>();",
+        "f<readonly T[]>();",
+        "f<unique symbol>();",
+        "f<infer T>();",
+        "f<T>?.(x);",
+        "a?.b<T>?.(x);",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("parse generic expression");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+        parsed
+            .tape
+            .validate()
+            .expect("valid generic-expression tape");
+        assert!(
+            node_fields(&parsed, NodeTag::TS_CALL_EXPRESSION).count()
+                + node_fields(&parsed, NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION).count()
+                + node_fields(&parsed, NodeTag::TS_INSTANTIATION_EXPRESSION).count()
+                > 0,
+            "{source}"
+        );
+    }
 
     for source in [
-        "class GenericCall extends factory<Input>() {}",
-        "class InstantiationMember extends Base<Input>.Member {}",
+        "f<T> + x;",
+        "f<T> - x;",
+        "f<T>[x];",
+        "f<T> > x;",
+        "f<T>=x;",
+        "f<T x;",
     ] {
-        let parsed = parse(source, typescript_options()).expect("recover postfix instantiation");
-        assert!(!parsed.diagnostics.is_empty(), "{source}");
-        parsed.tape.validate().expect("valid rollback tape");
+        let parsed = parse(source, typescript_options()).expect("parse relational ambiguity");
+        parsed.tape.validate().expect("valid relational tape");
         assert_eq!(
-            node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION).count(),
+            node_fields(&parsed, NodeTag::TS_CALL_EXPRESSION).count()
+                + node_fields(&parsed, NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION).count()
+                + node_fields(&parsed, NodeTag::TS_INSTANTIATION_EXPRESSION).count(),
             0,
             "{source}"
         );
     }
+
+    for language in [
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+        Language::TypeScriptDefinition,
+    ] {
+        let parsed = parse(
+            "f<T>(x); f<T>; tag<T>`x`;",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse TypeScript dialect generic expressions");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:#?}",
+            parsed.diagnostics
+        );
+        assert_eq!(node_fields(&parsed, NodeTag::TS_CALL_EXPRESSION).count(), 1);
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION).count(),
+            1
+        );
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_INSTANTIATION_EXPRESSION).count(),
+            1
+        );
+    }
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "f<T>(x); f<T>; tag<T>`x`;",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover standard JavaScript expressions");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_CALL_EXPRESSION).count()
+                + node_fields(&parsed, NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION).count()
+                + node_fields(&parsed, NodeTag::TS_INSTANTIATION_EXPRESSION).count(),
+            0,
+            "{language:?}"
+        );
+    }
+
+    let syntax_only = parse("f<>(); f<T> = value;", typescript_options())
+        .expect("parse syntax-only generic edge cases");
+    assert!(
+        syntax_only.diagnostics.is_empty(),
+        "{:#?}",
+        syntax_only.diagnostics
+    );
+    let semantic = parse(
+        "f<>(); f<T> = value;",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("diagnose semantic generic edge cases");
+    assert!(
+        semantic
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "type argument list cannot be empty")
+    );
+    assert!(
+        semantic
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "invalid assignment target")
+    );
+    let invalid_arrows = parse(
+        [
+            "4 + async<number>() => 2;",
+            "f<T> => x;",
+            "tag<T>`x` => y;",
+            "f?.<T>(x) => y;",
+            "f<T>?.(x) => y;",
+            "f?.x<T> => y;",
+            "f?.x<T>() => y;",
+        ]
+        .join("\n")
+        .as_str(),
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover invalid arrow heads after generic postfix expressions");
+    assert_eq!(
+        invalid_arrows
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| matches!(
+                diagnostic.message.as_str(),
+                "invalid arrow parameter" | "optional chains are not valid arrow parameters"
+            ))
+            .count(),
+        7,
+        "{:#?}",
+        invalid_arrows.diagnostics
+    );
+
+    let property_access = parse("f<T>.x; f<T>?.x; (f<T>).x;", typescript_options())
+        .expect("recover property access after instantiation");
+    assert_eq!(
+        property_access
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.message == "property access cannot follow an instantiation expression"
+            })
+            .count(),
+        2,
+        "{:#?}",
+        property_access.diagnostics
+    );
+    assert_eq!(
+        property_access
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.message == "property access cannot follow an instantiation expression"
+            })
+            .map(|diagnostic| (diagnostic.span.start, diagnostic.span.end))
+            .collect::<Vec<_>>(),
+        [(1, 4), (9, 12)]
+    );
+    assert_eq!(
+        node_fields(&property_access, NodeTag::TS_INSTANTIATION_EXPRESSION).count(),
+        3
+    );
+}
+
+#[test]
+fn separates_generic_superclass_calls_from_class_type_arguments() {
+    let source = [
+        "class Mixed extends Mixin<T>(Base) {}",
+        "class Tagged extends tag<T>`x` {}",
+        "class Trailing extends getBase()<T> {}",
+        "class Split extends Mixin<T>(Base)<U> {}",
+        "class Member extends B<string>().C<T> {}",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse mixed generic heritage");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid mixed-heritage tape");
+
+    assert_eq!(node_fields(&parsed, NodeTag::TS_CALL_EXPRESSION).count(), 3);
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION).count(),
+        1
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION).count(),
+        3
+    );
+    let argument_spans = node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION)
+        .map(|fields| {
+            match parsed
+                .tape
+                .value_at(fields[5])
+                .expect("class type arguments")
+            {
+                TapeValue::Node { span, .. } => &source[span.start as usize..span.end as usize],
+                _ => panic!("class type arguments are not a node"),
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(argument_spans, ["<T>", "<U>", "<T>"]);
+
+    let call_spans = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_CALL_EXPRESSION,
+                span,
+                ..
+            } => Some(&source[span.start as usize..span.end as usize]),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        call_spans,
+        ["Mixin<T>(Base)", "Mixin<T>(Base)", "B<string>()"]
+    );
 }
 
 #[test]

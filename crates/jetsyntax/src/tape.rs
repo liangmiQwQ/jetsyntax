@@ -263,6 +263,9 @@ impl NodeTag {
     pub const TS_INDEX_SIGNATURE: Self = Self(581);
     pub const TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION: Self = Self(582);
     pub const TS_SUPER_TYPE_ARGUMENTS_CLASS_EXPRESSION: Self = Self(583);
+    pub const TS_CALL_EXPRESSION: Self = Self(584);
+    pub const TS_TAGGED_TEMPLATE_EXPRESSION: Self = Self(585);
+    pub const TS_INSTANTIATION_EXPRESSION: Self = Self(586);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {

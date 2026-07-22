@@ -161,6 +161,13 @@ enum MethodBodyPolicy {
     TypeScriptAbstractSignature,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PostfixPolicy {
+    Ordinary,
+    NewCallee,
+    ClassHeritage,
+}
+
 impl MethodBodyPolicy {
     fn permits_bodyless(
         self,
@@ -1677,7 +1684,7 @@ impl<'s> Parser<'s> {
         let last_node_tag = self.last_node_tag;
         let last_assignment_target = self.last_assignment_target;
 
-        let base = self.parse_postfix_expression()?;
+        let base = self.parse_postfix_expression_with_policy(PostfixPolicy::ClassHeritage)?;
         if matches!(self.current.kind, TokenKind::Lt | TokenKind::ShiftLeft) {
             if self.current.kind == TokenKind::ShiftLeft {
                 self.current.kind = TokenKind::Lt;
@@ -3527,7 +3534,14 @@ impl<'s> Parser<'s> {
                     AssignmentTargetType::WebCompat => {
                         self.error(left.span, "call expressions are not valid arrow parameters");
                     }
-                    _ => {}
+                    AssignmentTargetType::Invalid
+                        if Self::is_invalid_arrow_parameter_tag(self.last_node_tag) =>
+                    {
+                        self.error(left.span, "invalid arrow parameter");
+                    }
+                    AssignmentTargetType::RestrictedIdentifier
+                    | AssignmentTargetType::Simple
+                    | AssignmentTargetType::Invalid => {}
                 }
             }
             let previous_grammar = self.enter_function_context(false, false);
@@ -3701,6 +3715,20 @@ impl<'s> Parser<'s> {
             NodeTag::ARROW_FUNCTION_EXPRESSION,
             Span::new(start, body.span.end),
             &[parameters, body.value(), asynchronous, expression],
+        )
+    }
+
+    const fn is_invalid_arrow_parameter_tag(tag: Option<NodeTag>) -> bool {
+        matches!(
+            tag,
+            Some(
+                NodeTag::BINARY_EXPRESSION
+                    | NodeTag::LOGICAL_EXPRESSION
+                    | NodeTag::CONDITIONAL_EXPRESSION
+                    | NodeTag::CHAIN_EXPRESSION
+                    | NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION
+                    | NodeTag::TS_INSTANTIATION_EXPRESSION
+            )
         )
     }
 
@@ -3928,13 +3956,13 @@ impl<'s> Parser<'s> {
     // Postfix operations must stay in precedence order within one left-folding dispatch loop.
     #[allow(clippy::too_many_lines)]
     fn parse_postfix_expression(&mut self) -> Result<ParsedNode, ParseError> {
-        self.parse_postfix_expression_until_call(false)
+        self.parse_postfix_expression_with_policy(PostfixPolicy::Ordinary)
     }
 
     #[allow(clippy::too_many_lines)]
-    fn parse_postfix_expression_until_call(
+    fn parse_postfix_expression_with_policy(
         &mut self,
-        stop_before_call: bool,
+        policy: PostfixPolicy,
     ) -> Result<ParsedNode, ParseError> {
         let mut expression = self.parse_primary_expression()?;
         let mut is_chain = false;
@@ -3954,7 +3982,26 @@ impl<'s> Parser<'s> {
                 TokenKind::QuestionDot => {
                     is_chain = true;
                     self.bump();
-                    if self.eat(TokenKind::LeftBracket).is_some() {
+                    if self.options.language.is_typescript()
+                        && matches!(self.current.kind, TokenKind::Lt | TokenKind::ShiftLeft)
+                    {
+                        if self.current.kind == TokenKind::ShiftLeft {
+                            self.current.kind = TokenKind::Lt;
+                            self.current.end = self.current.start + 1;
+                            self.lexer.set_position(self.current.end as usize);
+                        }
+                        let (type_arguments, _, _, _) =
+                            self.parse_type_arguments_impl(self.options.semantic_errors)?;
+                        self.expect(TokenKind::LeftParen);
+                        let arguments = self.parse_argument_list()?;
+                        let end = self.expect(TokenKind::RightParen).end;
+                        let optional = self.tape.push_bool(true)?;
+                        expression = self.node(
+                            NodeTag::TS_CALL_EXPRESSION,
+                            Span::new(expression.span.start, end),
+                            &[expression.value(), arguments, optional, type_arguments],
+                        )?;
+                    } else if self.eat(TokenKind::LeftBracket).is_some() {
                         let property = self.parse_expression(true)?;
                         let end = self.expect(TokenKind::RightBracket).end;
                         let computed = self.tape.push_bool(true)?;
@@ -3996,7 +4043,7 @@ impl<'s> Parser<'s> {
                         &[expression.value(), property.value(), computed, optional],
                     )?;
                 }
-                TokenKind::LeftParen if stop_before_call => break,
+                TokenKind::LeftParen if policy == PostfixPolicy::NewCallee => break,
                 TokenKind::LeftParen => {
                     self.bump();
                     let arguments = self.parse_argument_list()?;
@@ -4007,6 +4054,25 @@ impl<'s> Parser<'s> {
                         Span::new(expression.span.start, end),
                         &[expression.value(), arguments, optional],
                     )?;
+                }
+                TokenKind::Lt | TokenKind::ShiftLeft
+                    if self.options.language.is_typescript()
+                        && policy != PostfixPolicy::NewCallee
+                        && self.typescript_postfix_type_arguments_may_commit() =>
+                {
+                    let Some((generic, wrapped_chain)) = self
+                        .parse_typescript_postfix_type_arguments(
+                            expression,
+                            policy != PostfixPolicy::ClassHeritage,
+                            is_chain,
+                        )?
+                    else {
+                        break;
+                    };
+                    expression = generic;
+                    if wrapped_chain {
+                        is_chain = false;
+                    }
                 }
                 TokenKind::NoSubstitutionTemplate | TokenKind::TemplateHead => {
                     let quasi = self.parse_template_literal()?;
@@ -4088,6 +4154,109 @@ impl<'s> Parser<'s> {
             self.last_assignment_target = assignment_target;
         }
         Ok(expression)
+    }
+
+    #[cold]
+    fn parse_typescript_postfix_type_arguments(
+        &mut self,
+        expression: ParsedNode,
+        allow_instantiation: bool,
+        is_chain: bool,
+    ) -> Result<Option<(ParsedNode, bool)>, ParseError> {
+        debug_assert!(self.options.language.is_typescript());
+        debug_assert!(matches!(
+            self.current.kind,
+            TokenKind::Lt | TokenKind::ShiftLeft
+        ));
+
+        let current = self.current;
+        let lexer = self.lexer.checkpoint();
+        let tape = self.tape.checkpoint();
+        let context = self.context.checkpoint();
+        let assignment_patterns = self.assignment_pattern_checkpoint();
+        let last_node_tag = self.last_node_tag;
+        let last_assignment_target = self.last_assignment_target;
+
+        let type_arguments_start = self.current.start;
+        if self.current.kind == TokenKind::ShiftLeft {
+            self.current.kind = TokenKind::Lt;
+            self.current.end = self.current.start + 1;
+            self.lexer.set_position(self.current.end as usize);
+        }
+        let (type_arguments, end, closed, compound_closer) =
+            self.parse_type_arguments_impl(self.options.semantic_errors)?;
+        let parsed = if closed && compound_closer.is_none() {
+            if self.eat(TokenKind::LeftParen).is_some() {
+                let arguments = self.parse_argument_list()?;
+                let end = self.expect(TokenKind::RightParen).end;
+                let optional = self.tape.push_bool(false)?;
+                Some((
+                    self.node(
+                        NodeTag::TS_CALL_EXPRESSION,
+                        Span::new(expression.span.start, end),
+                        &[expression.value(), arguments, optional, type_arguments],
+                    )?,
+                    false,
+                ))
+            } else if matches!(
+                self.current.kind,
+                TokenKind::NoSubstitutionTemplate | TokenKind::TemplateHead
+            ) {
+                let quasi = self.parse_template_literal()?;
+                Some((
+                    self.node(
+                        NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION,
+                        Span::new(expression.span.start, quasi.span.end),
+                        &[expression.value(), quasi.value(), type_arguments],
+                    )?,
+                    false,
+                ))
+            } else if allow_instantiation && self.can_follow_typescript_instantiation() {
+                if self.current.kind == TokenKind::Dot
+                    || self.current.kind == TokenKind::QuestionDot
+                        && !self.typescript_instantiation_optional_call_follows()
+                {
+                    self.error(
+                        Span::new(type_arguments_start, end),
+                        "property access cannot follow an instantiation expression",
+                    );
+                }
+                let expression = if is_chain {
+                    self.node(
+                        NodeTag::CHAIN_EXPRESSION,
+                        expression.span,
+                        &[expression.value()],
+                    )?
+                } else {
+                    expression
+                };
+                Some((
+                    self.node(
+                        NodeTag::TS_INSTANTIATION_EXPRESSION,
+                        Span::new(expression.span.start, end),
+                        &[expression.value(), type_arguments],
+                    )?,
+                    is_chain,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if parsed.is_some() {
+            self.context.commit(context);
+            return Ok(parsed);
+        }
+
+        self.tape.rollback(tape)?;
+        self.context.rollback(context);
+        self.lexer.rollback(lexer);
+        self.current = current;
+        self.rollback_assignment_patterns(assignment_patterns);
+        self.last_node_tag = last_node_tag;
+        self.last_assignment_target = last_assignment_target;
+        Ok(None)
     }
 
     fn parse_primary_expression(&mut self) -> Result<ParsedNode, ParseError> {
@@ -4657,7 +4826,7 @@ impl<'s> Parser<'s> {
         }
         let direct_import_call =
             self.current.kind == TokenKind::Import && self.import_starts_direct_call();
-        let callee = self.parse_postfix_expression_until_call(true)?;
+        let callee = self.parse_postfix_expression_with_policy(PostfixPolicy::NewCallee)?;
         if direct_import_call {
             self.error(
                 callee.span,
@@ -6978,7 +7147,9 @@ impl<'s> Parser<'s> {
         let node = self.tape.push_node(tag, span, 0, fields)?;
         let assignment_target = match tag {
             NodeTag::IDENTIFIER | NodeTag::MEMBER_EXPRESSION => AssignmentTargetType::Simple,
-            NodeTag::CALL_EXPRESSION => AssignmentTargetType::WebCompat,
+            NodeTag::CALL_EXPRESSION | NodeTag::TS_CALL_EXPRESSION => {
+                AssignmentTargetType::WebCompat
+            }
             _ => AssignmentTargetType::Invalid,
         };
         self.last_node_tag = Some(tag);
@@ -7236,6 +7407,76 @@ impl<'s> Parser<'s> {
                 | TokenKind::TemplateHead
                 | TokenKind::As
                 | TokenKind::Satisfies
+        )
+    }
+
+    const fn can_follow_typescript_instantiation(&self) -> bool {
+        match self.current.kind {
+            TokenKind::Lt
+            | TokenKind::Gt
+            | TokenKind::ShiftRight
+            | TokenKind::ShiftRightUnsigned
+            | TokenKind::Plus
+            | TokenKind::Minus => false,
+            kind => {
+                self.current.flags.line_break_before()
+                    || binary_binding(kind, true).is_some()
+                    || matches!(kind, TokenKind::As | TokenKind::Satisfies)
+                    || !Self::is_expression_start(kind)
+            }
+        }
+    }
+
+    fn typescript_postfix_type_arguments_may_commit(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        let after_left_angle = if self.current.kind == TokenKind::ShiftLeft {
+            self.current.start + 1
+        } else {
+            self.current.end
+        };
+        lookahead.set_position(after_left_angle as usize);
+        let first = lookahead.next_token();
+        if matches!(
+            first.kind,
+            TokenKind::Keyof | TokenKind::Readonly | TokenKind::Unique | TokenKind::Infer
+        ) {
+            return true;
+        }
+        if !Self::is_type_reference_name(first.kind)
+            && !matches!(
+                first.kind,
+                TokenKind::String
+                    | TokenKind::Number
+                    | TokenKind::BigInt
+                    | TokenKind::True
+                    | TokenKind::False
+            )
+        {
+            return true;
+        }
+
+        matches!(
+            lookahead.next_token().kind,
+            TokenKind::Gt
+                | TokenKind::ShiftRight
+                | TokenKind::ShiftRightUnsigned
+                | TokenKind::Comma
+                | TokenKind::Dot
+                | TokenKind::Lt
+                | TokenKind::LeftBracket
+                | TokenKind::Pipe
+                | TokenKind::Amp
+                | TokenKind::Extends
+        )
+    }
+
+    fn typescript_instantiation_optional_call_follows(&self) -> bool {
+        debug_assert_eq!(self.current.kind, TokenKind::QuestionDot);
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        matches!(
+            lookahead.next_token().kind,
+            TokenKind::LeftParen | TokenKind::Lt | TokenKind::ShiftLeft
         )
     }
 

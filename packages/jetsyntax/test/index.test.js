@@ -1363,6 +1363,157 @@ describe("parse", () => {
     expect(shiftAssign.program.body[0].expression.left.left).not.toHaveProperty("typeArguments");
   });
 
+  it("materializes TypeScript generic postfix expressions", () => {
+    const source = [
+      "plain(value);",
+      "generic<Input>(value);",
+      "generic?.<Output>(next);",
+      "tag<Result>`value`;",
+      "factory<Item>;",
+      "factory<Item>?.(value);",
+      "service?.method<Value>;",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const [
+      plain,
+      generic,
+      optional,
+      tagged,
+      instantiation,
+      optionalInstantiationCall,
+      chainedInstantiation,
+    ] = result.program.body.map(statement => statement.expression);
+    expect(plain).toMatchObject({
+      type: "CallExpression",
+      callee: { name: "plain" },
+      arguments: [{ name: "value" }],
+      optional: false,
+    });
+    expect(plain).not.toHaveProperty("typeArguments");
+    expect(generic).toMatchObject({
+      type: "CallExpression",
+      callee: { name: "generic" },
+      arguments: [{ name: "value" }],
+      optional: false,
+      typeArguments: {
+        type: "TSTypeParameterInstantiation",
+        params: [{ typeName: { name: "Input" } }],
+      },
+    });
+    expect(optional).toMatchObject({
+      type: "ChainExpression",
+      expression: {
+        type: "CallExpression",
+        callee: { name: "generic" },
+        arguments: [{ name: "next" }],
+        optional: true,
+        typeArguments: {
+          type: "TSTypeParameterInstantiation",
+          params: [{ typeName: { name: "Output" } }],
+        },
+      },
+    });
+    expect(tagged).toMatchObject({
+      type: "TaggedTemplateExpression",
+      tag: { name: "tag" },
+      quasi: { type: "TemplateLiteral" },
+      typeArguments: {
+        type: "TSTypeParameterInstantiation",
+        params: [{ typeName: { name: "Result" } }],
+      },
+    });
+    expect(instantiation).toMatchObject({
+      type: "TSInstantiationExpression",
+      expression: { name: "factory" },
+      typeArguments: {
+        type: "TSTypeParameterInstantiation",
+        params: [{ typeName: { name: "Item" } }],
+      },
+    });
+    expect(optionalInstantiationCall).toMatchObject({
+      type: "ChainExpression",
+      expression: {
+        type: "CallExpression",
+        optional: true,
+        arguments: [{ name: "value" }],
+        callee: {
+          type: "TSInstantiationExpression",
+          expression: { name: "factory" },
+          typeArguments: {
+            type: "TSTypeParameterInstantiation",
+            params: [{ typeName: { name: "Item" } }],
+          },
+        },
+      },
+    });
+    expect(chainedInstantiation).toMatchObject({
+      type: "TSInstantiationExpression",
+      expression: {
+        type: "ChainExpression",
+        expression: {
+          type: "MemberExpression",
+          object: { name: "service" },
+          property: { name: "method" },
+          optional: true,
+        },
+      },
+      typeArguments: {
+        type: "TSTypeParameterInstantiation",
+        params: [{ typeName: { name: "Value" } }],
+      },
+    });
+
+    const typed = [
+      generic,
+      optional.expression,
+      tagged,
+      instantiation,
+      optionalInstantiationCall.expression.callee,
+      chainedInstantiation,
+    ];
+    expect(typed.map(expression => source.slice(expression.start, expression.end))).toEqual([
+      "generic<Input>(value)",
+      "generic?.<Output>(next)",
+      "tag<Result>`value`",
+      "factory<Item>",
+      "factory<Item>",
+      "service?.method<Value>",
+    ]);
+    expect(typed.map(expression => (
+      source.slice(expression.typeArguments.start, expression.typeArguments.end)
+    ))).toEqual(["<Input>", "<Output>", "<Result>", "<Item>", "<Item>", "<Value>"]);
+    for (const expression of typed) {
+      expect(expression.range).toEqual([expression.start, expression.end]);
+      expect(expression.typeArguments.range).toEqual([
+        expression.typeArguments.start,
+        expression.typeArguments.end,
+      ]);
+    }
+    expect(optional.range).toEqual([optional.start, optional.end]);
+    expect(optionalInstantiationCall.range).toEqual([
+      optionalInstantiationCall.start,
+      optionalInstantiationCall.end,
+    ]);
+
+    const shifted = parse("factory<Item> << count;", { lang: "ts" });
+    expect(shifted.diagnostics).toEqual([]);
+    expect(shifted.program.body[0].expression).toMatchObject({
+      type: "BinaryExpression",
+      operator: "<<",
+      left: {
+        type: "TSInstantiationExpression",
+        expression: { name: "factory" },
+        typeArguments: {
+          type: "TSTypeParameterInstantiation",
+          params: [{ typeName: { name: "Item" } }],
+        },
+      },
+      right: { name: "count" },
+    });
+  });
+
   it("materializes TypeScript class implements clauses without widening plain classes", () => {
     const source = [
       "class Plain {}",

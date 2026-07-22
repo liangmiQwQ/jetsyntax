@@ -200,6 +200,9 @@ for (
     [581, ["TSIndexSignature", ["parameters", "typeAnnotation", "readonly", "static"]]],
     [582, ["ClassDeclaration", ["id", "superClass", "body", "implements", "typeParameters", "superTypeArguments"]]],
     [583, ["ClassExpression", ["id", "superClass", "body", "implements", "typeParameters", "superTypeArguments"]]],
+    [584, ["CallExpression", ["callee", "arguments", "optional", "typeArguments"]]],
+    [585, ["TaggedTemplateExpression", ["tag", "quasi", "typeArguments"]]],
+    [586, ["TSInstantiationExpression", ["expression", "typeArguments"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -1082,6 +1085,21 @@ function decodeTapeInternal(source, tape, options, trusted) {
         if (fields[3] !== null) node.implements = array(fields[3], tag);
         if (fields[4] !== null) node.typeParameters = fields[4];
         node.superTypeArguments = fields[5];
+        return node;
+      case 584:
+        node.callee = fields[0];
+        node.arguments = array(fields[1], tag);
+        node.optional = boolean(fields[2], tag);
+        node.typeArguments = fields[3];
+        return node;
+      case 585:
+        node.tag = fields[0];
+        node.quasi = fields[1];
+        node.typeArguments = fields[2];
+        return node;
+      case 586:
+        node.expression = fields[0];
+        node.typeArguments = fields[1];
         return node;
       case 571:
         node.id = fields[0];

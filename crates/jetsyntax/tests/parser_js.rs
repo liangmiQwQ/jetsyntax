@@ -2406,6 +2406,14 @@ fn parser_should_report_javascript_early_errors() {
             "const value = 1; export { value }; export { value };",
             &[NodeTag::EXPORT_NAMED_DECLARATION],
         ),
+        GrammarCase::module(
+            "optional call arrow parameter",
+            "value?.() => result;",
+            &[
+                NodeTag::CHAIN_EXPRESSION,
+                NodeTag::ARROW_FUNCTION_EXPRESSION,
+            ],
+        ),
     ];
 
     assert_diagnostic_cases(&cases, true);
