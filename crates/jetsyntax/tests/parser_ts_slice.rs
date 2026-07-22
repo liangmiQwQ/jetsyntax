@@ -325,6 +325,120 @@ fn parses_call_and_construct_type_members() {
 }
 
 #[test]
+fn parses_interface_and_type_literal_index_signatures() {
+    let source = [
+        "interface Dictionary {",
+        "  [key: string]: number;",
+        "  readonly [index: number]: string,",
+        "  [symbol: symbol]",
+        "  [yield: string]: boolean",
+        "}",
+        "type Lookup = { [name: string]: unknown }",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse index signatures");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid index-signature tape");
+    let tag = NodeTag::TS_INDEX_SIGNATURE;
+    assert_eq!(tag.get(), 581);
+    let signatures = node_fields(&parsed, tag).collect::<Vec<_>>();
+    assert_eq!(signatures.len(), 5);
+    for fields in &signatures {
+        assert_eq!(fields.len(), 4);
+        assert!(matches!(
+            parsed.tape.value_at(fields[0]),
+            Ok(TapeValue::List { items, .. }) if items.len() == 1
+        ));
+        assert!(matches!(
+            parsed.tape.value_at(fields[3]),
+            Ok(TapeValue::Bool(false))
+        ));
+    }
+    assert!(matches!(
+        parsed.tape.value_at(signatures[1][2]),
+        Ok(TapeValue::Bool(true))
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(signatures[2][1]),
+        Ok(TapeValue::Null)
+    ));
+}
+
+#[test]
+fn distinguishes_index_signatures_from_mapped_and_computed_members() {
+    let source = [
+        "type Mapped<T> = { readonly [yield in keyof T]?: T[string] };",
+        "type MultilineMapped<T> = { readonly\n[Key in keyof T]: T[Key] };",
+        "type Computed = { [Symbol.iterator](): Iterator<unknown> };",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("recover type-member ambiguities");
+
+    parsed.tape.validate().expect("valid ambiguous-member tape");
+    assert_eq!(node_fields(&parsed, NodeTag::TS_MAPPED_TYPE).count(), 2);
+    assert_eq!(node_fields(&parsed, NodeTag::TS_INDEX_SIGNATURE).count(), 0);
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected a type member name"))
+    );
+
+    let newline = parse(
+        "interface Newline { readonly\n[key: string]: number }",
+        typescript_options(),
+    )
+    .expect("parse readonly newline index signature");
+    assert!(newline.diagnostics.is_empty(), "{:#?}", newline.diagnostics);
+    assert_eq!(
+        node_fields(&newline, NodeTag::TS_PROPERTY_SIGNATURE).count(),
+        1
+    );
+    let index = node_fields(&newline, NodeTag::TS_INDEX_SIGNATURE)
+        .next()
+        .expect("newline index signature");
+    assert!(matches!(
+        newline.tape.value_at(index[2]),
+        Ok(TapeValue::Bool(false))
+    ));
+
+    for source in [
+        "async function f() { interface I { [await: string]: number } }",
+        "function* f() { interface I { [yield: string]: number } }",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover reserved interface index");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        assert_eq!(node_fields(&parsed, NodeTag::TS_INDEX_SIGNATURE).count(), 0);
+    }
+    for source in [
+        "async function f() { type I = { [await: string]: number } }",
+        "function* f() { type I = { [yield: string]: number } }",
+        "function* f() { type M<T> = { [yield in keyof T]: T[string] } }",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("parse contextual type parameter");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+    }
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "interface Dictionary { [key: string]: number }",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover TypeScript index signature in JavaScript");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        assert_eq!(node_fields(&parsed, NodeTag::TS_INDEX_SIGNATURE).count(), 0);
+    }
+}
+
+#[test]
 fn parses_untyped_parameters_in_type_signatures() {
     let source = [
         "type Callback = (value, optional?) => void;",
@@ -512,7 +626,6 @@ fn keeps_same_line_and_unsupported_type_members_diagnostic() {
     for source in [
         "interface I { field = 1; }",
         "interface I { [computed]?; }",
-        "interface I { [key: string]: number; }",
         "interface I { get value(): string; }",
     ] {
         let parsed = parse(source, typescript_options()).expect("recover unsupported type member");

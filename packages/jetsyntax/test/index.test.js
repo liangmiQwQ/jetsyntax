@@ -864,6 +864,101 @@ describe("parse", () => {
     }
   });
 
+  it("materializes interface and type-literal index signatures", () => {
+    const source = [
+      "interface Dictionary {",
+      "  [key: string]: number;",
+      "  readonly [index: number]: string,",
+      "  [symbol: symbol]",
+      "  [yield: string]: boolean",
+      "}",
+      "type Lookup = { [name: string]: unknown }",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const signatures = [
+      ...result.program.body[0].body.body,
+      ...result.program.body[1].typeAnnotation.members,
+    ];
+    expect(signatures).toMatchObject([
+      {
+        type: "TSIndexSignature",
+        parameters: [{
+          type: "Identifier",
+          name: "key",
+          optional: false,
+          typeAnnotation: { typeAnnotation: { type: "TSStringKeyword" } },
+        }],
+        typeAnnotation: { typeAnnotation: { type: "TSNumberKeyword" } },
+        readonly: false,
+        static: false,
+      },
+      {
+        type: "TSIndexSignature",
+        parameters: [{
+          name: "index",
+          typeAnnotation: { typeAnnotation: { type: "TSNumberKeyword" } },
+        }],
+        typeAnnotation: { typeAnnotation: { type: "TSStringKeyword" } },
+        readonly: true,
+      },
+      {
+        type: "TSIndexSignature",
+        parameters: [{
+          name: "symbol",
+          typeAnnotation: { typeAnnotation: { type: "TSSymbolKeyword" } },
+        }],
+        typeAnnotation: null,
+      },
+      {
+        type: "TSIndexSignature",
+        parameters: [{
+          name: "yield",
+          typeAnnotation: { typeAnnotation: { type: "TSStringKeyword" } },
+        }],
+        typeAnnotation: { typeAnnotation: { type: "TSBooleanKeyword" } },
+      },
+      {
+        type: "TSIndexSignature",
+        parameters: [{
+          name: "name",
+          typeAnnotation: { typeAnnotation: { type: "TSStringKeyword" } },
+        }],
+        typeAnnotation: { typeAnnotation: { type: "TSUnknownKeyword" } },
+      },
+    ]);
+    expect(signatures.map(signature => source.slice(signature.start, signature.end))).toEqual([
+      "[key: string]: number",
+      "readonly [index: number]: string",
+      "[symbol: symbol]",
+      "[yield: string]: boolean",
+      "[name: string]: unknown",
+    ]);
+    for (const signature of signatures) {
+      expect(signature.range).toEqual([signature.start, signature.end]);
+    }
+
+    for (
+      const reserved of [
+        "async function f() { interface I { [await: string]: number } }",
+        "function* f() { interface I { [yield: string]: number } }",
+      ]
+    ) {
+      const recovered = parse(reserved, { lang: "ts" });
+      expect(recovered.diagnostics, reserved).not.toEqual([]);
+      expect(JSON.stringify(recovered.program), reserved).not.toContain("TSIndexSignature");
+    }
+    for (
+      const contextual of [
+        "async function f() { type I = { [await: string]: number } }",
+        "function* f() { type I = { [yield: string]: number } }",
+      ]
+    ) {
+      expect(parse(contextual, { lang: "ts" }).diagnostics, contextual).toEqual([]);
+    }
+  });
+
   it("materializes untyped TypeScript signature parameters", () => {
     const source = [
       "type Callback = (this, value, optional?) => void;",
@@ -929,7 +1024,6 @@ describe("parse", () => {
       const source of [
         "interface I { field = 1; }",
         "interface I { [computed]?; }",
-        "interface I { [key: string]: number; }",
         "interface I { get value(): string; }",
       ]
     ) {

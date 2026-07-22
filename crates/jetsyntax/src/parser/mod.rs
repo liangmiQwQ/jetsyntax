@@ -5667,18 +5667,18 @@ impl<'s> Parser<'s> {
         if self.looks_like_mapped_type() {
             return self.parse_mapped_type(start);
         }
-        let (members, end) = self.parse_type_members()?;
+        let (members, end) = self.parse_type_members(false)?;
         self.node(NodeTag::TS_TYPE_LITERAL, Span::new(start, end), &[members])
     }
 
-    fn parse_type_members(&mut self) -> Result<(ValueRef, u32), ParseError> {
+    fn parse_type_members(&mut self, in_interface: bool) -> Result<(ValueRef, u32), ParseError> {
         let mut members = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
             if matches!(self.current.kind, TokenKind::Semicolon | TokenKind::Comma) {
                 self.bump();
                 continue;
             }
-            members.push(self.parse_type_member()?.value());
+            members.push(self.parse_type_member(in_interface)?.value());
             if matches!(self.current.kind, TokenKind::Semicolon | TokenKind::Comma) {
                 self.bump();
             } else if self.current.kind != TokenKind::RightBrace
@@ -5694,7 +5694,7 @@ impl<'s> Parser<'s> {
 
     fn parse_interface_body(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::LeftBrace).start;
-        let (body, end) = self.parse_type_members()?;
+        let (body, end) = self.parse_type_members(true)?;
         self.node(NodeTag::TS_INTERFACE_BODY, Span::new(start, end), &[body])
     }
 
@@ -5702,7 +5702,7 @@ impl<'s> Parser<'s> {
         let readonly = self.eat(TokenKind::Readonly);
         self.expect(TokenKind::LeftBracket);
         let name_token = self.take();
-        if !Self::is_identifier_name(name_token.kind) {
+        if !Self::is_mapped_type_parameter_name(name_token.kind) {
             self.error(
                 Self::token_span(name_token),
                 "expected a mapped type parameter",
@@ -5737,15 +5737,21 @@ impl<'s> Parser<'s> {
         )
     }
 
-    fn parse_type_member(&mut self) -> Result<ParsedNode, ParseError> {
+    fn parse_type_member(&mut self, in_interface: bool) -> Result<ParsedNode, ParseError> {
         let start = self.current.start;
         if matches!(self.current.kind, TokenKind::Lt | TokenKind::LeftParen) {
             return self.parse_type_signature_member(start, NodeTag::TS_CALL_SIGNATURE_DECLARATION);
         }
 
         let readonly = (self.current_typescript_modifier_matches(TokenKind::Readonly, "readonly")
-            && self.typescript_readonly_has_type_member_follower())
+            && (self.typescript_readonly_has_type_member_follower()
+                || self.typescript_readonly_has_index_signature_follower(in_interface)))
         .then(|| self.take());
+        if self.current.kind == TokenKind::LeftBracket
+            && (readonly.is_some() || self.looks_like_index_signature(in_interface))
+        {
+            return self.parse_index_signature(start, readonly.is_some(), in_interface);
+        }
         let key = if readonly.is_none() && self.current.kind == TokenKind::New {
             let token = self.take();
             if matches!(self.current.kind, TokenKind::Lt | TokenKind::LeftParen) {
@@ -5834,6 +5840,46 @@ impl<'s> Parser<'s> {
         )
     }
 
+    fn parse_index_signature(
+        &mut self,
+        start: u32,
+        readonly: bool,
+        in_interface: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        self.expect(TokenKind::LeftBracket);
+        let name_token = self.take();
+        if !self.is_index_signature_parameter_name(name_token.kind, in_interface) {
+            self.error(
+                Self::token_span(name_token),
+                "expected an index signature parameter name",
+            );
+        }
+        let name = self.tape.push_source_slice(Self::token_span(name_token))?;
+        self.expect(TokenKind::Colon);
+        let parameter_type = self.parse_type_annotation()?;
+        let optional = self.tape.push_bool(false)?;
+        let parameter = self.node(
+            NodeTag::IDENTIFIER,
+            Span::new(name_token.start, parameter_type.span.end),
+            &[name, parameter_type.value(), optional],
+        )?;
+        let bracket_end = self.expect(TokenKind::RightBracket).end;
+        let (type_annotation, end) = if self.eat(TokenKind::Colon).is_some() {
+            let annotation = self.parse_type_annotation()?;
+            (annotation.value(), annotation.span.end)
+        } else {
+            (self.tape.push_null()?, bracket_end)
+        };
+        let parameters = self.tape.push_list(&[parameter.value()])?;
+        let readonly = self.tape.push_bool(readonly)?;
+        let static_member = self.tape.push_bool(false)?;
+        self.node(
+            NodeTag::TS_INDEX_SIGNATURE,
+            Span::new(start, end),
+            &[parameters, type_annotation, readonly, static_member],
+        )
+    }
+
     fn typescript_readonly_has_type_member_follower(&self) -> bool {
         let mut lookahead = Lexer::new(self.source);
         lookahead.set_position(self.current.end as usize);
@@ -5843,6 +5889,47 @@ impl<'s> Parser<'s> {
                 follower.kind,
                 TokenKind::String | TokenKind::Number | TokenKind::New
             ) || Self::is_identifier_name(follower.kind))
+    }
+
+    fn typescript_readonly_has_index_signature_follower(&self, in_interface: bool) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let bracket = lookahead.next_token();
+        if bracket.flags.line_break_before() || bracket.kind != TokenKind::LeftBracket {
+            return false;
+        }
+        self.lexer_is_at_index_signature_parameter(&mut lookahead, in_interface)
+    }
+
+    fn looks_like_index_signature(&self, in_interface: bool) -> bool {
+        if self.current.kind != TokenKind::LeftBracket {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        self.lexer_is_at_index_signature_parameter(&mut lookahead, in_interface)
+    }
+
+    fn lexer_is_at_index_signature_parameter(
+        &self,
+        lookahead: &mut Lexer<'s>,
+        in_interface: bool,
+    ) -> bool {
+        let parameter = lookahead.next_token();
+        self.is_index_signature_parameter_name(parameter.kind, in_interface)
+            && lookahead.next_token().kind == TokenKind::Colon
+    }
+
+    const fn is_index_signature_parameter_name(&self, kind: TokenKind, in_interface: bool) -> bool {
+        match kind {
+            TokenKind::Await if in_interface => !self.context.grammar().async_function(),
+            TokenKind::Yield if in_interface => !self.context.grammar().generator(),
+            _ => Self::is_mapped_type_parameter_name(kind),
+        }
+    }
+
+    const fn is_mapped_type_parameter_name(kind: TokenKind) -> bool {
+        Self::is_identifier_name(kind) || matches!(kind, TokenKind::Yield)
     }
 
     fn parse_type_member_key(&mut self) -> Result<ParsedNode, ParseError> {
@@ -6431,12 +6518,21 @@ impl<'s> Parser<'s> {
     }
 
     fn looks_like_mapped_type(&self) -> bool {
-        self.current.kind == TokenKind::LeftBracket
-            || self.current.kind == TokenKind::Readonly
-                && self
-                    .source
-                    .get(self.current.end as usize..)
-                    .is_some_and(|rest| rest.trim_start().starts_with('['))
+        let mut lookahead = Lexer::new(self.source);
+        if self.current.kind == TokenKind::Readonly {
+            lookahead.set_position(self.current.end as usize);
+            let bracket = lookahead.next_token();
+            if bracket.kind != TokenKind::LeftBracket {
+                return false;
+            }
+        } else if self.current.kind == TokenKind::LeftBracket {
+            lookahead.set_position(self.current.end as usize);
+        } else {
+            return false;
+        }
+        let parameter = lookahead.next_token();
+        Self::is_mapped_type_parameter_name(parameter.kind)
+            && lookahead.next_token().kind == TokenKind::In
     }
 
     fn current_type_keyword_tag(&self) -> Option<NodeTag> {

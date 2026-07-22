@@ -1061,6 +1061,30 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes TypeScript index signatures", () => {
+    const tape = new HandcraftedTape();
+    const annotation = tape.node(512, 1, 7, [tape.node(550, 1, 7, [])]);
+    const parameter = tape.node(2, 0, 7, [tape.string("key"), annotation, tape.boolean(false)]);
+    const signature = tape.node(581, 0, 16, [
+      tape.list([parameter]),
+      tape.node(512, 9, 16, [tape.node(548, 9, 16, [])]),
+      tape.boolean(true),
+      tape.boolean(false),
+    ]);
+    const root = tape.node(1, 0, 16, [tape.list([signature]), tape.integer(1)]);
+    const encoded = tape.finish(root);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode("keystring number", encoded).body[0]).toMatchObject({
+        type: "TSIndexSignature",
+        parameters: [{ name: "key", optional: false, typeAnnotation: { typeAnnotation: { type: "TSStringKeyword" } } }],
+        typeAnnotation: { typeAnnotation: { type: "TSNumberKeyword" } },
+        readonly: true,
+        static: false,
+      });
+    }
+  });
+
   it("decodes compound TypeScript type and declaration records", () => {
     const tape = new HandcraftedTape();
     const aliasId = tape.node(2, 0, 0, [tape.string("Shape")]);
