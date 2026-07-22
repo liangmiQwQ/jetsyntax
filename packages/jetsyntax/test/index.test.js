@@ -615,6 +615,70 @@ describe("parse", () => {
     expect(plain).not.toHaveProperty("returnType");
   });
 
+  it("materializes TypeScript runtime function type parameters", () => {
+    const source = [
+      "function convert<T extends Input, U = T>(value: T): U { return value; }",
+      "const later = function<const T>(value: T) { return value; };",
+    ].join("\n");
+    const result = parse(source, { lang: "ts" });
+
+    expect(result.diagnostics).toEqual([]);
+    const declaration = result.program.body[0];
+    const expression = result.program.body[1].declarations[0].init;
+    expect(declaration).toMatchObject({
+      type: "FunctionDeclaration",
+      returnType: { type: "TSTypeAnnotation" },
+      typeParameters: {
+        type: "TSTypeParameterDeclaration",
+        params: [
+          {
+            type: "TSTypeParameter",
+            name: { type: "Identifier", name: "T" },
+            constraint: { type: "TSTypeReference" },
+            default: null,
+          },
+          {
+            type: "TSTypeParameter",
+            name: { type: "Identifier", name: "U" },
+            constraint: null,
+            default: { type: "TSTypeReference" },
+          },
+        ],
+      },
+    });
+    expect(expression).toMatchObject({
+      type: "FunctionExpression",
+      typeParameters: {
+        type: "TSTypeParameterDeclaration",
+        params: [{ type: "TSTypeParameter", const: true }],
+      },
+    });
+    expect(expression).not.toHaveProperty("returnType");
+    expect(source.slice(declaration.typeParameters.start, declaration.typeParameters.end)).toBe(
+      "<T extends Input, U = T>",
+    );
+    expect(source.slice(expression.typeParameters.start, expression.typeParameters.end)).toBe("<const T>");
+  });
+
+  it("keeps runtime function type parameters out of JavaScript", () => {
+    for (const lang of ["js", "jsx"]) {
+      const result = parse("function invalid<T>(value) {}", { lang });
+
+      expect(result.diagnostics, lang).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
+  it("diagnoses empty runtime function type parameters", () => {
+    const empty = parse("function invalid<>() {}", { lang: "ts" });
+
+    expect(empty.diagnostics).not.toEqual([]);
+    expect(empty.program.body[0].typeParameters).toMatchObject({
+      type: "TSTypeParameterDeclaration",
+      params: [],
+    });
+  });
+
   it("materializes optional TypeScript value parameters", () => {
     const source = [
       "function declared(required: Input, optional?: Output, inferred?) {}",

@@ -253,6 +253,89 @@ fn parses_block_function_return_annotations() {
 }
 
 #[test]
+fn parses_runtime_function_type_parameters() {
+    let source = [
+        "function convert<T extends Input, U = T>(value: T): U { return value; }",
+        "async function load<T>(value: T) { return value; }",
+        "function* values<T>() { yield value; }",
+        "const later = function<const T>(value: T) { return value; };",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse function type parameters");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid function type-parameter tape");
+
+    let declarations = node_fields(&parsed, NodeTag::FUNCTION_DECLARATION).collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 3);
+    assert!(declarations.iter().all(|fields| fields.len() == 7));
+    assert!(matches!(
+        parsed.tape.value_at(declarations[0][5]),
+        Ok(TapeValue::Node {
+            tag: NodeTag::TS_TYPE_ANNOTATION,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(declarations[1][5]),
+        Ok(TapeValue::Null)
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(declarations[2][3]),
+        Ok(TapeValue::Bool(true))
+    ));
+
+    let expressions = node_fields(&parsed, NodeTag::FUNCTION_EXPRESSION).collect::<Vec<_>>();
+    assert_eq!(expressions.len(), 1);
+    assert_eq!(expressions[0].len(), 7);
+    assert!(matches!(
+        parsed.tape.value_at(expressions[0][5]),
+        Ok(TapeValue::Null)
+    ));
+    for fields in declarations.iter().chain(&expressions) {
+        assert!(matches!(
+            parsed.tape.value_at(fields[6]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::TS_TYPE_PARAMETER_DECLARATION,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn keeps_runtime_function_type_parameters_out_of_javascript() {
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "function invalid<T>(value) {}",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recoverable JavaScript parse");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        parsed.tape.validate().expect("valid recovery tape");
+    }
+}
+
+#[test]
+fn diagnoses_empty_runtime_function_type_parameters() {
+    let parsed = parse("function invalid<>() {}", typescript_options())
+        .expect("recoverable empty type-parameter parse");
+    assert!(!parsed.diagnostics.is_empty());
+    parsed.tape.validate().expect("valid recovery tape");
+
+    let fields = first_node_fields(&parsed, NodeTag::TS_TYPE_PARAMETER_DECLARATION);
+    assert!(matches!(
+        parsed.tape.value_at(fields[0]),
+        Ok(TapeValue::List { items, .. }) if items.is_empty()
+    ));
+}
+
+#[test]
 fn parses_optional_typed_value_parameters() {
     let source = [
         "function declaration(required: Input, optional?: Input, inferred?) {}",

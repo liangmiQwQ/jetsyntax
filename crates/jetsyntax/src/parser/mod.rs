@@ -393,6 +393,7 @@ impl<'s> Parser<'s> {
         )
     }
 
+    #[allow(clippy::too_many_lines)]
     fn parse_function(
         &mut self,
         declaration: bool,
@@ -420,6 +421,12 @@ impl<'s> Parser<'s> {
             None
         };
         self.diagnose_function_name(id, declaration, asynchronous, generator);
+        let type_parameters =
+            if self.options.language.is_typescript() && self.current.kind == TokenKind::Lt {
+                Some(self.parse_type_parameters()?)
+            } else {
+                None
+            };
         self.expect(TokenKind::LeftParen);
         let previous_grammar = self.enter_function_context(generator, asynchronous);
         self.context.set_grammar(
@@ -475,26 +482,34 @@ impl<'s> Parser<'s> {
             NodeTag::FUNCTION_EXPRESSION
         };
         let span = Span::new(start, body.span.end);
-        if let Some(return_type) = return_type {
-            self.node(
-                tag,
-                span,
-                &[
-                    id,
-                    params.value,
-                    body.value(),
-                    generator,
-                    asynchronous,
-                    return_type,
-                ],
-            )
-        } else {
-            self.node(
-                tag,
-                span,
-                &[id, params.value, body.value(), generator, asynchronous],
-            )
-        }
+        // Field six remains the return type so existing annotated function tapes keep their shape.
+        let mut fields = [
+            id,
+            params.value,
+            body.value(),
+            generator,
+            asynchronous,
+            id,
+            id,
+        ];
+        let field_count = match (return_type, type_parameters) {
+            (Some(return_type), Some(type_parameters)) => {
+                fields[5] = return_type;
+                fields[6] = type_parameters;
+                7
+            }
+            (None, Some(type_parameters)) => {
+                fields[5] = self.tape.push_null()?;
+                fields[6] = type_parameters;
+                7
+            }
+            (Some(return_type), None) => {
+                fields[5] = return_type;
+                6
+            }
+            (None, None) => 5,
+        };
+        self.node(tag, span, &fields[..field_count])
     }
 
     fn parse_function_return_type(&mut self) -> Result<Option<ValueRef>, ParseError> {
@@ -3795,6 +3810,9 @@ impl<'s> Parser<'s> {
         };
 
         let mut parameters = Vec::new();
+        if self.current_is_type_greater() {
+            self.error(self.current_span(), "type parameter list cannot be empty");
+        }
         while !self.current_is_type_greater() && self.current.kind != TokenKind::Eof {
             parameters.push(self.parse_type_parameter()?.value());
             if self.eat(TokenKind::Comma).is_none() {

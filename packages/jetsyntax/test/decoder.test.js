@@ -275,8 +275,8 @@ describe("decodeTape", () => {
     });
   });
 
-  it("decodes legacy and annotated function field counts", () => {
-    const source = "function plain() {} function typed(): number {}";
+  it("decodes legacy, annotated, and generic function field counts", () => {
+    const source = "function plain() {} function typed(): number {} function generic<T>() {}";
     const tape = new HandcraftedTape();
     const emptyParameters = tape.list([]);
     const emptyBody = tape.node(6, 17, 19, [tape.list([])]);
@@ -297,7 +297,29 @@ describe("decodeTape", () => {
       tape.boolean(false),
       returnType,
     ]);
-    const program = tape.node(1, 0, source.length, [tape.list([legacy, annotated]), tape.integer(0)]);
+    const parameterName = tape.node(2, 65, 66, [tape.string("T")]);
+    const parameter = tape.node(534, 65, 66, [
+      parameterName,
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.null(),
+      tape.null(),
+    ]);
+    const typeParameters = tape.node(541, 64, 67, [tape.list([parameter])]);
+    const generic = tape.node(25, 48, source.length, [
+      tape.null(),
+      tape.list([]),
+      tape.node(6, 70, source.length, [tape.list([])]),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.null(),
+      typeParameters,
+    ]);
+    const program = tape.node(1, 0, source.length, [
+      tape.list([legacy, annotated, generic]),
+      tape.integer(0),
+    ]);
 
     const decoded = decodeTape(source, tape.finish(program));
     expect(decoded.body[0]).toMatchObject({
@@ -316,13 +338,21 @@ describe("decodeTape", () => {
         typeAnnotation: { type: "TSNumberKeyword", start: 38, end: 44 },
       },
     });
+    expect(decoded.body[2]).toMatchObject({
+      type: "FunctionDeclaration",
+      typeParameters: {
+        type: "TSTypeParameterDeclaration",
+        params: [{ type: "TSTypeParameter", name: { type: "Identifier", name: "T" } }],
+      },
+    });
+    expect(decoded.body[2]).not.toHaveProperty("returnType");
   });
 
   it("rejects malformed function field counts", () => {
     for (
       const [tag, fields, expected] of [
         [25, ["null", "list", "body", false], "4"],
-        [26, ["null", "list", "body", false, false, "null", "null"], "7"],
+        [26, ["null", "list", "body", false, false, "null", "null", "null"], "8"],
       ]
     ) {
       const tape = new HandcraftedTape();
@@ -335,10 +365,14 @@ describe("decodeTape", () => {
       const encoded = tape.finish(tape.node(tag, 0, 0, values));
 
       expect(() => decodeTape("", encoded)).toThrow(
-        `invalid ${tag === 25 ? "FunctionDeclaration" : "FunctionExpression"} field count ${expected}; expected 5 or 6`,
+        `invalid ${
+          tag === 25 ? "FunctionDeclaration" : "FunctionExpression"
+        } field count ${expected}; expected 5, 6, or 7`,
       );
       expect(() => decodeTrustedTape("", encoded)).toThrow(
-        `invalid ${tag === 25 ? "FunctionDeclaration" : "FunctionExpression"} field count ${expected}; expected 5 or 6`,
+        `invalid ${
+          tag === 25 ? "FunctionDeclaration" : "FunctionExpression"
+        } field count ${expected}; expected 5, 6, or 7`,
       );
     }
   });
