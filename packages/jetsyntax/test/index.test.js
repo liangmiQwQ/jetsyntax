@@ -864,6 +864,58 @@ describe("parse", () => {
     }
   });
 
+  it("materializes untyped TypeScript signature parameters", () => {
+    const source = [
+      "type Callback = (this, value, optional?) => void;",
+      "interface Callable {",
+      "  method(value): void;",
+      "  (value, ...rest): boolean;",
+      "  new (value, optional?): Callable;",
+      "}",
+    ].join("\n");
+    const result = parse(source, { lang: "ts" });
+
+    expect(result.diagnostics).toEqual([]);
+    const members = result.program.body[1].body.body;
+    const parameterLists = [
+      result.program.body[0].typeAnnotation.params,
+      ...members.map(member => member.params),
+    ];
+    expect(parameterLists).toMatchObject([
+      [
+        { type: "Identifier", name: "this" },
+        { type: "Identifier", name: "value" },
+        { type: "Identifier", name: "optional", typeAnnotation: null, optional: true },
+      ],
+      [{ type: "Identifier", name: "value" }],
+      [
+        { type: "Identifier", name: "value" },
+        { type: "RestElement", argument: { type: "Identifier", name: "rest" } },
+      ],
+      [
+        { type: "Identifier", name: "value" },
+        { type: "Identifier", name: "optional", typeAnnotation: null, optional: true },
+      ],
+    ]);
+    for (const parameters of parameterLists) {
+      for (const parameter of parameters) {
+        const identifier = parameter.type === "RestElement" ? parameter.argument : parameter;
+        if (["this", "value", "rest"].includes(identifier.name)) {
+          expect(identifier).not.toHaveProperty("typeAnnotation");
+          expect(identifier).not.toHaveProperty("optional");
+        }
+      }
+    }
+    for (
+      const invalid of [
+        "type Callback = (this?) => void;",
+        "interface Callable { (...this): void }",
+      ]
+    ) {
+      expect(parse(invalid, { lang: "ts" }).diagnostics, invalid).not.toEqual([]);
+    }
+  });
+
   it("keeps unsupported and JavaScript type-member forms diagnostic", () => {
     const sameLine = parse("interface Broken { first second }", { lang: "ts" });
     expect(sameLine.diagnostics.some(diagnostic => diagnostic.includes("type member separator")))

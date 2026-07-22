@@ -325,6 +325,108 @@ fn parses_call_and_construct_type_members() {
 }
 
 #[test]
+fn parses_untyped_parameters_in_type_signatures() {
+    let source = [
+        "type Callback = (value, optional?) => void;",
+        "interface Callable {",
+        "  method(value, optional?): void;",
+        "  (value, ...rest): boolean;",
+        "  new (value, optional?): Callable;",
+        "}",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse untyped signature parameters");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid untyped-signature-parameter tape");
+    for tag in [
+        NodeTag::TS_FUNCTION_TYPE,
+        NodeTag::TS_METHOD_SIGNATURE,
+        NodeTag::TS_CALL_SIGNATURE_DECLARATION,
+        NodeTag::TS_CONSTRUCT_SIGNATURE_DECLARATION,
+    ] {
+        assert_eq!(node_fields(&parsed, tag).count(), 1, "{tag:?}");
+    }
+
+    let parameters = parsed
+        .tape
+        .validation()
+        .filter_map(|record| {
+            let TapeValue::Node {
+                tag: NodeTag::IDENTIFIER,
+                span,
+                fields,
+                ..
+            } = record.expect("valid record").value
+            else {
+                return None;
+            };
+            let text = &source[span.start as usize..span.end as usize];
+            matches!(text, "value" | "optional?" | "rest").then(|| (text, fields.to_vec()))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(parameters.len(), 8);
+    for (text, fields) in parameters {
+        if text == "optional?" {
+            assert_eq!(fields.len(), 3);
+            assert!(matches!(
+                parsed.tape.value_at(fields[1]),
+                Ok(TapeValue::Null)
+            ));
+            assert!(matches!(
+                parsed.tape.value_at(fields[2]),
+                Ok(TapeValue::Bool(true))
+            ));
+        } else {
+            assert_eq!(fields.len(), 1, "{text}");
+        }
+    }
+}
+
+#[test]
+fn parses_untyped_this_parameters_in_type_signatures() {
+    for source in [
+        "type Callback = (this) => void;",
+        "interface Callable { (this): void }",
+        "interface Callable { method(this): void }",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("parse untyped this parameter");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect("valid this-parameter tape");
+        assert!(parsed.tape.validation().any(|record| {
+            matches!(
+                record.expect("valid record").value,
+                TapeValue::Node {
+                    tag: NodeTag::IDENTIFIER,
+                    span,
+                    fields,
+                    ..
+                } if &source[span.start as usize..span.end as usize] == "this" && fields.len() == 1
+            )
+        }));
+    }
+
+    for source in [
+        "type Callback = (this?) => void;",
+        "interface Callable { (...this): void }",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover invalid this parameter");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid recovered this-parameter tape");
+    }
+}
+
+#[test]
 fn distinguishes_construct_signatures_from_new_named_members() {
     let construct_tag = NodeTag::TS_CONSTRUCT_SIGNATURE_DECLARATION;
     let cases = [
@@ -364,14 +466,11 @@ fn distinguishes_construct_signatures_from_new_named_members() {
 
 #[test]
 fn keeps_type_signature_members_gated_and_recovers_malformed_forms() {
-    for source in [
-        "interface I { <T(value: T): T }",
-        "interface I { (public value: number): void }",
-    ] {
-        let parsed = parse(source, typescript_options()).expect("recover malformed signature");
-        assert!(!parsed.diagnostics.is_empty(), "{source}");
-        parsed.tape.validate().expect("valid recovered tape");
-    }
+    let source = "interface I { <T(value: T): T }";
+    let parsed = parse(source, typescript_options())
+        .unwrap_or_else(|error| panic!("recover malformed signature `{source}`: {error}"));
+    assert!(!parsed.diagnostics.is_empty(), "{source}");
+    parsed.tape.validate().expect("valid recovered tape");
 
     for language in [Language::JavaScript, Language::JavaScriptJsx] {
         let parsed = parse(

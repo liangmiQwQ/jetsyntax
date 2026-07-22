@@ -5565,28 +5565,48 @@ impl<'s> Parser<'s> {
             let rest = self.eat(TokenKind::Ellipsis);
             let start = rest.map_or(self.current.start, |token| token.start);
             let name_token = self.take();
-            if !Self::is_identifier_name(name_token.kind) {
+            if !Self::is_identifier_name(name_token.kind) && name_token.kind != TokenKind::This {
                 self.error(Self::token_span(name_token), "expected a parameter name");
             }
             let name = self.tape.push_source_slice(Self::token_span(name_token))?;
-            let optional = self.eat(TokenKind::Question).is_some();
+            let optional = self.eat(TokenKind::Question);
+            if name_token.kind == TokenKind::This {
+                if let Some(token) = rest {
+                    self.error(
+                        Self::token_span(token),
+                        "a this parameter cannot be a rest parameter",
+                    );
+                }
+                if let Some(token) = optional {
+                    self.error(
+                        Self::token_span(token),
+                        "a this parameter cannot be optional",
+                    );
+                }
+            }
             let annotation = if self.eat(TokenKind::Colon).is_some() {
-                self.parse_type_annotation()?
+                Some(self.parse_type_annotation()?)
             } else {
-                self.error(self.current_span(), "expected a type annotation");
-                let invalid = self.invalid_type()?;
-                self.node(
-                    NodeTag::TS_TYPE_ANNOTATION,
-                    invalid.span,
-                    &[invalid.value()],
-                )?
+                None
             };
-            let optional = self.tape.push_bool(optional)?;
-            let identifier = self.node(
-                NodeTag::IDENTIFIER,
-                Span::new(name_token.start, annotation.span.end),
-                &[name, annotation.value(), optional],
-            )?;
+            let identifier = if annotation.is_some() || optional.is_some() {
+                let end = annotation.map_or_else(
+                    || optional.map_or(name_token.end, |token| token.end),
+                    |node| node.span.end,
+                );
+                let annotation = match annotation {
+                    Some(node) => node.value(),
+                    None => self.tape.push_null()?,
+                };
+                let optional = self.tape.push_bool(optional.is_some())?;
+                self.node(
+                    NodeTag::IDENTIFIER,
+                    Span::new(name_token.start, end),
+                    &[name, annotation, optional],
+                )?
+            } else {
+                self.node(NodeTag::IDENTIFIER, Self::token_span(name_token), &[name])?
+            };
             let parameter = if rest.is_some() {
                 self.node(
                     NodeTag::REST_ELEMENT,
