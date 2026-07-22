@@ -205,6 +205,8 @@ for (
     [586, ["TSInstantiationExpression", ["expression", "typeArguments"]]],
     [587, ["TSTypeQuery", ["exprName", "typeArguments"]]],
     [588, ["TemplateElement", ["raw", "tail"]]],
+    [589, ["ExportSpecifier", ["local", "exported", "exportKind"]]],
+    [590, ["ImportDeclaration", ["specifiers", "source", "attributes", "importKind", "phase"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -891,6 +893,13 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.attributes = array(fields[2], tag);
         node.importKind = enumValue(IMPORT_EXPORT_KINDS, fields[3], tag);
         return node;
+      case 590:
+        node.specifiers = array(fields[0], tag);
+        node.source = fields[1];
+        node.attributes = array(fields[2], tag);
+        node.importKind = enumValue(IMPORT_EXPORT_KINDS, fields[3], tag);
+        node.phase = enumValue(IMPORT_PHASES, fields[4], tag);
+        return node;
       case 64:
         node.imported = fields[0];
         node.local = fields[1];
@@ -1108,6 +1117,11 @@ function decodeTapeInternal(source, tape, options, trusted) {
       case 587:
         node.exprName = fields[0];
         if (fields[1] !== null) node.typeArguments = fields[1];
+        return node;
+      case 589:
+        node.local = fields[0];
+        node.exported = fields[1];
+        node.exportKind = enumValue(IMPORT_EXPORT_KINDS, fields[2], tag);
         return node;
       case 571:
         node.id = fields[0];

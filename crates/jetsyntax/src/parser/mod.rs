@@ -4,7 +4,7 @@ mod context;
 
 pub use context::{Diagnostic, Severity};
 
-use std::{borrow::Cow, error::Error, fmt, iter::Peekable, str::Chars};
+use std::{borrow::Cow, collections::HashSet, error::Error, fmt, iter::Peekable, str::Chars};
 
 use crate::{
     Language, ParseOptions, SourceKind,
@@ -73,6 +73,15 @@ pub fn parse(source: &str, options: ParseOptions) -> Result<ParseResult, ParseEr
 struct ParsedNode {
     node: NodeRef,
     span: Span,
+}
+
+#[derive(Clone, Copy)]
+struct ParsedModuleExportName {
+    node: ParsedNode,
+    token_kind: TokenKind,
+    escaped: bool,
+    string_literal: bool,
+    binding_identifier: bool,
 }
 
 impl ParsedNode {
@@ -388,6 +397,13 @@ struct AssignmentPatternCheckpoint {
     candidate_len: usize,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExportBindingCapture {
+    None,
+    Single,
+    Pattern,
+}
+
 struct Parser<'s> {
     source: &'s str,
     lexer: Lexer<'s>,
@@ -403,6 +419,14 @@ struct Parser<'s> {
     last_node_tag: Option<NodeTag>,
     last_assignment_target: AssignmentTargetType,
     assignment_pattern_candidates: Vec<AssignmentPatternCandidate>,
+    local_export_references: Vec<Span>,
+    // Indirection keeps cold semantic indexes to one pointer each in the hot parser state.
+    #[allow(clippy::box_collection)]
+    typescript_import_bindings: Option<Box<HashSet<Cow<'s, str>>>>,
+    #[allow(clippy::box_collection)]
+    escaped_program_bindings: Option<Box<HashSet<Cow<'s, str>>>>,
+    export_binding_capture: ExportBindingCapture,
+    exporting_variable_declaration: bool,
 }
 
 impl<'s> Parser<'s> {
@@ -440,6 +464,11 @@ impl<'s> Parser<'s> {
             last_node_tag: None,
             last_assignment_target: AssignmentTargetType::Invalid,
             assignment_pattern_candidates: Vec::new(),
+            local_export_references: Vec::new(),
+            typescript_import_bindings: None,
+            escaped_program_bindings: None,
+            export_binding_capture: ExportBindingCapture::None,
+            exporting_variable_declaration: false,
         }
     }
 
@@ -456,6 +485,9 @@ impl<'s> Parser<'s> {
                 );
                 self.bump();
             }
+        }
+        if !self.local_export_references.is_empty() {
+            self.report_unresolved_local_exports();
         }
         let _ = self.context.leave_scope();
 
@@ -674,7 +706,13 @@ impl<'s> Parser<'s> {
         fallback_end: u32,
     ) -> Result<(ValueRef, u32, bool), ParseError> {
         let binding_token = self.current;
-        let id = self.parse_binding_pattern(kind.binding_kind())?;
+        let previous_capture = self.export_binding_capture;
+        if self.exporting_variable_declaration {
+            self.export_binding_capture = ExportBindingCapture::Pattern;
+        }
+        let id = self.parse_binding_pattern(kind.binding_kind());
+        self.export_binding_capture = previous_capture;
+        let id = id?;
         let binding_is_identifier = self.last_node_tag == Some(NodeTag::IDENTIFIER);
         if kind.is_using() && self.reports_ecmascript_early_errors() && !binding_is_identifier {
             self.error(id.span, "using declarations require an identifier binding");
@@ -963,6 +1001,9 @@ impl<'s> Parser<'s> {
             }
             None
         };
+        if self.export_binding_capture == ExportBindingCapture::Single {
+            self.export_binding_capture = ExportBindingCapture::None;
+        }
         self.diagnose_function_name(id, declaration, asynchronous, generator);
         let type_parameters =
             if self.options.language.is_typescript() && self.current.kind == TokenKind::Lt {
@@ -984,9 +1025,7 @@ impl<'s> Parser<'s> {
                 .source
                 .get(id.span.start as usize..id.span.end as usize)
                 .unwrap_or_default();
-            let _ = self
-                .context
-                .declare_binding(name, BindingKind::Lexical, id.span);
+            let _ = self.declare_binding(name, BindingKind::Lexical, id.span);
         }
         let params = self.parse_parameter_list()?;
         self.context
@@ -1601,6 +1640,9 @@ impl<'s> Parser<'s> {
             }
             self.tape.push_null()?
         };
+        if self.export_binding_capture == ExportBindingCapture::Single {
+            self.export_binding_capture = ExportBindingCapture::None;
+        }
         let has_super = self.eat(TokenKind::Extends).is_some();
         let super_class = if has_super {
             self.parse_assignment_expression(true)?.value()
@@ -2835,10 +2877,23 @@ impl<'s> Parser<'s> {
             );
         }
 
+        let declaration_type_only = self.starts_typescript_type_only_import();
+        if declaration_type_only {
+            self.bump();
+        }
+        let deferred = !declaration_type_only && self.starts_deferred_import();
+        let deferred_span = deferred.then(|| self.current_span());
+        if deferred {
+            self.bump();
+        }
         let mut specifiers = Vec::new();
+        let mut deferred_namespace = false;
+        let mut deferred_default = false;
         if self.current.kind != TokenKind::String {
+            let mut default_without_comma = false;
             if Self::is_identifier_name(self.current.kind) {
-                let local = self.parse_binding_identifier(BindingKind::Import)?;
+                deferred_default = deferred;
+                let local = self.parse_import_binding_identifier(declaration_type_only)?;
                 specifiers.push(
                     self.node(
                         NodeTag::IMPORT_DEFAULT_SPECIFIER,
@@ -2847,11 +2902,29 @@ impl<'s> Parser<'s> {
                     )?
                     .value(),
                 );
-                let _ = self.eat(TokenKind::Comma);
+                default_without_comma = self.eat(TokenKind::Comma).is_none();
+                if declaration_type_only
+                    && !default_without_comma
+                    && matches!(self.current.kind, TokenKind::Star | TokenKind::LeftBrace)
+                {
+                    self.error(
+                        self.current_span(),
+                        "a type-only default import cannot be combined with other bindings",
+                    );
+                }
+            }
+            if default_without_comma
+                && matches!(self.current.kind, TokenKind::Star | TokenKind::LeftBrace)
+            {
+                self.error(
+                    self.current_span(),
+                    "expected a comma after the default import",
+                );
             }
             if self.eat(TokenKind::Star).is_some() {
+                deferred_namespace = deferred;
                 self.expect(TokenKind::As);
-                let local = self.parse_binding_identifier(BindingKind::Import)?;
+                let local = self.parse_import_binding_identifier(declaration_type_only)?;
                 specifiers.push(
                     self.node(
                         NodeTag::IMPORT_NAMESPACE_SPECIFIER,
@@ -2862,18 +2935,43 @@ impl<'s> Parser<'s> {
                 );
             } else if self.eat(TokenKind::LeftBrace).is_some() {
                 while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
-                    let imported = self.parse_identifier()?;
+                    let specifier_start = self.current.start;
+                    let specifier_type_only = self.starts_typescript_type_only_specifier();
+                    if specifier_type_only {
+                        self.bump();
+                    }
+                    if declaration_type_only && specifier_type_only {
+                        self.error(
+                            Span::new(specifier_start, specifier_start.saturating_add(4)),
+                            "a type-only declaration cannot contain a type-only specifier",
+                        );
+                    }
+                    let imported = self.parse_module_export_name()?;
+                    let type_binding = declaration_type_only || specifier_type_only;
                     let local = if self.eat(TokenKind::As).is_some() {
-                        self.parse_binding_identifier(BindingKind::Import)?
+                        self.parse_import_binding_identifier(type_binding)?
+                    } else if imported.string_literal {
+                        self.error(
+                            imported.node.span,
+                            "a string literal import name requires a local binding",
+                        );
+                        self.missing_identifier(imported.node.span.end)?
                     } else {
-                        self.identifier_from_span(imported.span)?
+                        if !imported.binding_identifier {
+                            self.error(imported.node.span, "expected a binding identifier");
+                        }
+                        if imported.binding_identifier {
+                            self.import_binding_identifier_from_module_name(imported, type_binding)?
+                        } else {
+                            self.identifier_from_span(imported.node.span)?
+                        }
                     };
-                    let import_kind = self.tape.push_u32(0)?;
+                    let import_kind = self.tape.push_u32(u32::from(specifier_type_only))?;
                     specifiers.push(
                         self.node(
                             NodeTag::IMPORT_SPECIFIER,
-                            Span::new(imported.span.start, local.span.end),
-                            &[imported.value(), local.value(), import_kind],
+                            Span::new(specifier_start, local.span.end),
+                            &[imported.node.value(), local.value(), import_kind],
                         )?
                         .value(),
                     );
@@ -2885,11 +2983,28 @@ impl<'s> Parser<'s> {
             }
             self.expect(TokenKind::From);
         }
+        if self.options.semantic_errors
+            && let Some(deferred_span) = deferred_span
+            && (!deferred_namespace || deferred_default)
+        {
+            self.error(
+                deferred_span,
+                "a deferred import must use a namespace import",
+            );
+        }
         let source = self.parse_literal()?;
         let end = self.consume_semicolon();
         let specifiers = self.tape.push_list(&specifiers)?;
         let attributes = self.tape.push_list(&[])?;
-        let import_kind = self.tape.push_u32(0)?;
+        let import_kind = self.tape.push_u32(u32::from(declaration_type_only))?;
+        if deferred {
+            let phase = self.tape.push_u32(ImportPhase::Defer.wire_value())?;
+            return self.node(
+                NodeTag::PHASE_IMPORT_DECLARATION,
+                Span::new(start, end),
+                &[specifiers, source.value(), attributes, import_kind, phase],
+            );
+        }
         self.node(
             NodeTag::IMPORT_DECLARATION,
             Span::new(start, end),
@@ -3026,6 +3141,34 @@ impl<'s> Parser<'s> {
         }
     }
 
+    fn parse_exported_single_binding(
+        &mut self,
+        parse_declaration: impl FnOnce(&mut Self) -> Result<ParsedNode, ParseError>,
+    ) -> Result<ParsedNode, ParseError> {
+        let previous = self.export_binding_capture;
+        if self.options.semantic_errors && !self.options.language.is_typescript() {
+            self.export_binding_capture = ExportBindingCapture::Single;
+        }
+        let declaration = parse_declaration(self);
+        self.export_binding_capture = previous;
+        declaration
+    }
+
+    fn parse_exported_variable_declaration(
+        &mut self,
+        consume_semicolon: bool,
+        kind: VariableDeclarationKind,
+        explicit_typescript_declare: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let previous = self.exporting_variable_declaration;
+        self.exporting_variable_declaration =
+            self.options.semantic_errors && !self.options.language.is_typescript();
+        let declaration =
+            self.parse_variable_declaration(consume_semicolon, kind, explicit_typescript_declare);
+        self.exporting_variable_declaration = previous;
+        declaration
+    }
+
     // Export alternatives share state and recovery rules, so keeping the grammar branch local is
     // easier to audit than distributing it across helpers.
     #[allow(clippy::too_many_lines)]
@@ -3068,9 +3211,7 @@ impl<'s> Parser<'s> {
             let id = self.parse_identifier()?;
             if self.options.semantic_errors {
                 let name = self.source_text(id.span);
-                let _ = self
-                    .context
-                    .declare_binding(name, BindingKind::Var, id.span);
+                let _ = self.declare_binding(name, BindingKind::Var, id.span);
             }
             let end = self.consume_semicolon();
             return self.node(
@@ -3099,6 +3240,10 @@ impl<'s> Parser<'s> {
                     export_kind,
                 ],
             );
+        }
+        let declaration_type_only = self.starts_typescript_type_only_export();
+        if declaration_type_only {
+            self.bump();
         }
         if let Some(kind) = self.typescript_declare_declaration_kind() {
             let declaration = self.parse_typescript_declare_declaration(kind)?;
@@ -3139,7 +3284,9 @@ impl<'s> Parser<'s> {
                 TokenKind::Class => (self.parse_default_export_class()?, false),
                 _ => (self.parse_assignment_expression(true)?, true),
             };
-            let _ = self.context.declare_export("default", declaration.span);
+            let _ = self
+                .context
+                .declare_export(Cow::Borrowed("default"), declaration.span);
             let end = if needs_semicolon {
                 self.consume_semicolon()
             } else {
@@ -3159,7 +3306,9 @@ impl<'s> Parser<'s> {
                 );
             }
             let exported = if self.eat(TokenKind::As).is_some() {
-                self.parse_identifier()?.value()
+                let exported = self.parse_module_export_name()?;
+                self.declare_module_export_name(exported);
+                exported.node.value()
             } else {
                 self.tape.push_null()?
             };
@@ -3167,7 +3316,7 @@ impl<'s> Parser<'s> {
             let source = self.parse_literal()?;
             let end = self.consume_semicolon();
             let attributes = self.tape.push_list(&[])?;
-            let export_kind = self.tape.push_u32(0)?;
+            let export_kind = self.tape.push_u32(u32::from(declaration_type_only))?;
             return self.node(
                 NodeTag::EXPORT_ALL_DECLARATION,
                 Span::new(start, end),
@@ -3177,33 +3326,49 @@ impl<'s> Parser<'s> {
 
         if self.eat(TokenKind::LeftBrace).is_some() {
             let mut specifiers = Vec::new();
+            let mut local_names = Vec::new();
             while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
-                let local = self.parse_identifier()?;
-                let exported = if self.eat(TokenKind::As).is_some() {
-                    self.parse_identifier()?
-                } else {
-                    self.identifier_from_span(local.span)?
-                };
-                if let Some(name) = self
-                    .source
-                    .get(exported.span.start as usize..exported.span.end as usize)
-                {
-                    let _ = self.context.declare_export(name, exported.span);
+                let specifier_start = self.current.start;
+                let specifier_type_only = self.starts_typescript_type_only_specifier();
+                if specifier_type_only {
+                    self.bump();
                 }
-                specifiers.push(
+                if declaration_type_only && specifier_type_only {
+                    self.error(
+                        Span::new(specifier_start, specifier_start.saturating_add(4)),
+                        "a type-only declaration cannot contain a type-only specifier",
+                    );
+                }
+                let local = self.parse_module_export_name()?;
+                local_names.push(local);
+                let exported = if self.eat(TokenKind::As).is_some() {
+                    self.parse_module_export_name()?
+                } else {
+                    self.clone_module_export_name(local)?
+                };
+                self.declare_module_export_name(exported);
+                let specifier = if self.options.language.is_typescript() {
+                    let export_kind = self.tape.push_u32(u32::from(specifier_type_only))?;
+                    self.node(
+                        NodeTag::TS_EXPORT_SPECIFIER,
+                        Span::new(specifier_start, exported.node.span.end),
+                        &[local.node.value(), exported.node.value(), export_kind],
+                    )?
+                } else {
                     self.node(
                         NodeTag::EXPORT_SPECIFIER,
-                        Span::new(local.span.start, exported.span.end),
-                        &[local.value(), exported.value()],
+                        Span::new(specifier_start, exported.node.span.end),
+                        &[local.node.value(), exported.node.value()],
                     )?
-                    .value(),
-                );
+                };
+                specifiers.push(specifier.value());
                 if self.eat(TokenKind::Comma).is_none() {
                     break;
                 }
             }
             self.expect(TokenKind::RightBrace);
-            let source = if self.eat(TokenKind::From).is_some() {
+            let has_source = self.eat(TokenKind::From).is_some();
+            let source = if has_source {
                 if self.reports_internal_namespace_errors() {
                     self.error(
                         Span::new(start, start.saturating_add(6)),
@@ -3214,11 +3379,25 @@ impl<'s> Parser<'s> {
             } else {
                 self.tape.push_null()?
             };
+            if !has_source && self.reports_ecmascript_early_errors() {
+                for local in local_names {
+                    if local.string_literal {
+                        self.error(
+                            local.node.span,
+                            "a string literal export binding requires a source module",
+                        );
+                    } else if !local.binding_identifier {
+                        self.error(local.node.span, "expected a local export binding");
+                    } else if self.context.in_program_scope() {
+                        self.local_export_references.push(local.node.span);
+                    }
+                }
+            }
             let end = self.consume_semicolon();
             let declaration = self.tape.push_null()?;
             let specifiers = self.tape.push_list(&specifiers)?;
             let attributes = self.tape.push_list(&[])?;
-            let export_kind = self.tape.push_u32(0)?;
+            let export_kind = self.tape.push_u32(u32::from(declaration_type_only))?;
             return self.node(
                 NodeTag::EXPORT_NAMED_DECLARATION,
                 Span::new(start, end),
@@ -3229,22 +3408,31 @@ impl<'s> Parser<'s> {
         let declaration = match self.current.kind {
             TokenKind::Using if self.starts_using_declaration(false) => {
                 self.diagnose_exported_using_declaration();
-                self.parse_variable_declaration(true, VariableDeclarationKind::Using, false)?
+                self.parse_exported_variable_declaration(
+                    true,
+                    VariableDeclarationKind::Using,
+                    false,
+                )?
             }
             TokenKind::Await if self.starts_await_using_declaration(false) => {
                 self.diagnose_exported_using_declaration();
-                self.parse_variable_declaration(true, VariableDeclarationKind::AwaitUsing, false)?
+                self.parse_exported_variable_declaration(
+                    true,
+                    VariableDeclarationKind::AwaitUsing,
+                    false,
+                )?
             }
             TokenKind::Const
                 if self.options.language.is_typescript() && self.followed_by_word("enum") =>
             {
                 self.parse_enum_declaration(true)?
             }
-            TokenKind::Var | TokenKind::Let | TokenKind::Const => self.parse_variable_declaration(
-                true,
-                VariableDeclarationKind::from_token(self.current.kind),
-                false,
-            )?,
+            TokenKind::Var | TokenKind::Let | TokenKind::Const => self
+                .parse_exported_variable_declaration(
+                    true,
+                    VariableDeclarationKind::from_token(self.current.kind),
+                    false,
+                )?,
             TokenKind::Type if self.options.language.is_typescript() => {
                 self.parse_type_alias_declaration()?
             }
@@ -3263,10 +3451,14 @@ impl<'s> Parser<'s> {
                 self.parse_typescript_abstract_class_declaration(false)?
             }
             TokenKind::Async if self.followed_by_token_without_line_break(TokenKind::Function) => {
-                self.parse_function(true, true)?
+                self.parse_exported_single_binding(|parser| parser.parse_function(true, true))?
             }
-            TokenKind::Function => self.parse_function(true, false)?,
-            TokenKind::Class => self.parse_class(true)?,
+            TokenKind::Function => {
+                self.parse_exported_single_binding(|parser| parser.parse_function(true, false))?
+            }
+            TokenKind::Class => {
+                self.parse_exported_single_binding(|parser| parser.parse_class(true))?
+            }
             _ => {
                 self.error(self.current_span(), "expected an export declaration");
                 self.parse_statement()?
@@ -5481,6 +5673,101 @@ impl<'s> Parser<'s> {
         self.node(NodeTag::LITERAL, Self::token_span(token), &[raw, kind])
     }
 
+    fn parse_module_export_name(&mut self) -> Result<ParsedModuleExportName, ParseError> {
+        let token_kind = self.current.kind;
+        let escaped = self.current.flags.escaped();
+        let string_literal = self.current.kind == TokenKind::String;
+        let binding_identifier = !string_literal && Self::is_identifier_name(self.current.kind);
+        let node = if string_literal {
+            self.parse_literal()?
+        } else {
+            self.parse_identifier_name()?
+        };
+        if string_literal
+            && self.reports_ecmascript_early_errors()
+            && decode_well_formed_string_literal(self.source_text(node.span)).is_none()
+        {
+            self.error(
+                node.span,
+                "a module export name cannot contain an unpaired surrogate",
+            );
+        }
+        Ok(ParsedModuleExportName {
+            node,
+            token_kind,
+            escaped,
+            string_literal,
+            binding_identifier,
+        })
+    }
+
+    fn clone_module_export_name(
+        &mut self,
+        name: ParsedModuleExportName,
+    ) -> Result<ParsedModuleExportName, ParseError> {
+        let node = if name.string_literal {
+            self.literal_from_span(name.node.span, 1)?
+        } else {
+            self.identifier_from_span(name.node.span)?
+        };
+        Ok(ParsedModuleExportName {
+            node,
+            token_kind: name.token_kind,
+            escaped: name.escaped,
+            string_literal: name.string_literal,
+            binding_identifier: name.binding_identifier,
+        })
+    }
+
+    fn declare_module_export_name(&mut self, name: ParsedModuleExportName) {
+        let raw = self.source_text(name.node.span);
+        let cooked = if name.string_literal {
+            decode_well_formed_string_literal(raw)
+                .map(Cow::Owned)
+                .unwrap_or(Cow::Borrowed(raw))
+        } else if raw.contains('\\') {
+            decode_static_property_name(raw)
+                .map(Cow::Owned)
+                .unwrap_or(Cow::Borrowed(raw))
+        } else {
+            Cow::Borrowed(raw)
+        };
+        let _ = self.context.declare_export(cooked, name.node.span);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn report_unresolved_local_exports(&mut self) {
+        for span in std::mem::take(&mut self.local_export_references) {
+            let raw = self.source_text(span);
+            let cooked = if raw.contains('\\') {
+                decode_static_property_name(raw)
+                    .map(Cow::Owned)
+                    .unwrap_or(Cow::Borrowed(raw))
+            } else {
+                Cow::Borrowed(raw)
+            };
+            let escaped_match = self
+                .escaped_program_bindings
+                .as_deref()
+                .is_some_and(|bindings| bindings.contains(cooked.as_ref()));
+            if !self.context.has_visible_binding(cooked.as_ref()) && !escaped_match {
+                self.error(span, format!("exported binding `{cooked}` is not declared"));
+            }
+        }
+    }
+
+    fn literal_from_span(&mut self, span: Span, kind: u32) -> Result<ParsedNode, ParseError> {
+        let raw = self.tape.push_source_slice(span)?;
+        let kind = self.tape.push_u32(kind)?;
+        self.node(NodeTag::LITERAL, span, &[raw, kind])
+    }
+
+    fn missing_identifier(&mut self, position: u32) -> Result<ParsedNode, ParseError> {
+        let name = self.tape.push_string("<invalid>")?;
+        self.node(NodeTag::IDENTIFIER, Span::new(position, position), &[name])
+    }
+
     fn parse_regexp_literal(&mut self) -> Result<ParsedNode, ParseError> {
         let slash = self.current;
         let flag_errors = self.reports_ecmascript_early_errors();
@@ -5645,11 +5932,101 @@ impl<'s> Parser<'s> {
         self.node(NodeTag::IDENTIFIER, span, &[name])
     }
 
+    fn declare_binding(&mut self, name: &'s str, binding_kind: BindingKind, span: Span) -> bool {
+        let declared = self.context.declare_binding(name, binding_kind, span);
+        if declared
+            && self.options.semantic_errors
+            && (self.export_binding_capture != ExportBindingCapture::None || name.contains('\\'))
+        {
+            self.record_program_binding_semantics(name, span);
+        }
+        declared
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn record_program_binding_semantics(&mut self, name: &'s str, span: Span) {
+        if !self.context.in_program_scope() {
+            return;
+        }
+        let cooked = if name.contains('\\') {
+            let cooked = decode_static_property_name(name)
+                .map(Cow::Owned)
+                .unwrap_or(Cow::Borrowed(name));
+            self.escaped_program_bindings
+                .get_or_insert_with(Default::default)
+                .insert(cooked.clone());
+            cooked
+        } else {
+            Cow::Borrowed(name)
+        };
+        if self.export_binding_capture != ExportBindingCapture::None {
+            let _ = self.context.declare_export(cooked, span);
+            if self.export_binding_capture == ExportBindingCapture::Single {
+                self.export_binding_capture = ExportBindingCapture::None;
+            }
+        }
+    }
+
     fn parse_binding_identifier(
         &mut self,
         binding_kind: BindingKind,
     ) -> Result<ParsedNode, ParseError> {
         self.parse_binding_identifier_impl(binding_kind, false)
+    }
+
+    fn parse_import_binding_identifier(
+        &mut self,
+        type_only: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let binding = self.parse_binding_identifier(self.import_binding_kind(type_only))?;
+        self.register_typescript_import_binding(binding.span);
+        Ok(binding)
+    }
+
+    const fn import_binding_kind(&self, type_only: bool) -> BindingKind {
+        if type_only {
+            BindingKind::TypeScriptType
+        } else if self.options.language.is_typescript() {
+            BindingKind::TypeScriptImport
+        } else {
+            BindingKind::Import
+        }
+    }
+
+    fn import_binding_identifier_from_module_name(
+        &mut self,
+        name: ParsedModuleExportName,
+        type_only: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        self.validate_binding_identifier_token(name.token_kind, name.node.span, name.escaped);
+        let name_text = self.source_text(name.node.span);
+        let binding_kind = self.import_binding_kind(type_only);
+        let _ = self.declare_binding(name_text, binding_kind, name.node.span);
+        self.register_typescript_import_binding(name.node.span);
+        self.identifier_from_span(name.node.span)
+    }
+
+    fn register_typescript_import_binding(&mut self, span: Span) {
+        if !self.options.language.is_typescript() || !self.options.semantic_errors {
+            return;
+        }
+        let raw = self.source_text(span);
+        let name = if raw.contains('\\') {
+            decode_static_property_name(raw)
+                .map(Cow::Owned)
+                .unwrap_or(Cow::Borrowed(raw))
+        } else {
+            Cow::Borrowed(raw)
+        };
+        let bindings = self
+            .typescript_import_bindings
+            .get_or_insert_with(Default::default);
+        if bindings.contains(name.as_ref()) {
+            self.error(span, format!("duplicate import binding `{name}`"));
+        } else {
+            bindings.insert(name);
+        }
     }
 
     fn parse_binding_identifier_with_optional(
@@ -5670,42 +6047,12 @@ impl<'s> Parser<'s> {
         if !Self::is_identifier_name(token.kind) && token.kind != TokenKind::Yield {
             self.error(span, "expected a binding identifier");
         }
-        if token.kind == TokenKind::Enum {
-            self.error(span, "reserved word cannot be used as a binding identifier");
-        }
+        self.validate_binding_identifier_token(token.kind, span, escaped);
         let name_text = self
             .source
             .get(token.start as usize..token.end as usize)
             .unwrap_or_default();
-        let await_reserved = self.context.grammar().async_function()
-            || self.context.grammar().module()
-            || self.context.grammar().class() && !self.context.grammar().function();
-        if token.kind != TokenKind::Enum
-            && self.reports_ecmascript_early_errors()
-            && self.is_escaped_reserved_identifier(span, escaped)
-        {
-            self.error(span, "reserved word cannot be used as a binding identifier");
-        }
-        if self.reports_ecmascript_early_errors()
-            && await_reserved
-            && self.identifier_name_matches(span, "await", escaped)
-        {
-            self.error(span, "await cannot be bound in an async function");
-        }
-        if self.reports_ecmascript_early_errors()
-            && self.context.grammar().generator()
-            && self.identifier_name_matches(span, "yield", escaped)
-        {
-            self.error(span, "yield cannot be bound in a generator function");
-        }
-        if token.kind != TokenKind::Enum
-            && self.context.grammar().strict()
-            && (matches!(name_text, "eval" | "arguments")
-                || self.is_strict_reserved_identifier(span, escaped))
-        {
-            self.error(span, "identifier cannot be bound in strict mode");
-        }
-        let _ = self.context.declare_binding(name_text, binding_kind, span);
+        let _ = self.declare_binding(name_text, binding_kind, span);
         let name = self.tape.push_source_slice(span)?;
         let optional_marker = if self.options.language.is_typescript() && allow_optional {
             self.eat(TokenKind::Question)
@@ -5740,6 +6087,46 @@ impl<'s> Parser<'s> {
             );
         }
         self.node(NodeTag::IDENTIFIER, span, &[name])
+    }
+
+    fn validate_binding_identifier_token(
+        &mut self,
+        token_kind: TokenKind,
+        span: Span,
+        escaped: bool,
+    ) {
+        if token_kind == TokenKind::Enum {
+            self.error(span, "reserved word cannot be used as a binding identifier");
+        }
+        let name_text = self.source_text(span);
+        let await_reserved = self.context.grammar().async_function()
+            || self.context.grammar().module()
+            || self.context.grammar().class() && !self.context.grammar().function();
+        if token_kind != TokenKind::Enum
+            && self.reports_ecmascript_early_errors()
+            && self.is_escaped_reserved_identifier(span, escaped)
+        {
+            self.error(span, "reserved word cannot be used as a binding identifier");
+        }
+        if self.reports_ecmascript_early_errors()
+            && await_reserved
+            && self.identifier_name_matches(span, "await", escaped)
+        {
+            self.error(span, "await cannot be bound in an async function");
+        }
+        if self.reports_ecmascript_early_errors()
+            && self.context.grammar().generator()
+            && self.identifier_name_matches(span, "yield", escaped)
+        {
+            self.error(span, "yield cannot be bound in a generator function");
+        }
+        if token_kind != TokenKind::Enum
+            && self.context.grammar().strict()
+            && (matches!(name_text, "eval" | "arguments")
+                || self.is_strict_reserved_identifier(span, escaped))
+        {
+            self.error(span, "identifier cannot be bound in strict mode");
+        }
     }
 
     // Array and object pattern recovery is mutually recursive and benefits from staying adjacent.
@@ -5786,7 +6173,11 @@ impl<'s> Parser<'s> {
                         properties.push(self.parse_binding_rest_element(argument)?.value());
                     } else {
                         let property_start = self.current.start;
-                        let property_name = self.parse_property_name(false)?;
+                        let capture = self.export_binding_capture;
+                        self.export_binding_capture = ExportBindingCapture::None;
+                        let property_name = self.parse_property_name(false);
+                        self.export_binding_capture = capture;
+                        let property_name = property_name?;
                         let key = property_name.key;
                         let shorthand =
                             property_name.shorthand && self.current.kind != TokenKind::Colon;
@@ -5860,7 +6251,11 @@ impl<'s> Parser<'s> {
                 "parameter initializers are not allowed in ambient contexts",
             );
         }
-        let right = self.parse_assignment_expression(true)?;
+        let capture = self.export_binding_capture;
+        self.export_binding_capture = ExportBindingCapture::None;
+        let right = self.parse_assignment_expression(true);
+        self.export_binding_capture = capture;
+        let right = right?;
         self.node(
             NodeTag::ASSIGNMENT_PATTERN,
             Span::new(pattern.span.start, right.span.end),
@@ -5877,7 +6272,11 @@ impl<'s> Parser<'s> {
                 Self::token_span(equals),
                 "rest element cannot have a default",
             );
-            let right = self.parse_assignment_expression(true)?;
+            let capture = self.export_binding_capture;
+            self.export_binding_capture = ExportBindingCapture::None;
+            let right = self.parse_assignment_expression(true);
+            self.export_binding_capture = capture;
+            let right = right?;
             argument = self.node(
                 NodeTag::ASSIGNMENT_PATTERN,
                 Span::new(argument.span.start, right.span.end),
@@ -5892,6 +6291,13 @@ impl<'s> Parser<'s> {
         span: Span,
         binding_kind: BindingKind,
     ) -> Result<ParsedNode, ParseError> {
+        self.validate_binding_identifier_span(span);
+        let name_text = self.source_text(span);
+        let _ = self.declare_binding(name_text, binding_kind, span);
+        self.identifier_from_span(span)
+    }
+
+    fn validate_binding_identifier_span(&mut self, span: Span) {
         let name_text = self
             .source
             .get(span.start as usize..span.end as usize)
@@ -5908,8 +6314,6 @@ impl<'s> Parser<'s> {
         {
             self.error(span, "identifier cannot be bound in strict mode");
         }
-        let _ = self.context.declare_binding(name_text, binding_kind, span);
-        self.identifier_from_span(span)
     }
 
     fn parse_type_annotation(&mut self) -> Result<ParsedNode, ParseError> {
@@ -7232,11 +7636,16 @@ impl<'s> Parser<'s> {
         } else {
             keyword.start
         };
-        let mut id = if self.current.kind == TokenKind::String {
+        let string_name = self.current.kind == TokenKind::String;
+        let mut id = if string_name {
             self.parse_literal()?
         } else {
             self.parse_typescript_module_binding_identifier()?
         };
+        if !string_name {
+            let name = self.source_text(id.span);
+            let _ = self.declare_binding(name, BindingKind::TypeScriptType, id.span);
+        }
         while self.eat(TokenKind::Dot).is_some() {
             let right = self.parse_typescript_module_identifier_name()?;
             id = self.node(
@@ -7263,9 +7672,11 @@ impl<'s> Parser<'s> {
         scope: ScopeKind,
     ) -> Result<ParsedNode, ParseError> {
         let block_start = self.expect(TokenKind::LeftBrace).start;
+        let previous_import_bindings = self.typescript_import_bindings.take();
         self.context.enter_scope(scope);
         let body = self.parse_typescript_module_block_contents(block_start);
         let _ = self.context.leave_scope();
+        self.typescript_import_bindings = previous_import_bindings;
         body
     }
 
@@ -7982,6 +8393,81 @@ impl<'s> Parser<'s> {
             return Some(true);
         }
         None
+    }
+
+    fn starts_typescript_type_only_import(&self) -> bool {
+        if !self.options.language.is_typescript()
+            || self.current.kind != TokenKind::Type
+            || self.current.flags.escaped()
+        {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let follower = lookahead.next_token();
+        matches!(follower.kind, TokenKind::LeftBrace | TokenKind::Star)
+            || follower.kind == TokenKind::From && lookahead.next_token().kind == TokenKind::From
+            || Self::is_identifier_name(follower.kind) && follower.kind != TokenKind::From
+    }
+
+    fn starts_typescript_type_only_export(&self) -> bool {
+        if !self.options.language.is_typescript()
+            || self.current.kind != TokenKind::Type
+            || self.current.flags.escaped()
+        {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        matches!(
+            lookahead.next_token().kind,
+            TokenKind::LeftBrace | TokenKind::Star
+        )
+    }
+
+    fn starts_typescript_type_only_specifier(&self) -> bool {
+        if !self.options.language.is_typescript()
+            || self.current.kind != TokenKind::Type
+            || self.current.flags.escaped()
+        {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let follower = lookahead.next_token();
+        if follower.kind != TokenKind::As {
+            return !matches!(
+                follower.kind,
+                TokenKind::Comma | TokenKind::RightBrace | TokenKind::Eof
+            );
+        }
+        let after_as = lookahead.next_token();
+        if matches!(
+            after_as.kind,
+            TokenKind::Comma | TokenKind::RightBrace | TokenKind::Eof
+        ) {
+            return true;
+        }
+        after_as.kind == TokenKind::As
+            && !matches!(
+                lookahead.next_token().kind,
+                TokenKind::Comma | TokenKind::RightBrace | TokenKind::Eof
+            )
+    }
+
+    fn starts_deferred_import(&self) -> bool {
+        if self.current.flags.escaped()
+            || !self.identifier_name_matches(self.current_span(), "defer", false)
+        {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let follower = lookahead.next_token().kind;
+        if follower == TokenKind::From {
+            return lookahead.next_token().kind == TokenKind::From;
+        }
+        follower != TokenKind::Comma
     }
 
     fn looks_like_export_import_equals(&self) -> bool {
@@ -8753,6 +9239,48 @@ fn has_use_strict_directive(source: &str, position: usize) -> bool {
     false
 }
 
+fn decode_well_formed_string_literal(raw: &str) -> Option<String> {
+    if raw.len() < 2
+        || !raw.starts_with(['\'', '"'])
+        || raw.as_bytes().last() != raw.as_bytes().first()
+    {
+        return None;
+    }
+    let mut input = raw[1..raw.len() - 1].chars().peekable();
+    let mut code_units = Vec::with_capacity(raw.len().saturating_sub(2));
+    while let Some(character) = input.next() {
+        if character != '\\' {
+            code_units.extend(character.encode_utf16(&mut [0; 2]).iter().copied());
+            continue;
+        }
+        match input.next()? {
+            'u' => {
+                let value = decode_unicode_escape_value(&mut input)?;
+                if let Ok(unit) = u16::try_from(value) {
+                    code_units.push(unit);
+                } else {
+                    let character = char::from_u32(value)?;
+                    code_units.extend(character.encode_utf16(&mut [0; 2]).iter().copied());
+                }
+            }
+            'x' => code_units.push(u16::try_from(decode_fixed_hex_value(&mut input, 2)?).ok()?),
+            '\n' => {}
+            '\r' => {
+                let _ = input.next_if_eq(&'\n');
+            }
+            'b' => code_units.push(0x0008),
+            'f' => code_units.push(0x000C),
+            'n' => code_units.push(0x000A),
+            'r' => code_units.push(0x000D),
+            't' => code_units.push(0x0009),
+            'v' => code_units.push(0x000B),
+            '0' => code_units.push(0),
+            escaped => code_units.extend(escaped.encode_utf16(&mut [0; 2]).iter().copied()),
+        }
+    }
+    String::from_utf16(&code_units).ok()
+}
+
 fn decode_static_property_name(raw: &str) -> Option<String> {
     let string_literal = raw.starts_with(['\'', '"']);
     let content =
@@ -8791,7 +9319,11 @@ fn decode_static_property_name(raw: &str) -> Option<String> {
 }
 
 fn decode_unicode_escape(input: &mut Peekable<Chars<'_>>) -> Option<char> {
-    let value = if input.next_if_eq(&'{').is_some() {
+    char::from_u32(decode_unicode_escape_value(input)?)
+}
+
+fn decode_unicode_escape_value(input: &mut Peekable<Chars<'_>>) -> Option<u32> {
+    if input.next_if_eq(&'{').is_some() {
         let mut value = 0_u32;
         let mut digits = 0_u8;
         loop {
@@ -8807,11 +9339,10 @@ fn decode_unicode_escape(input: &mut Peekable<Chars<'_>>) -> Option<char> {
                 return None;
             }
         }
-        (digits > 0).then_some(value)?
+        (digits > 0).then_some(value)
     } else {
-        decode_fixed_hex_value(input, 4)?
-    };
-    char::from_u32(value)
+        decode_fixed_hex_value(input, 4)
+    }
 }
 
 fn decode_fixed_hex_escape(input: &mut Peekable<Chars<'_>>, digits: u8) -> Option<char> {

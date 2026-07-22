@@ -268,6 +268,8 @@ impl NodeTag {
     pub const TS_INSTANTIATION_EXPRESSION: Self = Self(586);
     pub const TS_TYPE_QUERY: Self = Self(587);
     pub const INVALID_TEMPLATE_ELEMENT: Self = Self(588);
+    pub const TS_EXPORT_SPECIFIER: Self = Self(589);
+    pub const PHASE_IMPORT_DECLARATION: Self = Self(590);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {

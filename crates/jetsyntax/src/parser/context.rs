@@ -269,6 +269,8 @@ pub enum BindingKind {
     Parameter,
     Lexical,
     Import,
+    TypeScriptImport,
+    TypeScriptType,
     ImportEquals,
     Type,
     AmbientClass,
@@ -281,7 +283,7 @@ impl BindingKind {
     }
 
     const fn is_type(self) -> bool {
-        matches!(self, Self::Type)
+        matches!(self, Self::Type | Self::TypeScriptType)
     }
 
     const fn can_merge_with(self, other: Self) -> bool {
@@ -297,6 +299,10 @@ impl BindingKind {
                 (self, other),
                 (Self::Var, Self::ImportEquals) | (Self::ImportEquals, Self::Var)
             )
+            || matches!(self, Self::TypeScriptImport)
+            || matches!(other, Self::TypeScriptImport)
+            || matches!(self, Self::TypeScriptType)
+            || matches!(other, Self::TypeScriptType)
     }
 }
 
@@ -339,7 +345,7 @@ struct Scope<'s> {
     // Most scopes never export. The indirection keeps the hot scope record small and allocates
     // only for the program/module scopes that actually declare an export.
     #[allow(clippy::box_collection)]
-    exports: Option<Box<HashMap<&'s str, Span>>>,
+    exports: Option<Box<HashMap<Cow<'s, str>, Span>>>,
     private_names: HashMap<Cow<'s, str>, PrivateDeclaration>,
     private_uses: Vec<(Cow<'s, str>, Span)>,
 }
@@ -433,7 +439,7 @@ enum Mutation<'s> {
     LabelPopped(Label<'s>),
     ExportDeclared {
         scope: usize,
-        name: &'s str,
+        name: Cow<'s, str>,
     },
 }
 
@@ -484,6 +490,18 @@ impl<'s> ParserContext<'s> {
         Some(kind)
     }
 
+    #[must_use]
+    pub(crate) fn in_program_scope(&self) -> bool {
+        matches!(self.scopes.last(), Some(scope) if scope.kind == ScopeKind::Program)
+    }
+
+    #[must_use]
+    pub(crate) fn has_visible_binding(&self, name: &str) -> bool {
+        self.scopes.iter().rev().any(|scope| {
+            scope.value_bindings.contains_key(name) || scope.type_bindings.contains_key(name)
+        })
+    }
+
     pub(crate) fn declare_binding(&mut self, name: &'s str, kind: BindingKind, span: Span) -> bool {
         if self.scopes.is_empty() {
             self.error(span, "binding declaration requires an active scope");
@@ -530,7 +548,11 @@ impl<'s> ParserContext<'s> {
             .then(|| self.scopes[target - 1].value_bindings.get(name).copied())
             .flatten();
         let conflict = if kind.is_type() {
-            self.scopes[target].type_bindings.get(name).copied()
+            self.scopes[target]
+                .type_bindings
+                .get(name)
+                .copied()
+                .filter(|binding| !kind.can_merge_with(binding.kind))
         } else if kind.is_var_scoped() {
             self.scopes[target..]
                 .iter()
@@ -606,6 +628,23 @@ impl<'s> ParserContext<'s> {
                 name,
                 Binding {
                     kind: BindingKind::AmbientClassFunction,
+                    span: previous.span,
+                },
+            );
+            self.record(Mutation::BindingChanged {
+                scope: target,
+                namespace,
+                name,
+                previous,
+            });
+        } else if previous.kind == BindingKind::TypeScriptImport
+            && kind != BindingKind::TypeScriptImport
+            || previous.kind == BindingKind::TypeScriptType && kind != BindingKind::TypeScriptType
+        {
+            bindings.insert(
+                name,
+                Binding {
+                    kind,
                     span: previous.span,
                 },
             );
@@ -863,7 +902,8 @@ impl<'s> ParserContext<'s> {
         self.resolve_label(name, LabelKind::supports_continue)
     }
 
-    pub(crate) fn declare_export(&mut self, name: &'s str, span: Span) -> bool {
+    pub(crate) fn declare_export(&mut self, name: impl Into<Cow<'s, str>>, span: Span) -> bool {
+        let name = name.into();
         let target = self
             .scopes
             .iter()
@@ -877,7 +917,7 @@ impl<'s> ParserContext<'s> {
         if let Some(previous) = self.scopes[target]
             .exports
             .as_deref()
-            .and_then(|exports| exports.get(name))
+            .and_then(|exports| exports.get(name.as_ref()))
             .copied()
         {
             self.push_diagnostic(
@@ -889,7 +929,7 @@ impl<'s> ParserContext<'s> {
         self.scopes[target]
             .exports
             .get_or_insert_with(Default::default)
-            .insert(name, span);
+            .insert(name.clone(), span);
         self.record(Mutation::ExportDeclared {
             scope: target,
             name,
@@ -1067,7 +1107,7 @@ impl<'s> ParserContext<'s> {
                 if let Some(target) = self.scopes.get_mut(scope)
                     && let Some(exports) = target.exports.as_deref_mut()
                 {
-                    exports.remove(name);
+                    exports.remove(name.as_ref());
                 }
             }
         }

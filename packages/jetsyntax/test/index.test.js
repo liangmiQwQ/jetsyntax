@@ -681,6 +681,196 @@ describe("parse", () => {
     expect(named.program.body[0].declaration.id).toMatchObject({ name: "named" });
   });
 
+  it("materializes string-named module imports and exports", () => {
+    const source = [
+      "import { \"default\" as value } from \"source\";",
+      "export { \"source name\", \"source name\" as \"public name\" } from \"source\";",
+      "export { value as \"local name\" };",
+      "export * as \"namespace name\" from \"source\";",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true, sourceType: "module" });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      {
+        type: "ImportDeclaration",
+        specifiers: [
+          {
+            type: "ImportSpecifier",
+            imported: { type: "Literal", value: "default", raw: "\"default\"" },
+            local: { type: "Identifier", name: "value" },
+          },
+        ],
+      },
+      {
+        type: "ExportNamedDeclaration",
+        specifiers: [
+          {
+            type: "ExportSpecifier",
+            local: { type: "Literal", value: "source name" },
+            exported: { type: "Literal", value: "source name" },
+          },
+          {
+            type: "ExportSpecifier",
+            local: { type: "Literal", value: "source name" },
+            exported: { type: "Literal", value: "public name" },
+          },
+        ],
+      },
+      {
+        type: "ExportNamedDeclaration",
+        specifiers: [
+          {
+            local: { type: "Identifier", name: "value" },
+            exported: { type: "Literal", value: "local name" },
+          },
+        ],
+      },
+      {
+        type: "ExportAllDeclaration",
+        exported: { type: "Literal", value: "namespace name" },
+      },
+    ]);
+  });
+
+  it("preserves TypeScript type-only kinds around string module names", () => {
+    const source = [
+      "import type { \"source\" as Imported } from \"module\";",
+      "import { type \"source\" as Specifier } from \"module\";",
+      "export type { Imported as \"public\" };",
+      "export type * as \"namespace\" from \"module\";",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", semanticErrors: true, sourceType: "module" });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      {
+        type: "ImportDeclaration",
+        importKind: "type",
+        specifiers: [{ imported: { value: "source" }, importKind: "value" }],
+      },
+      {
+        type: "ImportDeclaration",
+        importKind: "value",
+        specifiers: [{ imported: { value: "source" }, importKind: "type" }],
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        specifiers: [{ exportKind: "value" }],
+      },
+      { type: "ExportAllDeclaration", exportKind: "type", exported: { value: "namespace" } },
+    ]);
+  });
+
+  it("disambiguates contextual type-only import specifiers", () => {
+    const specifiers = [
+      "import { type } from 'module';",
+      "import { type as } from 'module';",
+      "import { type as as } from 'module';",
+      "import { type as as as } from 'module';",
+    ].map((source) => {
+      const result = parse(source, { lang: "ts", semanticErrors: true, sourceType: "module" });
+      expect(result.diagnostics).toEqual([]);
+      return result.program.body[0].specifiers[0];
+    });
+
+    expect(specifiers).toMatchObject([
+      { imported: { name: "type" }, local: { name: "type" }, importKind: "value" },
+      { imported: { name: "as" }, local: { name: "as" }, importKind: "type" },
+      { imported: { name: "type" }, local: { name: "as" }, importKind: "value" },
+      { imported: { name: "as" }, local: { name: "as" }, importKind: "type" },
+    ]);
+  });
+
+  it("preserves type-only specifier ranges and deferred import phases", () => {
+    const typed = parse(
+      "import { type Value } from 'module'; export { type Value as Public } from 'module';",
+      { lang: "ts", range: true, semanticErrors: true, sourceType: "module" },
+    );
+
+    expect(typed.diagnostics).toEqual([]);
+    expect(typed.program.body[0].specifiers[0]).toMatchObject({
+      importKind: "type",
+      range: [9, 19],
+    });
+    expect(typed.program.body[1].specifiers[0]).toMatchObject({
+      exportKind: "type",
+      range: [46, 66],
+    });
+
+    const deferred = parse("import defer * as namespace from 'module';", {
+      semanticErrors: true,
+      sourceType: "module",
+    });
+    expect(deferred.diagnostics).toEqual([]);
+    expect(deferred.program.body[0]).toMatchObject({
+      type: "ImportDeclaration",
+      phase: "defer",
+      specifiers: [{ type: "ImportNamespaceSpecifier", local: { name: "namespace" } }],
+    });
+
+    const invalidDeferred = parse("import defer { named } from 'module';", {
+      lang: "ts",
+      semanticErrors: true,
+      sourceType: "module",
+    });
+    expect(invalidDeferred.diagnostics).not.toEqual([]);
+    expect(invalidDeferred.program.body[0]).toMatchObject({
+      type: "ImportDeclaration",
+      phase: "defer",
+      specifiers: [{ type: "ImportSpecifier", local: { name: "named" } }],
+    });
+
+    const invalidDefault = parse("import defer local from 'module';", {
+      lang: "ts",
+      semanticErrors: true,
+      sourceType: "module",
+    });
+    expect(invalidDefault.diagnostics).not.toEqual([]);
+    expect(invalidDefault.program.body).toMatchObject([{
+      type: "ImportDeclaration",
+      phase: "defer",
+      specifiers: [{ type: "ImportDefaultSpecifier", local: { name: "local" } }],
+      source: { value: "module" },
+    }]);
+
+    const invalidCombined = parse("import defer local, * as namespace from 'module';", {
+      semanticErrors: true,
+      sourceType: "module",
+    });
+    expect(invalidCombined.diagnostics).not.toEqual([]);
+    expect(invalidCombined.program.body[0]).toMatchObject({
+      type: "ImportDeclaration",
+      phase: "defer",
+      specifiers: [
+        { type: "ImportDefaultSpecifier", local: { name: "local" } },
+        { type: "ImportNamespaceSpecifier", local: { name: "namespace" } },
+      ],
+    });
+  });
+
+  it("diagnoses repeated TypeScript import bindings", () => {
+    for (
+      const source of [
+        "import { Named } from 'one'; import { Named } from 'two';",
+        "import type { Named } from 'one'; import type { Named } from 'two';",
+        "import { type Named } from 'one'; import { type Named } from 'two';",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts", semanticErrors: true, sourceType: "module" });
+      expect(result.diagnostics, source).not.toEqual([]);
+    }
+  });
+
+  it("tracks merged variable names in export declarations", () => {
+    const result = parse("var name; export var name; export { name };", {
+      semanticErrors: true,
+      sourceType: "module",
+    });
+    expect(result.diagnostics).toContain("duplicate export `name`");
+  });
+
   it("ends bare yield expressions at enclosing expression boundaries", () => {
     const source = [
       "function* sequence(value) {",

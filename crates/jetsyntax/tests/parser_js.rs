@@ -568,6 +568,200 @@ fn parser_should_allow_anonymous_default_export_declarations() {
     );
 }
 
+/// Module export names may be strings while imported bindings remain identifiers.
+#[test]
+fn parser_should_parse_arbitrary_module_namespace_names() {
+    assert_clean_cases(&[
+        GrammarCase::module(
+            "string-named import",
+            r#"import { "default" as value, if as condition } from "source";"#,
+            &[NodeTag::IMPORT_DECLARATION, NodeTag::IMPORT_SPECIFIER],
+        ),
+        GrammarCase::module(
+            "string-named local export",
+            r#"const value = 1; export { value as "answer" };"#,
+            &[NodeTag::EXPORT_NAMED_DECLARATION, NodeTag::EXPORT_SPECIFIER],
+        ),
+        GrammarCase::module(
+            "string-named re-exports",
+            r#"export { "source", "source" as "answer", default as "fallback" } from "module";"#,
+            &[NodeTag::EXPORT_NAMED_DECLARATION, NodeTag::EXPORT_SPECIFIER],
+        ),
+        GrammarCase::module(
+            "string-named namespace export",
+            r#"export * as "namespace" from "module";"#,
+            &[NodeTag::EXPORT_ALL_DECLARATION],
+        ),
+    ]);
+
+    for source in [
+        r#"const value = 1; export { value as "\udbff\udfff" };"#,
+        r#"const value = 1; export { value as "\u{dbff}\udfff" };"#,
+        r#"const value = 1; export { value as "\udbff\u{dfff}" };"#,
+        r#"const value = 1; export { value as "\u{dbff}\u{dfff}" };"#,
+        "const value = 1; export { value as \"\\udbff\\\n\\udfff\" };",
+    ] {
+        let valid_pair = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse paired surrogate export name");
+        assert!(
+            valid_pair.diagnostics.is_empty(),
+            "{source}: {:?}",
+            valid_pair.diagnostics
+        );
+        valid_pair
+            .tape
+            .validate()
+            .expect("valid paired surrogate tape");
+    }
+}
+
+#[test]
+fn parser_should_parse_typescript_module_namespace_names() {
+    for source in [
+        r#"import type { "source" as Local } from "module"; export type { Local as "public" };"#,
+        r#"import { type "source" as Local } from "module"; export { type Local as "public" };"#,
+        r#"export type { "source" as "public" } from "module"; export type * as "namespace" from "module";"#,
+        r#"import { type } from "module";"#,
+        r#"import { type as } from "module";"#,
+        r#"import { type as as } from "module";"#,
+        r#"import { type as as as } from "module";"#,
+        r#"export { type as as if } from "module";"#,
+        r#"import type from "value-module"; import type from from "type-module";"#,
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                language: Language::TypeScript,
+                source_kind: SourceKind::Module,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse TypeScript module export name");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+        parsed
+            .tape
+            .validate()
+            .expect("valid TypeScript module-name tape");
+    }
+}
+
+#[test]
+fn parser_should_resolve_cooked_module_bindings_and_deferred_imports() {
+    assert_clean_cases(&[
+        GrammarCase::module(
+            "escaped local export binding",
+            r"const \u0061 = 1; export { a };",
+            &[NodeTag::EXPORT_NAMED_DECLARATION],
+        ),
+        GrammarCase::module(
+            "deferred namespace import",
+            r#"import defer * as namespace from "module";"#,
+            &[NodeTag::PHASE_IMPORT_DECLARATION],
+        ),
+    ]);
+}
+
+#[test]
+fn parser_should_diagnose_invalid_typescript_type_only_module_declarations() {
+    for source in [
+        r#"import type Default, { Named } from "module";"#,
+        r#"import type { type Named } from "module";"#,
+        r#"export type { type Named } from "module";"#,
+        r#"import { await } from "module";"#,
+        r#"import { enum } from "module";"#,
+        r#"import Default { Named } from "module";"#,
+        r#"import defer { Named } from "module";"#,
+        r#"import defer Default from "module";"#,
+        r#"import defer Default, * as Namespace from "module";"#,
+        r#"import defer from from "module";"#,
+        r#"import { Named } from "one"; import { Named } from "two";"#,
+        r#"import type { Named } from "one"; import type { Named } from "two";"#,
+        r#"import { type Named } from "one"; import { type Named } from "two";"#,
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                language: Language::TypeScript,
+                source_kind: SourceKind::Module,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover invalid TypeScript type-only declaration");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid recovered TypeScript module-name tape");
+    }
+}
+
+#[test]
+fn parser_should_diagnose_invalid_module_namespace_names() {
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::module(
+                "string import without binding",
+                r#"import { "value" } from "module";"#,
+                &[NodeTag::IMPORT_SPECIFIER],
+            ),
+            GrammarCase::module(
+                "string export binding without source",
+                r#"export { "value" as renamed };"#,
+                &[NodeTag::EXPORT_SPECIFIER],
+            ),
+            GrammarCase::module(
+                "lone surrogate import name",
+                r#"import { "\ud800" as value } from "module";"#,
+                &[NodeTag::IMPORT_SPECIFIER],
+            ),
+            GrammarCase::module(
+                "lone surrogate export name",
+                r#"export { value as "\udfff" };"#,
+                &[NodeTag::EXPORT_SPECIFIER],
+            ),
+            GrammarCase::module(
+                "escaped duplicate export name",
+                r#"const first = 1, second = 2; export { first as "name", second as "n\u0061me" };"#,
+                &[NodeTag::EXPORT_SPECIFIER],
+            ),
+            GrammarCase::module(
+                "escaped identifier duplicate export name",
+                r#"const first = 1, second = 2; export { first as n\u0061me, second as "name" };"#,
+                &[NodeTag::EXPORT_SPECIFIER],
+            ),
+            GrammarCase::module(
+                "duplicate declaration and string export name",
+                r#"export const name = 1; export { name as "name" };"#,
+                &[NodeTag::EXPORT_NAMED_DECLARATION, NodeTag::EXPORT_SPECIFIER],
+            ),
+            GrammarCase::module(
+                "duplicate merged variable and explicit export name",
+                r"var name; export var name; export { name };",
+                &[NodeTag::EXPORT_NAMED_DECLARATION, NodeTag::EXPORT_SPECIFIER],
+            ),
+            GrammarCase::module(
+                "duplicate imported binding",
+                r#"import { value, value } from "module";"#,
+                &[NodeTag::IMPORT_SPECIFIER],
+            ),
+        ],
+        true,
+    );
+}
+
 /// Empty arrow parameter lists accept either expression or block bodies in nested expression positions.
 #[test]
 fn parser_should_accept_zero_parameter_arrow_functions() {
