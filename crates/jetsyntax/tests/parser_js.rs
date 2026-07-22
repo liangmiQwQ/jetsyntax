@@ -2347,6 +2347,16 @@ fn parser_should_recover_with_a_valid_tape() {
         GrammarCase::script("unterminated block", "function run() { return 1;", &[]),
         GrammarCase::script("throw line break", "throw\nvalue;", &[]),
         GrammarCase::script("unterminated literal", "const value = 'text", &[]),
+        GrammarCase::script(
+            "non-identifier label target",
+            "this.property: value;",
+            &[NodeTag::LABELED_STATEMENT],
+        ),
+        GrammarCase::script(
+            "parenthesized label target",
+            "(label): value;",
+            &[NodeTag::LABELED_STATEMENT],
+        ),
     ];
 
     assert_diagnostic_cases(&cases, false);

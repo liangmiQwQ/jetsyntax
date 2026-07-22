@@ -1951,6 +1951,23 @@ describe("parse", () => {
     }
   });
 
+  it("diagnoses labeled statements whose label is not an identifier", () => {
+    for (
+      const source of [
+        "this.property: value;",
+        "(label): value;",
+        "class B { constructor() { this.y: any; } }",
+      ]
+    ) {
+      const result = parse(source, { lang: source.startsWith("class") ? "ts" : "js" });
+      expect(result.diagnostics, source).toContain(
+        "labeled statement requires an identifier label",
+      );
+    }
+
+    expect(parse("label: value;", { lang: "js" }).diagnostics).toEqual([]);
+  });
+
   it("recovers ambient module heads and preserves scope-specific diagnostics", () => {
     const semanticLegacy = parse("declare module Legacy.Deep {}", {
       lang: "ts",

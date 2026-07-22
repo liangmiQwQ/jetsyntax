@@ -3223,8 +3223,24 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_expression_or_labeled_statement(&mut self) -> Result<ParsedNode, ParseError> {
+        let starts_with_label_identifier =
+            Self::is_identifier_name(self.current.kind) || self.current.kind == TokenKind::Yield;
         let expression = self.parse_expression(true)?;
         if self.eat(TokenKind::Colon).is_some() {
+            let invalid_label =
+                !starts_with_label_identifier || self.last_node_tag != Some(NodeTag::IDENTIFIER);
+            let typescript_compatible = self.options.language.is_typescript()
+                || self.options.syntax_extensions.typescript_js_compatibility;
+            // TypeScript arrow heads also place `:` after parenthesized expressions, but member expressions can never be arrow parameters.
+            if invalid_label
+                && (!typescript_compatible
+                    || self.last_node_tag == Some(NodeTag::MEMBER_EXPRESSION))
+            {
+                self.error(
+                    expression.span,
+                    "labeled statement requires an identifier label",
+                );
+            }
             let name = self
                 .source
                 .get(expression.span.start as usize..expression.span.end as usize);
