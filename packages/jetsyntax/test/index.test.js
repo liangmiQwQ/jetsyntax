@@ -1215,6 +1215,139 @@ describe("parse", () => {
     for (const member of members) expect(member.range).toEqual([member.start, member.end]);
   });
 
+  it("materializes ESTree abstract classes and members", () => {
+    const source = [
+      "abstract class Base<T> {}",
+      "export abstract class Derived<T> extends Base implements Contract<T> {",
+      "  public abstract method(value: T): T;",
+      "  abstract readonly field: T;",
+      "  abstract #privateMethod(): void;",
+      "}",
+      "export default abstract class {}",
+    ].join("\n");
+    const result = parse(source, {
+      lang: "ts",
+      range: true,
+      semanticErrors: true,
+      sourceType: "module",
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    const base = result.program.body[0];
+    const derived = result.program.body[1].declaration;
+    const exportedDefault = result.program.body[2].declaration;
+    expect(base).toMatchObject({ type: "ClassDeclaration", abstract: true });
+    expect(derived).toMatchObject({
+      type: "ClassDeclaration",
+      abstract: true,
+      typeParameters: { type: "TSTypeParameterDeclaration" },
+      implements: [{ type: "TSClassImplements" }],
+    });
+    expect(exportedDefault).toMatchObject({ type: "ClassDeclaration", abstract: true });
+    expect(derived.body.body).toMatchObject([
+      {
+        type: "TSAbstractMethodDefinition",
+        accessibility: "public",
+        value: { type: "TSEmptyBodyFunctionExpression", body: null },
+      },
+      { type: "TSAbstractPropertyDefinition", readonly: true, value: null },
+      {
+        type: "TSAbstractMethodDefinition",
+        key: { type: "PrivateIdentifier", name: "privateMethod" },
+      },
+    ]);
+    for (const node of [base, derived, exportedDefault, ...derived.body.body]) {
+      expect(node.range).toEqual([node.start, node.end]);
+      if (node.type.startsWith("TSAbstract")) expect(node).not.toHaveProperty("abstract");
+    }
+  });
+
+  it("keeps abstract accessor and async-generator signatures separate from following members", () => {
+    const result = parse(
+      [
+        "abstract class Signatures {",
+        "  abstract get value(): string;",
+        "  abstract set value(next: string);",
+        "  abstract async load(): Promise<string>;",
+        "  abstract *values(): IterableIterator<string>;",
+        "  after: string;",
+        "}",
+      ].join("\n"),
+      { lang: "ts", semanticErrors: true },
+    );
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[0].body.body).toMatchObject([
+      {
+        type: "TSAbstractMethodDefinition",
+        kind: "get",
+        value: { type: "TSEmptyBodyFunctionExpression", generator: false, async: false },
+      },
+      {
+        type: "TSAbstractMethodDefinition",
+        kind: "set",
+        value: { type: "TSEmptyBodyFunctionExpression", generator: false, async: false },
+      },
+      {
+        type: "TSAbstractMethodDefinition",
+        kind: "method",
+        value: { type: "TSEmptyBodyFunctionExpression", generator: false, async: true },
+      },
+      {
+        type: "TSAbstractMethodDefinition",
+        kind: "method",
+        value: { type: "TSEmptyBodyFunctionExpression", generator: true, async: false },
+      },
+      { type: "PropertyDefinition", key: { name: "after" } },
+    ]);
+  });
+
+  it("keeps abstract contextual and diagnoses invalid abstract members", () => {
+    const contextual = parse(
+      [
+        "abstract",
+        "class Ordinary {}",
+        "abstract as Type;",
+        "abstract satisfies Type;",
+        "export default abstract;",
+        "class Names { abstract(); abstract!: void; abstract\nmethod(); }",
+      ].join("\n"),
+      { lang: "ts", sourceType: "module" },
+    );
+    expect(contextual.program.body[0]).toMatchObject({
+      type: "ExpressionStatement",
+      expression: { name: "abstract" },
+    });
+    expect(contextual.program.body[1]).toMatchObject({
+      type: "ClassDeclaration",
+      id: { name: "Ordinary" },
+    });
+    expect(contextual.program.body[1]).not.toHaveProperty("abstract");
+    expect(JSON.stringify(contextual.program)).not.toContain("TSAbstract");
+
+    for (
+      const source of [
+        "class C { abstract method(); }",
+        "abstract class C { abstract method() {} }",
+        "abstract class C { abstract property = 1; }",
+        "abstract class C { static abstract method(); }",
+        "abstract class C { abstract constructor(); }",
+        "abstract class C { override abstract method(); }",
+        "abstract class C { abstract #field: number; }",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts", semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+
+    const privateMethod = parse("abstract class C { abstract #method(): void; }", {
+      lang: "ts",
+      semanticErrors: true,
+    });
+    expect(privateMethod.diagnostics).toEqual([]);
+    expect(privateMethod.program.body[0].body.body[0].type).toBe("TSAbstractMethodDefinition");
+  });
+
   it("preserves modifier-shaped class member names and escaped modifier spellings", () => {
     const source = [
       "class Base {}",

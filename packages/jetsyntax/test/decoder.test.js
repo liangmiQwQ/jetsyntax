@@ -828,6 +828,51 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes abstract TypeScript class and member records", () => {
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      const classTape = new HandcraftedTape();
+      const body = classTape.node(59, 15, 17, [classTape.list([])]);
+      const abstractClass = classTape.node(57, 0, 17, [classTape.null(), classTape.null(), body], 1);
+      expect(decode("abstract class {}", classTape.finish(abstractClass))).toMatchObject({
+        type: "ClassDeclaration",
+        abstract: true,
+      });
+
+      const methodTape = new HandcraftedTape();
+      const methodKey = methodTape.node(2, 0, 0, [methodTape.string("method")]);
+      const method = methodTape.node(576, 0, 0, [
+        methodKey,
+        methodTape.null(),
+        methodTape.integer(0),
+        methodTape.boolean(false),
+        methodTape.boolean(false),
+      ], 0x09);
+      const decodedMethod = decode("", methodTape.finish(method));
+      expect(decodedMethod).toMatchObject({
+        type: "TSAbstractMethodDefinition",
+        accessibility: "public",
+        override: true,
+      });
+      expect(decodedMethod).not.toHaveProperty("abstract");
+
+      const propertyTape = new HandcraftedTape();
+      const propertyKey = propertyTape.node(2, 0, 0, [propertyTape.string("field")]);
+      const property = propertyTape.node(577, 0, 0, [
+        propertyKey,
+        propertyTape.null(),
+        propertyTape.boolean(false),
+        propertyTape.boolean(false),
+        propertyTape.null(),
+      ]);
+      const decodedProperty = decode("", propertyTape.finish(property));
+      expect(decodedProperty).toMatchObject({
+        type: "TSAbstractPropertyDefinition",
+        value: null,
+      });
+      expect(decodedProperty).not.toHaveProperty("abstract");
+    }
+  });
+
   it("rejects malformed TypeScript class member records", () => {
     for (
       const [tag, count, expected] of [
@@ -835,12 +880,22 @@ describe("decodeTape", () => {
         [573, 6, 5],
         [574, 4, 5],
         [574, 6, 5],
+        [576, 4, 5],
+        [576, 6, 5],
+        [577, 4, 5],
+        [577, 6, 5],
       ]
     ) {
       const tape = new HandcraftedTape();
       const fields = Array.from({ length: count }, () => tape.null());
       const encoded = tape.finish(tape.node(tag, 0, 0, fields, 1));
-      const type = tag === 573 ? "MethodDefinition" : "PropertyDefinition";
+      const type = tag === 573
+        ? "MethodDefinition"
+        : tag === 574
+        ? "PropertyDefinition"
+        : tag === 576
+        ? "TSAbstractMethodDefinition"
+        : "TSAbstractPropertyDefinition";
       for (const decode of [decodeTape, decodeTrustedTape]) {
         expect(() => decode("", encoded)).toThrow(
           `invalid ${type} field count ${count}; expected ${expected}`,
@@ -855,6 +910,33 @@ describe("decodeTape", () => {
       for (const decode of [decodeTape, decodeTrustedTape]) {
         expect(() => decode("", encoded)).toThrow(
           `invalid TypeScript class member modifier flags ${flags} for tag 573`,
+        );
+      }
+    }
+
+    for (const tag of [576, 577]) {
+      for (const flags of [0x10, 0xFF]) {
+        const tape = new HandcraftedTape();
+        const fields = Array.from({ length: 5 }, () => tape.null());
+        const encoded = tape.finish(tape.node(tag, 0, 0, fields, flags));
+        for (const decode of [decodeTape, decodeTrustedTape]) {
+          expect(() => decode("", encoded)).toThrow(
+            `invalid TypeScript class member modifier flags ${flags} for tag ${tag}`,
+          );
+        }
+      }
+    }
+  });
+
+  it("rejects malformed TypeScript class flags", () => {
+    for (const [tag, flags] of [[57, 0x02], [57, 0x10], [57, 0xFF], [58, 0x01]]) {
+      const tape = new HandcraftedTape();
+      const encoded = tape.finish(
+        tape.node(tag, 0, 0, [tape.null(), tape.null(), tape.null()], flags),
+      );
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid TypeScript class flags ${flags} for tag ${tag}`,
         );
       }
     }

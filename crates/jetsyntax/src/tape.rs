@@ -255,6 +255,8 @@ impl NodeTag {
     pub const TS_MODIFIED_METHOD_DEFINITION: Self = Self(573);
     pub const TS_MODIFIED_PROPERTY_DEFINITION: Self = Self(574);
     pub const TS_DECLARE_VARIABLE_DECLARATION: Self = Self(575);
+    pub const TS_ABSTRACT_METHOD_DEFINITION: Self = Self(576);
+    pub const TS_ABSTRACT_PROPERTY_DEFINITION: Self = Self(577);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {

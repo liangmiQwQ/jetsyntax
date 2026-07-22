@@ -154,6 +154,7 @@ impl AccessorKind {
 enum MethodBodyPolicy {
     Block,
     TypeScriptSignature,
+    TypeScriptAbstractSignature,
 }
 
 #[derive(Clone, Copy)]
@@ -219,12 +220,17 @@ impl AccessibilityModifier {
 #[derive(Clone, Copy, Default)]
 struct TypeScriptModifiers {
     accessibility: Option<AccessibilityModifier>,
+    r#abstract: bool,
     readonly: bool,
     r#override: bool,
 }
 
 impl TypeScriptModifiers {
     const fn any(self) -> bool {
+        self.wire_any() || self.r#abstract
+    }
+
+    const fn wire_any(self) -> bool {
         self.accessibility.is_some() || self.readonly || self.r#override
     }
 
@@ -240,7 +246,19 @@ impl TypeScriptModifiers {
 #[derive(Clone, Copy)]
 struct TypeScriptClassMemberContext {
     modifiers: TypeScriptModifiers,
+    class_abstract: bool,
     class_has_super: bool,
+}
+
+#[derive(Clone, Copy)]
+enum TypeScriptAbstractMemberKind {
+    Method {
+        constructor: bool,
+        has_implementation: bool,
+    },
+    Property {
+        has_initializer: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -375,6 +393,9 @@ impl<'s> Parser<'s> {
             }
             TokenKind::Namespace | TokenKind::Module if self.options.language.is_typescript() => {
                 self.parse_module_declaration()
+            }
+            TokenKind::Abstract if self.starts_typescript_abstract_class_declaration() => {
+                self.parse_typescript_abstract_class_declaration(false)
             }
             TokenKind::Function => self.parse_function(true, false),
             TokenKind::Async if self.followed_by_token_without_line_break(TokenKind::Function) => {
@@ -919,16 +940,19 @@ impl<'s> Parser<'s> {
             self.context
                 .set_grammar(self.context.grammar().with_strict(true));
         }
-        if body_policy == MethodBodyPolicy::TypeScriptSignature
-            && accessor.is_none()
-            && !generator
-            && !asynchronous
+        if (body_policy == MethodBodyPolicy::TypeScriptAbstractSignature
+            || (body_policy == MethodBodyPolicy::TypeScriptSignature
+                && accessor.is_none()
+                && !generator
+                && !asynchronous))
             && let Some(semicolon) = self.eat(TokenKind::Semicolon)
         {
             self.leave_function_context(previous_grammar);
             return self.node_typescript_empty_body_function(
                 Span::new(signature_start, semicolon.end),
                 params.value,
+                generator,
+                asynchronous,
                 return_type,
             );
         }
@@ -967,11 +991,13 @@ impl<'s> Parser<'s> {
         &mut self,
         span: Span,
         params: ValueRef,
+        generator: bool,
+        asynchronous: bool,
         return_type: Option<ValueRef>,
     ) -> Result<ParsedNode, ParseError> {
         let id = self.tape.push_null()?;
-        let generator = self.tape.push_bool(false)?;
-        let asynchronous = self.tape.push_bool(false)?;
+        let generator = self.tape.push_bool(generator)?;
+        let asynchronous = self.tape.push_bool(asynchronous)?;
         let return_type = if let Some(return_type) = return_type {
             return_type
         } else {
@@ -1011,7 +1037,7 @@ impl<'s> Parser<'s> {
         if self.options.language.is_typescript()
             || self.options.syntax_extensions.typescript_js_compatibility
         {
-            return self.parse_typescript_class(start, declaration);
+            return self.parse_typescript_class(start, declaration, false, false);
         }
         let id = if Self::is_identifier_name(self.current.kind) {
             self.parse_binding_identifier(BindingKind::Lexical)?.value()
@@ -1061,11 +1087,24 @@ impl<'s> Parser<'s> {
         )
     }
 
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_abstract_class_declaration(
+        &mut self,
+        allow_anonymous: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Abstract).start;
+        self.expect(TokenKind::Class);
+        self.parse_typescript_class(start, true, true, allow_anonymous)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn parse_typescript_class(
         &mut self,
         start: u32,
         declaration: bool,
+        abstract_class: bool,
+        allow_anonymous: bool,
     ) -> Result<ParsedNode, ParseError> {
         // 1. Distinguish a class named `implements` from an anonymous implementation clause.
         let anonymous_implements_clause = self.current.kind == TokenKind::Implements
@@ -1074,7 +1113,8 @@ impl<'s> Parser<'s> {
         let id = if Self::is_identifier_name(self.current.kind) && !anonymous_implements_clause {
             self.parse_binding_identifier(BindingKind::Lexical)?.value()
         } else {
-            if declaration {
+            // Default exports are the only abstract declaration form that permits an anonymous class.
+            if declaration && !allow_anonymous {
                 self.error(self.current_span(), "class declaration requires a name");
             }
             self.tape.push_null()?
@@ -1203,7 +1243,10 @@ impl<'s> Parser<'s> {
             if self.eat(TokenKind::Semicolon).is_some() {
                 continue;
             }
-            elements.push(self.parse_typescript_class_element(saw_extends)?.value());
+            elements.push(
+                self.parse_typescript_class_element(saw_extends, abstract_class)?
+                    .value(),
+            );
         }
         let end = self.expect(TokenKind::RightBrace).end;
         self.context.set_grammar(previous_grammar);
@@ -1218,29 +1261,34 @@ impl<'s> Parser<'s> {
                 [id, super_class, body.value()],
                 saw_implements.then_some(implementations.as_slice()),
                 type_parameters,
+                abstract_class,
             );
         }
         if saw_implements {
             let implementations = self.tape.push_list(&implementations)?;
-            self.node(
-                if declaration {
-                    NodeTag::TS_CLASS_DECLARATION
-                } else {
-                    NodeTag::TS_CLASS_EXPRESSION
-                },
-                Span::new(start, end),
-                &[id, super_class, body.value(), implementations],
-            )
+            let tag = if declaration {
+                NodeTag::TS_CLASS_DECLARATION
+            } else {
+                NodeTag::TS_CLASS_EXPRESSION
+            };
+            let span = Span::new(start, end);
+            let fields = [id, super_class, body.value(), implementations];
+            if abstract_class {
+                return self.node_typescript_abstract_class(tag, span, &fields);
+            }
+            self.node(tag, span, &fields)
         } else {
-            self.node(
-                if declaration {
-                    NodeTag::CLASS_DECLARATION
-                } else {
-                    NodeTag::CLASS_EXPRESSION
-                },
-                Span::new(start, end),
-                &[id, super_class, body.value()],
-            )
+            let tag = if declaration {
+                NodeTag::CLASS_DECLARATION
+            } else {
+                NodeTag::CLASS_EXPRESSION
+            };
+            let span = Span::new(start, end);
+            let fields = [id, super_class, body.value()];
+            if abstract_class {
+                return self.node_typescript_abstract_class(tag, span, &fields);
+            }
+            self.node(tag, span, &fields)
         }
     }
 
@@ -1253,27 +1301,43 @@ impl<'s> Parser<'s> {
         class_fields: [ValueRef; 3],
         implementations: Option<&[ValueRef]>,
         type_parameters: ValueRef,
+        abstract_class: bool,
     ) -> Result<ParsedNode, ParseError> {
         let implementations = if let Some(implementations) = implementations {
             self.tape.push_list(implementations)?
         } else {
             self.tape.push_null()?
         };
-        self.node(
-            if declaration {
-                NodeTag::TS_GENERIC_CLASS_DECLARATION
-            } else {
-                NodeTag::TS_GENERIC_CLASS_EXPRESSION
-            },
-            span,
-            &[
-                class_fields[0],
-                class_fields[1],
-                class_fields[2],
-                implementations,
-                type_parameters,
-            ],
-        )
+        let tag = if declaration {
+            NodeTag::TS_GENERIC_CLASS_DECLARATION
+        } else {
+            NodeTag::TS_GENERIC_CLASS_EXPRESSION
+        };
+        let fields = [
+            class_fields[0],
+            class_fields[1],
+            class_fields[2],
+            implementations,
+            type_parameters,
+        ];
+        if abstract_class {
+            return self.node_typescript_abstract_class(tag, span, &fields);
+        }
+        self.node(tag, span, &fields)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn node_typescript_abstract_class(
+        &mut self,
+        tag: NodeTag,
+        span: Span,
+        fields: &[ValueRef],
+    ) -> Result<ParsedNode, ParseError> {
+        let node = self.tape.push_node(tag, span, 1, fields)?;
+        self.last_node_tag = Some(tag);
+        self.last_assignment_target = AssignmentTargetType::Invalid;
+        Ok(ParsedNode { node, span })
     }
 
     fn parse_class_element(&mut self) -> Result<ParsedNode, ParseError> {
@@ -1379,6 +1443,7 @@ impl<'s> Parser<'s> {
     fn parse_typescript_class_element(
         &mut self,
         class_has_super: bool,
+        class_abstract: bool,
     ) -> Result<ParsedNode, ParseError> {
         let start = self.current.start;
         let mut modifiers = TypeScriptModifiers::default();
@@ -1433,6 +1498,29 @@ impl<'s> Parser<'s> {
                 continue;
             }
 
+            // Abstract is order-neutral with accessibility/readonly, but must precede override.
+            if self.current_typescript_modifier_matches(TokenKind::Abstract, "abstract")
+                && self.typescript_modifier_has_class_member_follower(false)
+            {
+                let token = self.take();
+                if self.options.semantic_errors {
+                    if modifiers.r#abstract {
+                        self.error(
+                            Self::token_span(token),
+                            "duplicate TypeScript class member modifier",
+                        );
+                    }
+                    if modifiers.r#override {
+                        self.error(
+                            Self::token_span(token),
+                            "abstract modifier must precede override modifier",
+                        );
+                    }
+                }
+                modifiers.r#abstract = true;
+                continue;
+            }
+
             if self.current_typescript_modifier_matches(TokenKind::Override, "override")
                 && self.typescript_modifier_has_class_member_follower(false)
             {
@@ -1464,6 +1552,7 @@ impl<'s> Parser<'s> {
         }
         let member_context = TypeScriptClassMemberContext {
             modifiers,
+            class_abstract,
             class_has_super,
         };
 
@@ -1533,7 +1622,20 @@ impl<'s> Parser<'s> {
             } else {
                 self.tape.push_null()?
             };
-        let value = if self.eat(TokenKind::Eq).is_some() {
+        let has_initializer = self.eat(TokenKind::Eq).is_some();
+        let value = if has_initializer && modifiers.r#abstract {
+            // ESTree keeps an abstract property's value null even while recovery consumes its initializer.
+            let tape = self.tape.checkpoint();
+            let assignment_patterns = self.assignment_pattern_checkpoint();
+            let last_node_tag = self.last_node_tag;
+            let last_assignment_target = self.last_assignment_target;
+            self.parse_assignment_expression(true)?;
+            self.tape.rollback(tape)?;
+            self.rollback_assignment_patterns(assignment_patterns);
+            self.last_node_tag = last_node_tag;
+            self.last_assignment_target = last_assignment_target;
+            self.tape.push_null()?
+        } else if has_initializer {
             self.parse_assignment_expression(true)?.value()
         } else {
             self.tape.push_null()?
@@ -1549,9 +1651,22 @@ impl<'s> Parser<'s> {
             false,
             member_context.class_has_super,
         );
+        self.diagnose_typescript_abstract_class_member(
+            member_context,
+            key.span,
+            is_static,
+            TypeScriptAbstractMemberKind::Property { has_initializer },
+        );
         let computed = self.tape.push_bool(computed)?;
         let is_static = self.tape.push_bool(is_static)?;
-        if modifiers.any() {
+        if modifiers.r#abstract {
+            return self.node_typescript_abstract_property_definition(
+                Span::new(start, end),
+                [key.value(), value, computed, is_static, type_annotation],
+                modifiers,
+            );
+        }
+        if modifiers.wire_any() {
             return self.node_typescript_modified_property_definition(
                 Span::new(start, end),
                 [key.value(), value, computed, is_static, type_annotation],
@@ -1656,12 +1771,34 @@ impl<'s> Parser<'s> {
             asynchronous,
             None,
             allow_super_call,
-            MethodBodyPolicy::TypeScriptSignature,
+            if modifiers.r#abstract {
+                MethodBodyPolicy::TypeScriptAbstractSignature
+            } else {
+                MethodBodyPolicy::TypeScriptSignature
+            },
         )?;
+        let has_implementation =
+            self.last_node_tag != Some(NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION);
+        self.diagnose_typescript_abstract_class_member(
+            member_context,
+            key.span,
+            is_static,
+            TypeScriptAbstractMemberKind::Method {
+                constructor: allow_super_call,
+                has_implementation,
+            },
+        );
         let kind = self.tape.push_u32(if allow_super_call { 3 } else { 0 })?;
         let computed = self.tape.push_bool(computed)?;
         let is_static = self.tape.push_bool(is_static)?;
-        if modifiers.any() {
+        if modifiers.r#abstract {
+            return self.node_typescript_abstract_method_definition(
+                Span::new(start, function.span.end),
+                [key.value(), function.value(), kind, computed, is_static],
+                modifiers,
+            );
+        }
+        if modifiers.wire_any() {
             return self.node_typescript_modified_method_definition(
                 Span::new(start, function.span.end),
                 [key.value(), function.value(), kind, computed, is_static],
@@ -1701,6 +1838,40 @@ impl<'s> Parser<'s> {
         modifiers: TypeScriptModifiers,
     ) -> Result<ParsedNode, ParseError> {
         let tag = NodeTag::TS_MODIFIED_PROPERTY_DEFINITION;
+        let node = self
+            .tape
+            .push_node(tag, span, modifiers.wire_flags(), &fields)?;
+        self.last_node_tag = Some(tag);
+        self.last_assignment_target = AssignmentTargetType::Invalid;
+        Ok(ParsedNode { node, span })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn node_typescript_abstract_method_definition(
+        &mut self,
+        span: Span,
+        fields: [ValueRef; 5],
+        modifiers: TypeScriptModifiers,
+    ) -> Result<ParsedNode, ParseError> {
+        let tag = NodeTag::TS_ABSTRACT_METHOD_DEFINITION;
+        let node = self
+            .tape
+            .push_node(tag, span, modifiers.wire_flags(), &fields)?;
+        self.last_node_tag = Some(tag);
+        self.last_assignment_target = AssignmentTargetType::Invalid;
+        Ok(ParsedNode { node, span })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn node_typescript_abstract_property_definition(
+        &mut self,
+        span: Span,
+        fields: [ValueRef; 5],
+        modifiers: TypeScriptModifiers,
+    ) -> Result<ParsedNode, ParseError> {
+        let tag = NodeTag::TS_ABSTRACT_PROPERTY_DEFINITION;
         let node = self
             .tape
             .push_node(tag, span, modifiers.wire_flags(), &fields)?;
@@ -1840,12 +2011,34 @@ impl<'s> Parser<'s> {
             false,
             Some(accessor),
             false,
-            MethodBodyPolicy::Block,
+            if modifiers.r#abstract {
+                MethodBodyPolicy::TypeScriptAbstractSignature
+            } else {
+                MethodBodyPolicy::Block
+            },
         )?;
+        let has_implementation =
+            self.last_node_tag != Some(NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION);
+        self.diagnose_typescript_abstract_class_member(
+            member_context,
+            key.span,
+            is_static,
+            TypeScriptAbstractMemberKind::Method {
+                constructor: false,
+                has_implementation,
+            },
+        );
         let kind = self.tape.push_u32(accessor.method_kind())?;
         let computed = self.tape.push_bool(computed)?;
         let is_static = self.tape.push_bool(is_static)?;
-        if modifiers.any() {
+        if modifiers.r#abstract {
+            return self.node_typescript_abstract_method_definition(
+                Span::new(start, function.span.end),
+                [key.value(), function.value(), kind, computed, is_static],
+                modifiers,
+            );
+        }
+        if modifiers.wire_any() {
             return self.node_typescript_modified_method_definition(
                 Span::new(start, function.span.end),
                 [key.value(), function.value(), kind, computed, is_static],
@@ -2166,6 +2359,10 @@ impl<'s> Parser<'s> {
         }
         if self.eat(TokenKind::Default).is_some() {
             let (declaration, needs_semicolon) = match self.current.kind {
+                TokenKind::Abstract if self.starts_typescript_abstract_class_declaration() => (
+                    self.parse_typescript_abstract_class_declaration(true)?,
+                    false,
+                ),
                 TokenKind::Async
                     if self.followed_by_token_without_line_break(TokenKind::Function) =>
                 {
@@ -2270,6 +2467,9 @@ impl<'s> Parser<'s> {
             }
             TokenKind::Namespace | TokenKind::Module if self.options.language.is_typescript() => {
                 self.parse_module_declaration()?
+            }
+            TokenKind::Abstract if self.starts_typescript_abstract_class_declaration() => {
+                self.parse_typescript_abstract_class_declaration(false)?
             }
             TokenKind::Async if self.followed_by_token_without_line_break(TokenKind::Function) => {
                 self.parse_function(true, true)?
@@ -5835,6 +6035,13 @@ impl<'s> Parser<'s> {
             || !matches!(lookahead.next_token(), token if token.kind == TokenKind::Enum && !token.flags.escaped())
     }
 
+    fn starts_typescript_abstract_class_declaration(&self) -> bool {
+        (self.options.language.is_typescript()
+            || self.options.syntax_extensions.typescript_js_compatibility)
+            && self.current.kind == TokenKind::Abstract
+            && self.followed_by_token_without_line_break(TokenKind::Class)
+    }
+
     #[cold]
     fn typescript_update_operand_is_parenthesized(&self, span: Span) -> bool {
         let raw = self.source_text(span);
@@ -5946,6 +6153,48 @@ impl<'s> Parser<'s> {
                 key_span,
                 "private class elements cannot have an accessibility modifier",
             );
+        }
+    }
+
+    fn diagnose_typescript_abstract_class_member(
+        &mut self,
+        member_context: TypeScriptClassMemberContext,
+        key_span: Span,
+        is_static: bool,
+        kind: TypeScriptAbstractMemberKind,
+    ) {
+        if !self.options.semantic_errors || !member_context.modifiers.r#abstract {
+            return;
+        }
+        if !member_context.class_abstract {
+            self.error(
+                key_span,
+                "abstract members can only appear within an abstract class",
+            );
+        }
+        if is_static {
+            self.error(key_span, "abstract class members cannot be static");
+        }
+        match kind {
+            TypeScriptAbstractMemberKind::Method {
+                constructor,
+                has_implementation,
+            } => {
+                if constructor {
+                    self.error(key_span, "class constructors cannot be abstract");
+                }
+                if has_implementation {
+                    self.error(key_span, "abstract methods cannot have an implementation");
+                }
+            }
+            TypeScriptAbstractMemberKind::Property { has_initializer } => {
+                if has_initializer {
+                    self.error(key_span, "abstract properties cannot have an initializer");
+                }
+                if self.source_text(key_span).starts_with('#') {
+                    self.error(key_span, "private fields cannot be abstract");
+                }
+            }
         }
     }
 

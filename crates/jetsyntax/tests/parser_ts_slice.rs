@@ -1193,6 +1193,269 @@ fn diagnoses_invalid_typescript_class_member_modifier_combinations() {
 }
 
 #[test]
+fn parses_abstract_classes_and_members_on_cold_tape_records() {
+    let source = [
+        "abstract class Plain {",
+        "  public abstract method(value: Input): Output;",
+        "  abstract readonly field: Input;",
+        "  abstract #privateMethod(): void;",
+        "}",
+        "export abstract class Derived<T> extends Base implements Contract<T> {",
+        "  abstract override inherited(): T;",
+        "  protected abstract property: T;",
+        "}",
+        "export default abstract class {}",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            language: Language::TypeScript,
+            semantic_errors: true,
+            source_kind: SourceKind::Module,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse abstract classes");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid abstract-class tape");
+
+    assert_eq!(NodeTag::TS_ABSTRACT_METHOD_DEFINITION.get(), 576);
+    assert_eq!(NodeTag::TS_ABSTRACT_PROPERTY_DEFINITION.get(), 577);
+    let abstract_class_flags: Vec<_> = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node {
+                tag: NodeTag::CLASS_DECLARATION | NodeTag::TS_GENERIC_CLASS_DECLARATION,
+                flags,
+                ..
+            } => (flags != 0).then_some(flags),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(abstract_class_flags, [1, 1, 1]);
+
+    let method_flags: Vec<_> = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node {
+                tag: NodeTag::TS_ABSTRACT_METHOD_DEFINITION,
+                flags,
+                fields,
+                ..
+            } => {
+                assert_eq!(fields.len(), 5);
+                Some(flags)
+            }
+            _ => None,
+        })
+        .collect();
+    let property_flags: Vec<_> = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node {
+                tag: NodeTag::TS_ABSTRACT_PROPERTY_DEFINITION,
+                flags,
+                fields,
+                ..
+            } => {
+                assert_eq!(fields.len(), 5);
+                Some(flags)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(method_flags, [1, 0, 8]);
+    assert_eq!(property_flags, [4, 2]);
+    assert!(
+        node_fields(&parsed, NodeTag::TS_ABSTRACT_METHOD_DEFINITION).all(|fields| {
+            matches!(
+                parsed.tape.value_at(fields[1]),
+                Ok(TapeValue::Node {
+                    tag: NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION,
+                    ..
+                })
+            )
+        })
+    );
+}
+
+#[test]
+fn parses_abstract_accessor_async_and_generator_signatures_without_swallowing_members() {
+    let source = [
+        "abstract class Signatures {",
+        "  abstract get value(): string;",
+        "  abstract set value(next: string);",
+        "  abstract async load(): Promise<string>;",
+        "  abstract *values(): IterableIterator<string>;",
+        "  after: string;",
+        "}",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            language: Language::TypeScript,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse abstract method signature forms");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid abstract method tape");
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_ABSTRACT_METHOD_DEFINITION).count(),
+        4
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION).count(),
+        4
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::PROPERTY_DEFINITION).count(),
+        1,
+        "the member after the signatures must remain a separate field"
+    );
+    assert!(
+        node_fields(&parsed, NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION)
+            .any(|fields| matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(true))))
+    );
+    assert!(
+        node_fields(&parsed, NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION)
+            .any(|fields| matches!(parsed.tape.value_at(fields[3]), Ok(TapeValue::Bool(true))))
+    );
+}
+
+#[test]
+fn keeps_abstract_contextual_at_class_and_member_boundaries() {
+    let source = [
+        "abstract",
+        "class Ordinary {}",
+        "abstract as Type;",
+        "abstract satisfies Type;",
+        "abstract in value;",
+        "abstract instanceof Constructor;",
+        "export default abstract;",
+        "class Names {",
+        "  abstract();",
+        "  abstract!: void;",
+        "  abstract",
+        "  method();",
+        "}",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            language: Language::TypeScript,
+            source_kind: SourceKind::Module,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse abstract ambiguities");
+    parsed.tape.validate().expect("valid ambiguity tape");
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_ABSTRACT_METHOD_DEFINITION).count()
+            + node_fields(&parsed, NodeTag::TS_ABSTRACT_PROPERTY_DEFINITION).count(),
+        0
+    );
+    assert!(
+        parsed
+            .tape
+            .validation()
+            .map(|record| record.expect("valid record").value)
+            .all(|value| !matches!(value, TapeValue::Node { flags: 1, tag, .. } if matches!(tag, NodeTag::CLASS_DECLARATION | NodeTag::TS_CLASS_DECLARATION | NodeTag::TS_GENERIC_CLASS_DECLARATION)))
+    );
+
+    let compatibility = parse(
+        "abstract class Compatible { abstract member(); }",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse compatibility abstract class");
+    assert!(
+        compatibility.diagnostics.is_empty(),
+        "{:#?}",
+        compatibility.diagnostics
+    );
+    assert_eq!(
+        node_fields(&compatibility, NodeTag::TS_ABSTRACT_METHOD_DEFINITION).count(),
+        1
+    );
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let javascript = parse(
+            "abstract class Gated { abstract member(); }",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover gated abstract class");
+        assert!(!javascript.diagnostics.is_empty(), "{language:?}");
+        assert_eq!(
+            node_fields(&javascript, NodeTag::TS_ABSTRACT_METHOD_DEFINITION).count()
+                + node_fields(&javascript, NodeTag::TS_ABSTRACT_PROPERTY_DEFINITION).count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn diagnoses_invalid_abstract_class_member_combinations() {
+    for source in [
+        "class C { abstract method(); }",
+        "abstract class C { abstract method() {} }",
+        "abstract class C { abstract property = 1; }",
+        "abstract class C { static abstract method(); }",
+        "abstract class C { abstract constructor(); }",
+        "abstract class C { override abstract method(); }",
+        "abstract class C { abstract abstract method(); }",
+        "abstract class C { abstract static {} }",
+        "abstract class C { abstract #field: number; }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("recover invalid abstract member");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid abstract recovery tape");
+    }
+
+    let private_method = parse(
+        "abstract class C { abstract #method(): void; }",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse private abstract method");
+    assert!(
+        private_method.diagnostics.is_empty(),
+        "{:#?}",
+        private_method.diagnostics
+    );
+}
+
+#[test]
 fn gates_bodyless_class_signatures_and_requires_explicit_semicolons() {
     for language in [
         Language::TypeScript,

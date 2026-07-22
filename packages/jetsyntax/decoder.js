@@ -192,6 +192,8 @@ for (
     [573, ["MethodDefinition", ["key", "value", "kind", "computed", "static"]]],
     [574, ["PropertyDefinition", ["key", "value", "computed", "static", "typeAnnotation"]]],
     [575, ["VariableDeclaration", ["declarations", "kind"]]],
+    [576, ["TSAbstractMethodDefinition", ["key", "value", "kind", "computed", "static"]]],
+    [577, ["TSAbstractPropertyDefinition", ["key", "value", "computed", "static", "typeAnnotation"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -830,6 +832,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
         return node;
       case 57:
       case 58:
+        if ((record & NODE_FLAGS_MASK) !== 0) decodeTypeScriptClassFlags(node, record, tag);
         node.id = fields[0];
         node.superClass = fields[1];
         node.body = fields[2];
@@ -839,7 +842,10 @@ function decodeTapeInternal(source, tape, options, trusted) {
         return node;
       case 60:
       case 573:
-        if (tag === 573) decodeTypeScriptClassMemberModifiers(node, record, tag);
+      case 576:
+        if (tag === 573 || tag === 576) {
+          decodeTypeScriptClassMemberModifiers(node, record, tag, tag === 576);
+        }
         node.key = fields[0];
         node.value = fields[1];
         node.kind = enumValue(METHOD_KINDS, fields[2], tag);
@@ -848,7 +854,10 @@ function decodeTapeInternal(source, tape, options, trusted) {
         return node;
       case 61:
       case 574:
-        if (tag === 574) decodeTypeScriptClassMemberModifiers(node, record, tag);
+      case 577:
+        if (tag === 574 || tag === 577) {
+          decodeTypeScriptClassMemberModifiers(node, record, tag, tag === 577);
+        }
         node.key = fields[0];
         node.value = fields[1];
         node.computed = boolean(fields[2], tag);
@@ -1043,6 +1052,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
         return node;
       case 567:
       case 568:
+        if ((record & NODE_FLAGS_MASK) !== 0) decodeTypeScriptClassFlags(node, record, tag);
         node.id = fields[0];
         node.superClass = fields[1];
         node.body = fields[2];
@@ -1050,6 +1060,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
         return node;
       case 569:
       case 570:
+        if ((record & NODE_FLAGS_MASK) !== 0) decodeTypeScriptClassFlags(node, record, tag);
         node.id = fields[0];
         node.superClass = fields[1];
         node.body = fields[2];
@@ -1314,9 +1325,17 @@ function decodeQuotedString(raw) {
   return value;
 }
 
-function decodeTypeScriptClassMemberModifiers(node, record, tag) {
+function decodeTypeScriptClassFlags(node, record, tag) {
   const flags = (record & NODE_FLAGS_MASK) >>> 16;
-  if (flags === 0 || (flags & ~0x0F) !== 0) {
+  if ((flags & ~0x01) !== 0 || (flags !== 0 && (tag === 58 || tag === 568 || tag === 570))) {
+    throw new Error(`invalid TypeScript class flags ${flags} for tag ${tag}`);
+  }
+  if ((flags & 0x01) !== 0) node.abstract = true;
+}
+
+function decodeTypeScriptClassMemberModifiers(node, record, tag, allowEmpty = false) {
+  const flags = (record & NODE_FLAGS_MASK) >>> 16;
+  if ((!allowEmpty && flags === 0) || (flags & ~0x0F) !== 0) {
     throw new Error(`invalid TypeScript class member modifier flags ${flags} for tag ${tag}`);
   }
   const accessibility = flags & 0x03;
