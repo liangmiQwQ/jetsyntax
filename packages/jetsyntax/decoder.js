@@ -204,6 +204,7 @@ for (
     [585, ["TaggedTemplateExpression", ["tag", "quasi", "typeArguments"]]],
     [586, ["TSInstantiationExpression", ["expression", "typeArguments"]]],
     [587, ["TSTypeQuery", ["exprName", "typeArguments"]]],
+    [588, ["TemplateElement", ["raw", "tail"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -812,9 +813,11 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.quasis = array(fields[0], tag);
         node.expressions = array(fields[1], tag);
         return node;
-      case 49: {
-        const raw = templateElementRaw(string(fields[0], tag));
-        node.value = { raw, cooked: decodeQuotedString(`\"${raw}\"`) };
+      case 49:
+      case 588: {
+        const tokenRaw = string(fields[0], tag);
+        const raw = templateElementRaw(tokenRaw).replace(/\r\n?/g, "\n");
+        node.value = { raw, cooked: tag === 588 ? null : decodeQuotedString(`\"${raw}\"`) };
         node.tail = boolean(fields[1], tag);
         return node;
       }
@@ -1373,7 +1376,12 @@ function decodeQuotedString(raw) {
       index += 4;
     } else if (escaped === "\r" && raw[index + 1] === "\n") {
       index++;
-    } else if (escaped !== "\n" && escaped !== "\r") {
+    } else if (
+      escaped !== "\n"
+      && escaped !== "\r"
+      && escaped !== "\u2028"
+      && escaped !== "\u2029"
+    ) {
       value += escaped;
     }
   }

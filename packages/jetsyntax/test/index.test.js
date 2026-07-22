@@ -374,6 +374,52 @@ describe("parse", () => {
     expect(method.value.body.body[0].argument.type).toBe("TemplateLiteral");
   });
 
+  it("materializes invalid template escapes by tagged context", () => {
+    const taggedSource =
+      "tag`\\01`; tag`\\xg`; tag`\\u0`; tag`\\u{}`; tag`\\u{110000}`; tag`\\xg${value}\\u0${other}\\u{g}`;";
+    const tagged = parse(taggedSource, { range: true });
+
+    expect(tagged.diagnostics).toEqual([]);
+    const quasis = tagged.program.body.flatMap(statement => statement.expression.quasi.quasis);
+    expect(quasis).toHaveLength(8);
+    expect(quasis.every(quasi => quasi.value.cooked === null)).toBe(true);
+    expect(quasis.map(quasi => quasi.value.raw)).toEqual([
+      "\\01",
+      "\\xg",
+      "\\u0",
+      "\\u{}",
+      "\\u{110000}",
+      "\\xg",
+      "\\u0",
+      "\\u{g}",
+    ]);
+    expect(quasis.map(quasi => quasi.tail)).toEqual([
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+    ]);
+    for (const quasi of quasis) {
+      expect(quasi.range).toEqual([quasi.start, quasi.end]);
+      expect(taggedSource.slice(quasi.start, quasi.end)).toBe(quasi.value.raw);
+    }
+
+    const untaggedSource = "`\\01`; `\\xg`; `\\u0`; `\\u{}`; `\\u{110000}`;";
+    const untagged = parse(untaggedSource, { range: true });
+    expect(untagged.diagnostics).toEqual(
+      Array(5).fill("invalid escape sequence in template literal"),
+    );
+    expect(
+      untagged.program.body.every(
+        statement => statement.expression.quasis[0].value.cooked === null,
+      ),
+    ).toBe(true);
+  });
+
   it("materializes zero-parameter arrow functions", () => {
     const source = [
       "const expression = () => 1;",

@@ -57,7 +57,7 @@ class HandcraftedTape {
     ]);
   }
 
-  finish(root, { referenceMarkers = false } = {}) {
+  finish(root, { referenceMarkers = false, sourceBytes = this.words[root + 3] } = {}) {
     const recordEnd = this.words.length;
     if (referenceMarkers) {
       for (const reference of this.references) this.words[reference] |= REFERENCE_MARKER;
@@ -78,7 +78,7 @@ class HandcraftedTape {
     this.words[5] = recordEnd;
     this.words[6] = this.pool.length;
     this.words[7] = root;
-    this.words[8] = this.words[root + 3];
+    this.words[8] = sourceBytes;
     this.words[9] = 0;
     this.words[10] = 1;
     return Uint32Array.from(this.words);
@@ -125,6 +125,64 @@ describe("decodeTape", () => {
         }],
       }],
     });
+  });
+
+  it("decodes invalid template elements with a null cooked value", () => {
+    const source = "`\\xg`";
+    const tape = new HandcraftedTape();
+    const encoded = tape.finish(
+      tape.node(588, 1, source.length - 1, [tape.string(source), tape.boolean(true)]),
+      { sourceBytes: source.length },
+    );
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(source, encoded, { range: true })).toEqual({
+        type: "TemplateElement",
+        start: 1,
+        end: source.length - 1,
+        range: [1, source.length - 1],
+        value: { raw: "\\xg", cooked: null },
+        tail: true,
+      });
+    }
+  });
+
+  it("normalizes template raw lines and all cooked line continuations", () => {
+    const source = "`raw\r\nline\rnext;a\\\nb\\\r\nc\\" + "\u2028" + "d\\" + "\u2029" + "e`";
+    const sourceBytes = new TextEncoder().encode(source).length;
+    const tape = new HandcraftedTape();
+    const encoded = tape.finish(
+      tape.node(49, 1, sourceBytes - 1, [tape.string(source), tape.boolean(true)]),
+      { sourceBytes },
+    );
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(source, encoded, { range: true })).toEqual({
+        type: "TemplateElement",
+        start: 1,
+        end: source.length - 1,
+        range: [1, source.length - 1],
+        value: {
+          raw: "raw\nline\nnext;a\\\nb\\\nc\\\u2028d\\\u2029e",
+          cooked: "raw\nline\nnext;abcde",
+        },
+        tail: true,
+      });
+    }
+  });
+
+  it("rejects malformed invalid-template-element field counts", () => {
+    for (const count of [1, 3]) {
+      const tape = new HandcraftedTape();
+      const fields = Array.from({ length: count }, () => tape.null());
+      const encoded = tape.finish(tape.node(588, 0, 0, fields));
+
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid TemplateElement field count ${count}; expected 2`,
+        );
+      }
+    }
   });
 
   it("decodes reference-marked records without exposing the marker as data", () => {

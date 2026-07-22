@@ -279,30 +279,15 @@ fn lexer_should_scan_template_segments_on_demand() {
     assert!(lexer.errors().is_empty(), "{:?}", lexer.errors());
 }
 
-/// Braced Unicode escapes in strings and templates require digits, a closing brace, and an
-/// in-range code point.
+/// Braced Unicode escapes in strings require digits, a closing brace, and an in-range code point.
 ///
 /// Reproduces: malformed braced escapes previously completed without a lexical diagnostic.
 #[test]
 fn lexer_should_reject_invalid_braced_unicode_literal_escapes() {
-    for source in [
-        r#""\u{}""#,
-        r#""\u{g}""#,
-        r#""\u{110000}""#,
-        r"`\u{}`",
-        r"`\u{g}`",
-        r"`\u{110000}`",
-        r"`\u{67`",
-    ] {
+    for source in [r#""\u{}""#, r#""\u{g}""#, r#""\u{110000}""#] {
         let mut lexer = Lexer::new(source);
         let token = lexer.next_token();
-        assert!(
-            matches!(
-                token.kind,
-                TokenKind::String | TokenKind::NoSubstitutionTemplate
-            ),
-            "{source:?}: {token:?}"
-        );
+        assert_eq!(token.kind, TokenKind::String, "{source:?}: {token:?}");
         assert!(!lexer.errors().is_empty(), "{source:?}");
         assert!(
             lexer
@@ -313,6 +298,78 @@ fn lexer_should_reject_invalid_braced_unicode_literal_escapes() {
             lexer.errors()
         );
     }
+}
+
+/// Template escape validity is carried on each raw segment because tagged templates accept
+/// malformed escapes and expose a null cooked value, while untagged templates reject them.
+#[test]
+fn lexer_should_classify_template_escape_sequences_without_losing_delimiters() {
+    for source in [
+        r"`\0`",
+        r"`\x61`",
+        r"`\u0061`",
+        r"`\u{000000000061}`",
+        r"`\u{D800}`",
+        "`\\\r\n`",
+        "`\\\u{2028}`",
+        "`\\\u{2029}`",
+        r"`\z`",
+    ] {
+        let mut lexer = Lexer::new(source);
+        let token = lexer.next_token();
+        assert_eq!(token.kind, TokenKind::NoSubstitutionTemplate, "{source:?}");
+        assert!(!token.flags.invalid_template_escape(), "{source:?}");
+        assert!(
+            lexer.errors().is_empty(),
+            "{source:?}: {:?}",
+            lexer.errors()
+        );
+    }
+
+    for source in [
+        r"`\01`",
+        r"`\1`",
+        r"`\8`",
+        r"`\9`",
+        r"`\xg`",
+        r"`\xA`",
+        r"`\u0`",
+        r"`\u00g`",
+        r"`\u{}`",
+        r"`\u{g}`",
+        r"`\u{110000}`",
+        r"`\u{1_0}`",
+        r"`\u{FFFFFFFFFFFFFFFF}`",
+        r"`\u{67`",
+    ] {
+        let mut lexer = Lexer::new(source);
+        let token = lexer.next_token();
+        assert_eq!(token.kind, TokenKind::NoSubstitutionTemplate, "{source:?}");
+        assert!(token.flags.invalid_template_escape(), "{source:?}");
+        assert!(
+            lexer.errors().is_empty(),
+            "{source:?}: {:?}",
+            lexer.errors()
+        );
+    }
+
+    let source = r"`\xg${value}\u{110000}${other}\u{\``";
+    let mut lexer = Lexer::new(source);
+    let head = lexer.next_token();
+    assert_eq!(head.kind, TokenKind::TemplateHead);
+    assert!(head.flags.invalid_template_escape());
+    assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+    let first_brace = lexer.next_token();
+    let middle = lexer.resume_template(first_brace);
+    assert_eq!(middle.kind, TokenKind::TemplateMiddle);
+    assert!(middle.flags.invalid_template_escape());
+    assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+    let second_brace = lexer.next_token();
+    let tail = lexer.resume_template(second_brace);
+    assert_eq!(tail.kind, TokenKind::TemplateTail);
+    assert!(tail.flags.invalid_template_escape());
+    assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+    assert!(lexer.errors().is_empty(), "{:?}", lexer.errors());
 }
 
 /// Unterminated braced escapes recover within the source and tokenization always reaches EOF.

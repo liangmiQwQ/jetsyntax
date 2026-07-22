@@ -34,6 +34,7 @@ impl TokenFlags {
     const ESCAPED: u8 = 1 << 1;
     const LEGACY_OCTAL: u8 = 1 << 2;
     const SEPARATOR: u8 = 1 << 3;
+    const INVALID_TEMPLATE_ESCAPE: u8 = 1 << 4;
 
     #[must_use]
     pub const fn line_break_before(self) -> bool {
@@ -53,6 +54,11 @@ impl TokenFlags {
     #[must_use]
     pub const fn contains_separator(self) -> bool {
         self.0 & Self::SEPARATOR != 0
+    }
+
+    #[must_use]
+    pub const fn invalid_template_escape(self) -> bool {
+        self.0 & Self::INVALID_TEMPLATE_ESCAPE != 0
     }
 
     const fn insert(&mut self, flag: u8) {
@@ -942,7 +948,7 @@ impl<'s> Lexer<'s> {
         self.scan_template(start, flags, true)
     }
 
-    fn scan_template(&mut self, start: usize, flags: TokenFlags, first: bool) -> Token {
+    fn scan_template(&mut self, start: usize, mut flags: TokenFlags, first: bool) -> Token {
         while let Some(&byte) = self.bytes.get(self.position) {
             if byte == b'`' {
                 self.position += 1;
@@ -969,15 +975,98 @@ impl<'s> Lexer<'s> {
                 );
             }
             self.position += 1;
-            if byte == b'\\' && self.bytes.get(self.position).is_some() {
-                let escape_start = self.position - 1;
-                if !self.scan_braced_unicode_escape(escape_start) {
-                    self.advance_char();
-                }
+            if byte == b'\\'
+                && self.bytes.get(self.position).is_some()
+                && self.scan_template_escape()
+            {
+                flags.insert(TokenFlags::INVALID_TEMPLATE_ESCAPE);
             }
         }
         self.error(start, self.position, "unterminated template literal");
         self.token(TokenKind::TemplateTail, start, flags)
+    }
+
+    /// Scan one template escape after its leading backslash.
+    ///
+    /// Invalid escapes are legal inside tagged templates, so the lexer records their presence on
+    /// the segment instead of reporting an unconditional lexical error. Malformed escapes stop
+    /// before a template delimiter so `${` and the closing backtick retain their grammar meaning.
+    fn scan_template_escape(&mut self) -> bool {
+        let Some(&byte) = self.bytes.get(self.position) else {
+            return true;
+        };
+        match byte {
+            b'\r' => {
+                self.position += 1;
+                if self.bytes.get(self.position) == Some(&b'\n') {
+                    self.position += 1;
+                }
+                false
+            }
+            b'\n' => {
+                self.position += 1;
+                false
+            }
+            b'x' => {
+                self.position += 1;
+                let digits_start = self.position;
+                while self.position - digits_start < 2
+                    && self
+                        .bytes
+                        .get(self.position)
+                        .is_some_and(u8::is_ascii_hexdigit)
+                {
+                    self.position += 1;
+                }
+                self.position - digits_start != 2
+            }
+            b'u' => {
+                self.position += 1;
+                if self.bytes.get(self.position) == Some(&b'{') {
+                    self.position += 1;
+                    let digits_start = self.position;
+                    while self
+                        .bytes
+                        .get(self.position)
+                        .is_some_and(u8::is_ascii_hexdigit)
+                    {
+                        self.position += 1;
+                    }
+                    let digits_end = self.position;
+                    let value = parse_hex(&self.bytes[digits_start..digits_end]);
+                    if self.bytes.get(self.position) != Some(&b'}') {
+                        return true;
+                    }
+                    self.position += 1;
+                    digits_start == digits_end || value.is_none_or(|value| value > 0x10_FFFF)
+                } else {
+                    let digits_start = self.position;
+                    while self.position - digits_start < 4
+                        && self
+                            .bytes
+                            .get(self.position)
+                            .is_some_and(u8::is_ascii_hexdigit)
+                    {
+                        self.position += 1;
+                    }
+                    self.position - digits_start != 4
+                }
+            }
+            b'0' => {
+                self.position += 1;
+                self.bytes
+                    .get(self.position)
+                    .is_some_and(u8::is_ascii_digit)
+            }
+            b'1'..=b'9' => {
+                self.position += 1;
+                true
+            }
+            _ => {
+                self.advance_char();
+                false
+            }
+        }
     }
 
     fn scan_braced_unicode_escape(&mut self, escape_start: usize) -> bool {

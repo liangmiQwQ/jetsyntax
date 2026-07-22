@@ -1139,6 +1139,151 @@ fn parser_should_accept_regular_expressions_and_templates() {
     assert_clean_cases(&cases);
 }
 
+/// Invalid template escapes are syntax errors only for untagged literals. Tagged templates keep
+/// parsing and mark each affected quasi so bindings can materialize a null cooked value.
+#[test]
+fn parser_should_distinguish_tagged_template_invalid_escapes() {
+    assert_eq!(NodeTag::INVALID_TEMPLATE_ELEMENT.get(), 588);
+    let source = r"tag`\01`; tag`\xg`; tag`\u0`; tag`\u{}`; tag`\u{110000}`; tag`\xg${value}\u0${other}\u{g}`;";
+    let expected_quasis = [
+        r"\01",
+        r"\xg",
+        r"\u0",
+        r"\u{}",
+        r"\u{110000}",
+        r"\xg",
+        r"\u0",
+        r"\u{g}",
+    ];
+
+    for language in [
+        Language::JavaScript,
+        Language::JavaScriptJsx,
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+    ] {
+        let options = ParseOptions {
+            language,
+            ..ParseOptions::default()
+        };
+        let parsed = parse(source, options).expect("parse tagged invalid escapes");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:?}",
+            parsed.diagnostics
+        );
+        let tags = inspect_tape("tagged invalid escapes", &parsed).expect("valid tagged tape");
+        assert_eq!(
+            tags.iter()
+                .filter(|&&tag| tag == NodeTag::INVALID_TEMPLATE_ELEMENT)
+                .count(),
+            8,
+            "{language:?}"
+        );
+        let quasis = parsed
+            .tape
+            .validation()
+            .filter_map(
+                |record| match record.expect("valid template record").value {
+                    TapeValue::Node {
+                        tag: NodeTag::INVALID_TEMPLATE_ELEMENT,
+                        span,
+                        ..
+                    } => Some(&source[span.start as usize..span.end as usize]),
+                    _ => None,
+                },
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(quasis, expected_quasis, "{language:?}");
+    }
+}
+
+/// Untagged invalid escapes diagnose in syntax-only and semantic modes while preserving all
+/// quasis and following statements on the recovered tape.
+#[test]
+fn parser_should_recover_untagged_template_invalid_escapes_in_all_modes() {
+    let source = r"`\01`; `\xg`; `\u0`; `\u{}`; `\u{110000}`; `\xg${value}\u0${other}\u{g}`;";
+    let expected_quasis = [
+        r"\01",
+        r"\xg",
+        r"\u0",
+        r"\u{}",
+        r"\u{110000}",
+        r"\xg",
+        r"\u0",
+        r"\u{g}",
+    ];
+
+    for language in [
+        Language::JavaScript,
+        Language::JavaScriptJsx,
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+    ] {
+        for semantic_errors in [false, true] {
+            let recovered = parse(
+                source,
+                ParseOptions {
+                    language,
+                    semantic_errors,
+                    ..ParseOptions::default()
+                },
+            )
+            .expect("recover untagged invalid escapes");
+            assert_eq!(recovered.diagnostics.len(), 8, "{language:?}");
+            assert!(recovered.diagnostics.iter().all(|diagnostic| {
+                let Some(span_text) =
+                    source.get(diagnostic.span.start as usize..diagnostic.span.end as usize)
+                else {
+                    return false;
+                };
+                diagnostic.message == "invalid escape sequence in template literal"
+                    && diagnostic.span.start <= diagnostic.span.end
+                    && diagnostic.span.end as usize <= source.len()
+                    && expected_quasis.contains(&span_text)
+            }));
+            let tags = inspect_tape("untagged invalid escapes", &recovered)
+                .expect("valid recovered untagged tape");
+            assert_eq!(
+                tags.iter()
+                    .filter(|&&tag| tag == NodeTag::INVALID_TEMPLATE_ELEMENT)
+                    .count(),
+                8,
+                "{language:?}"
+            );
+        }
+    }
+}
+
+/// Generic TypeScript tags share tagged semantics, while every valid escape keeps the legacy
+/// `TemplateElement` wire tag.
+#[test]
+fn parser_should_preserve_generic_tags_and_valid_template_escapes() {
+    for language in [Language::TypeScript, Language::TypeScriptJsx] {
+        let parsed = parse(
+            r"tag<Result>`\xg`;",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse a generic tagged template with an invalid escape");
+        assert!(parsed.diagnostics.is_empty(), "{language:?}");
+        let tags = inspect_tape("generic tagged invalid escape", &parsed).expect("valid tape");
+        assert!(tags.contains(&NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION));
+        assert!(tags.contains(&NodeTag::INVALID_TEMPLATE_ELEMENT));
+    }
+
+    let valid = parse(
+        r"tag`\0\x61\u0061\u{000000000061}\z`; `\0\x61\u0061\u{61}\z`;",
+        ParseOptions::default(),
+    )
+    .expect("parse valid template escapes");
+    assert!(valid.diagnostics.is_empty(), "{:?}", valid.diagnostics);
+    let tags = inspect_tape("valid escapes", &valid).expect("valid template tape");
+    assert!(!tags.contains(&NodeTag::INVALID_TEMPLATE_ELEMENT));
+}
+
 /// Invalid literal flags are diagnosed while runtime `RegExp` arguments remain ordinary strings.
 ///
 /// Spec: regular-expression literal flag validation is a parse-time check, unlike construction.

@@ -4075,7 +4075,7 @@ impl<'s> Parser<'s> {
                     }
                 }
                 TokenKind::NoSubstitutionTemplate | TokenKind::TemplateHead => {
-                    let quasi = self.parse_template_literal()?;
+                    let quasi = self.parse_template_literal(true)?;
                     expression = self.node(
                         NodeTag::TAGGED_TEMPLATE_EXPRESSION,
                         Span::new(expression.span.start, quasi.span.end),
@@ -4202,7 +4202,7 @@ impl<'s> Parser<'s> {
                 self.current.kind,
                 TokenKind::NoSubstitutionTemplate | TokenKind::TemplateHead
             ) {
-                let quasi = self.parse_template_literal()?;
+                let quasi = self.parse_template_literal(true)?;
                 Some((
                     self.node(
                         NodeTag::TS_TAGGED_TEMPLATE_EXPRESSION,
@@ -4275,7 +4275,7 @@ impl<'s> Parser<'s> {
             | TokenKind::False
             | TokenKind::Null => self.parse_literal(),
             TokenKind::NoSubstitutionTemplate | TokenKind::TemplateHead => {
-                self.parse_template_literal()
+                self.parse_template_literal(false)
             }
             TokenKind::Slash | TokenKind::SlashEq => self.parse_regexp_literal(),
             TokenKind::This => {
@@ -5085,22 +5085,13 @@ impl<'s> Parser<'s> {
         Ok(self.tape.push_list(&arguments)?)
     }
 
-    fn parse_template_literal(&mut self) -> Result<ParsedNode, ParseError> {
+    fn parse_template_literal(&mut self, tagged: bool) -> Result<ParsedNode, ParseError> {
         let first = self.current;
         let mut quasis = Vec::new();
         let mut expressions = Vec::new();
         if first.kind == TokenKind::NoSubstitutionTemplate {
             self.bump();
-            let raw = self.tape.push_source_slice(Self::token_span(first))?;
-            let tail = self.tape.push_bool(true)?;
-            quasis.push(
-                self.node(
-                    NodeTag::TEMPLATE_ELEMENT,
-                    Self::token_span(first),
-                    &[raw, tail],
-                )?
-                .value(),
-            );
+            quasis.push(self.parse_template_element(first, true, tagged)?.value());
             let quasis = self.tape.push_list(&quasis)?;
             let expressions = self.tape.push_list(&expressions)?;
             return self.node(
@@ -5111,16 +5102,7 @@ impl<'s> Parser<'s> {
         }
 
         self.bump();
-        let raw = self.tape.push_source_slice(Self::token_span(first))?;
-        let tail = self.tape.push_bool(false)?;
-        quasis.push(
-            self.node(
-                NodeTag::TEMPLATE_ELEMENT,
-                Self::token_span(first),
-                &[raw, tail],
-            )?
-            .value(),
-        );
+        quasis.push(self.parse_template_element(first, false, tagged)?.value());
         let mut end = first.end;
         loop {
             let expression = self.parse_expression(true)?;
@@ -5133,15 +5115,9 @@ impl<'s> Parser<'s> {
             let segment = self.lexer.resume_template(right_brace);
             end = segment.end;
             let is_tail = segment.kind == TokenKind::TemplateTail;
-            let raw = self.tape.push_source_slice(Self::token_span(segment))?;
-            let tail = self.tape.push_bool(is_tail)?;
             quasis.push(
-                self.node(
-                    NodeTag::TEMPLATE_ELEMENT,
-                    Self::token_span(segment),
-                    &[raw, tail],
-                )?
-                .value(),
+                self.parse_template_element(segment, is_tail, tagged)?
+                    .value(),
             );
             if is_tail {
                 self.current = self.lexer.next_token();
@@ -5156,6 +5132,47 @@ impl<'s> Parser<'s> {
             Span::new(first.start, end),
             &[quasis, expressions],
         )
+    }
+
+    fn parse_template_element(
+        &mut self,
+        token: Token,
+        tail: bool,
+        tagged: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let invalid_escape = token.flags.invalid_template_escape();
+        let span = self.template_element_span(token);
+        if invalid_escape && !tagged {
+            self.error(span, "invalid escape sequence in template literal");
+        }
+        let raw = self.tape.push_source_slice(Self::token_span(token))?;
+        let tail = self.tape.push_bool(tail)?;
+        self.node(
+            if invalid_escape {
+                NodeTag::INVALID_TEMPLATE_ELEMENT
+            } else {
+                NodeTag::TEMPLATE_ELEMENT
+            },
+            span,
+            &[raw, tail],
+        )
+    }
+
+    fn template_element_span(&self, token: Token) -> Span {
+        let start = token.start.saturating_add(1).min(token.end);
+        let end = if matches!(
+            token.kind,
+            TokenKind::TemplateHead | TokenKind::TemplateMiddle
+        ) {
+            token.end.saturating_sub(2)
+        } else if token.end > token.start
+            && self.source.as_bytes().get(token.end as usize - 1) == Some(&b'`')
+        {
+            token.end - 1
+        } else {
+            token.end
+        };
+        Span::new(start, end.max(start))
     }
 
     fn parse_literal(&mut self) -> Result<ParsedNode, ParseError> {
