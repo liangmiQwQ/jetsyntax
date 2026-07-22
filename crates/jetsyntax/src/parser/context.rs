@@ -557,6 +557,12 @@ impl<'s> ParserContext<'s> {
             .any(|scope| scope.kind == ScopeKind::Type)
     }
 
+    pub(crate) fn allows_ambient_declaration(&self) -> bool {
+        self.scopes
+            .last()
+            .is_some_and(|scope| matches!(scope.kind, ScopeKind::Program | ScopeKind::Type))
+    }
+
     pub(crate) fn function_declaration_binding_kind(&self) -> BindingKind {
         let mut scopes = self.scopes.iter().rev();
         let current = scopes.next().map(|scope| scope.kind);

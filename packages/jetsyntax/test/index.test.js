@@ -1624,6 +1624,173 @@ describe("parse", () => {
     }
   });
 
+  it("materializes explicit TypeScript declared namespaces", () => {
+    const source = [
+      "declare namespace N\\u0061me.default { namespace Inner { const value: number; } declare namespace Explicit {} }",
+      "export\ndeclare namespace Public {}",
+      "namespace Ordinary {}",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", sourceType: "module", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      {
+        type: "TSModuleDeclaration",
+        declare: true,
+        kind: "namespace",
+        id: {
+          type: "TSQualifiedName",
+          left: { type: "Identifier", name: "Name" },
+          right: { type: "Identifier", name: "default" },
+        },
+        body: {
+          body: [
+            { type: "TSModuleDeclaration", declare: false, id: { name: "Inner" } },
+            { type: "TSModuleDeclaration", declare: true, id: { name: "Explicit" } },
+          ],
+        },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        declaration: {
+          type: "TSModuleDeclaration",
+          declare: true,
+          id: { name: "Public" },
+        },
+      },
+      {
+        type: "TSModuleDeclaration",
+        declare: false,
+        id: { name: "Ordinary" },
+      },
+    ]);
+    const declared = [result.program.body[0], result.program.body[1].declaration];
+    for (const declaration of declared) {
+      expect(source.slice(declaration.start, declaration.start + 7)).toBe("declare");
+      expect(declaration.range).toEqual([declaration.start, declaration.end]);
+    }
+    expect(source.slice(result.program.body[1].start, result.program.body[1].start + 6)).toBe("export");
+  });
+
+  it("keeps explicit declared namespaces contextual and TypeScript-only", () => {
+    for (const lang of ["ts", "tsx", "dts"]) {
+      const result = parse("declare namespace Included {}", { lang });
+      expect(result.diagnostics, lang).toEqual([]);
+      expect(result.program.body[0]).toMatchObject({
+        type: "TSModuleDeclaration",
+        declare: true,
+      });
+    }
+
+    for (
+      const source of [
+        "declare namespace\nSeparated {}",
+        "declar\\u0065 namespace Escaped {}",
+        "declare namesp\\u0061ce Escaped {}",
+        "declare namespace default.Name {}",
+        "declare namespace enum.Name {}",
+        "declare namespace {}",
+        "declare.namespace;",
+        "declare: namespace;",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts" });
+      expect(JSON.stringify(result.program), source).not.toContain("\"declare\":true");
+    }
+
+    const separated = parse("declare\nnamespace Ordinary {}", { lang: "ts" });
+    expect(separated.program.body.at(-1)).toMatchObject({
+      type: "TSModuleDeclaration",
+      declare: false,
+    });
+    for (const source of ["namespace\nName {}", "module\nName {}"]) {
+      const result = parse(source, { lang: "ts" });
+      expect(JSON.stringify(result.program), source).not.toContain("TSModuleDeclaration");
+    }
+
+    const semanticFree = parse("\"use strict\"; namespace public {}", {
+      lang: "ts",
+      semanticErrors: false,
+    });
+    expect(semanticFree.diagnostics).toEqual([]);
+    expect(semanticFree.program.body.at(-1)).toMatchObject({
+      type: "TSModuleDeclaration",
+      id: { name: "public" },
+    });
+
+    const ambientSloppy = parse(
+      "declare namespace N { function eval(): void; function arguments(): void; class C { method(eval: unknown): void; method2(arguments: unknown): void; } }",
+      { lang: "ts", semanticErrors: true, sourceType: "module" },
+    );
+    expect(ambientSloppy.diagnostics).toEqual([]);
+    const restored = parse("declare namespace N {} function eval() {}", {
+      lang: "ts",
+      semanticErrors: true,
+      sourceType: "module",
+    });
+    expect(restored.diagnostics).not.toEqual([]);
+
+    for (
+      const source of [
+        "function f() { declare namespace N {} }",
+        "if (condition) { declare namespace N {} }",
+      ]
+    ) {
+      const misplaced = parse(source, { lang: "ts", semanticErrors: true });
+      expect(misplaced.diagnostics, source).not.toEqual([]);
+    }
+
+    for (
+      const options of [
+        { lang: "js" },
+        { lang: "jsx" },
+        { typescriptJsCompatibility: true },
+      ]
+    ) {
+      const result = parse("declare namespace Excluded {}", options);
+      expect(result.diagnostics).not.toEqual([]);
+      expect(JSON.stringify(result.program)).not.toContain("TSModuleDeclaration");
+    }
+  });
+
+  it("enforces ambient namespace declarations and internal exports", () => {
+    const valid = parse(
+      "declare namespace Valid { function signature(): void; class C { method(): void; rest(...items: any[],): void; get value(): string; field: string; readonly inferred = Symbol(); } var value: number; let later: string; const text = 'value'; const truth = true; const count = -1; const large = -1n; const template = `value`; const member = Enum.Member; const keyword = Enum.default; const indexed = Enum['Member']; const templated = Namespace.Enum[`Member`]; namespace Nested { const value: number; } export interface Item {} export { value }; } function outside() {} class Outside { field = 1; method() {} } const runtime = 1 + 2; export default runtime;",
+      { lang: "ts", semanticErrors: true },
+    );
+    expect(valid.diagnostics).toEqual([]);
+
+    for (
+      const source of [
+        "declare namespace N { function implemented() {} }",
+        "declare namespace N { class C { method() {} } }",
+        "declare namespace N { class C { get value() { return 1; } } }",
+        "declare namespace N { class C { constructor() {} } }",
+        "declare namespace N { class C { static {} } }",
+        "declare namespace N { class C { field = 1; } }",
+        "declare namespace N { class C { readonly typed: number = 1; } }",
+        "declare namespace N { var value = 1; }",
+        "declare namespace N { let value: number = 1; }",
+        "declare namespace N { const value: number = 1; }",
+        "declare namespace N { const value = (1); }",
+        "declare namespace N { const value = null; }",
+        "declare namespace N { const value = 1 + 2; }",
+        "declare namespace N { const value = Namespace[member]; }",
+        "declare namespace N { export = N; }",
+        "declare namespace N { export as namespace N; }",
+        "declare namespace N { export default value; }",
+        "declare namespace N { export { value } from 'module'; }",
+        "declare namespace N { export * from 'module'; }",
+        "declare namespace N { export * as values from 'module'; }",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts", semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
   it("materializes top-level TypeScript overload signatures", () => {
     const source = [
       "export function overloaded<T>(value: T): T;",
@@ -1846,9 +2013,20 @@ describe("parse", () => {
       const [source, options] of [
         ["function runtime(...values: unknown[], ) {}", { lang: "ts", semanticErrors: true }],
         ["function javascript(...values, ) {}", { semanticErrors: true }],
+        ["class C { method(...values: unknown[], ): void; }", { lang: "ts", semanticErrors: true }],
       ]
     ) {
       expect(parse(source, options).diagnostics, source).not.toEqual([]);
+    }
+    for (
+      const source of [
+        "declare function explicit(...values: unknown[], ) {}",
+        "declare namespace N { class C { method(...values: unknown[], ) {} } }",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts", semanticErrors: true });
+      expect(result.diagnostics, source).toHaveLength(1);
+      expect(result.diagnostics[0]).toContain("implementation");
     }
   });
 

@@ -623,9 +623,37 @@ fn permits_rest_trailing_commas_only_in_typescript_signatures() {
                 ..ParseOptions::default()
             },
         ),
+        (
+            "class C { method(...values: unknown[], ): void; }",
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        ),
     ] {
         let parsed = parse(source, options).expect("recover runtime rest trailing comma");
         assert!(!parsed.diagnostics.is_empty(), "{source}");
+    }
+
+    for source in [
+        "declare function explicit(...values: unknown[], ) {}",
+        "declare namespace N { class C { method(...values: unknown[], ) {} } }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("recover an ambient implementation with a rest trailing comma");
+        assert_eq!(
+            parsed.diagnostics.len(),
+            1,
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+        assert!(parsed.diagnostics[0].message.contains("implementation"));
     }
 }
 
@@ -784,6 +812,317 @@ fn keeps_explicit_declared_enums_contextual_and_typescript_only() {
                 matches!(parsed.tape.value_at(fields[3]), Ok(TapeValue::Bool(false)))
             })
         );
+    }
+}
+
+#[test]
+fn parses_explicit_declared_namespaces_with_nested_and_qualified_names() {
+    let source = [
+        r"declare namespace N\u0061me.default { namespace Inner { const value: number; } declare namespace Explicit {} }",
+        "export\ndeclare namespace Public {}",
+        "namespace Ordinary {}",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            ..typescript_options()
+        },
+    )
+    .expect("parse explicit declared namespaces");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid explicit namespace tape");
+    let modules = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_MODULE_DECLARATION,
+                span,
+                fields,
+                ..
+            } => Some((span, fields.to_vec())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(modules.len(), 5);
+    for (span, fields) in &modules {
+        assert_eq!(fields.len(), 4);
+        assert!(matches!(
+            parsed.tape.value_at(fields[3]),
+            Ok(TapeValue::U32(0))
+        ));
+        let text = &source[span.start as usize..span.end as usize];
+        let expected_declare = text.starts_with("declare");
+        assert!(matches!(
+            parsed.tape.value_at(fields[2]),
+            Ok(TapeValue::Bool(declare)) if declare == expected_declare
+        ));
+    }
+    assert!(modules.iter().any(|(span, fields)| {
+        source[span.start as usize..span.end as usize].starts_with("namespace Inner")
+            && matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(false)))
+    }));
+    assert!(modules.iter().any(|(span, fields)| {
+        source[span.start as usize..span.end as usize].starts_with("declare namespace Explicit")
+            && matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(true)))
+    }));
+
+    let escaped_identifier = parsed.tape.validation().find_map(|record| {
+        let TapeValue::Node {
+            tag: NodeTag::IDENTIFIER,
+            span,
+            fields,
+            ..
+        } = record.expect("valid record").value
+        else {
+            return None;
+        };
+        (&source[span.start as usize..span.end as usize] == r"N\u0061me").then_some(fields[0])
+    });
+    let TapeValue::PoolString { start, len } = parsed
+        .tape
+        .value_at(escaped_identifier.expect("escaped namespace identifier"))
+        .expect("escaped identifier name")
+    else {
+        panic!("escaped namespace name is not decoded into the tape pool");
+    };
+    assert_eq!(
+        parsed
+            .tape
+            .string_view(start, len)
+            .expect("decoded namespace name"),
+        "Name"
+    );
+
+    let export = first_node_fields(&parsed, NodeTag::EXPORT_NAMED_DECLARATION);
+    assert!(matches!(
+        parsed.tape.value_at(export[4]),
+        Ok(TapeValue::U32(1))
+    ));
+}
+
+#[test]
+fn keeps_declared_namespaces_contextual_and_typescript_only() {
+    for language in [
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+        Language::TypeScriptDefinition,
+    ] {
+        let parsed = parse(
+            "declare namespace Included {}",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse TypeScript declared namespace");
+        let fields = first_node_fields(&parsed, NodeTag::TS_MODULE_DECLARATION);
+        assert!(matches!(
+            parsed.tape.value_at(fields[2]),
+            Ok(TapeValue::Bool(true))
+        ));
+    }
+
+    for source in [
+        "declare namespace\nSeparated {}",
+        "declar\\u0065 namespace Escaped {}",
+        "declare namesp\\u0061ce Escaped {}",
+        "declare namespace default.Name {}",
+        "declare namespace enum.Name {}",
+        "declare namespace {}",
+        "declare.namespace;",
+        "declare: namespace;",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover contextual namespace");
+        parsed.tape.validate().expect("valid contextual tape");
+        assert!(
+            node_fields(&parsed, NodeTag::TS_MODULE_DECLARATION).all(|fields| {
+                matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(false)))
+            }),
+            "{source}"
+        );
+    }
+
+    let separated = parse("declare\nnamespace Ordinary {}", typescript_options())
+        .expect("parse expression followed by ordinary namespace");
+    let fields = first_node_fields(&separated, NodeTag::TS_MODULE_DECLARATION);
+    assert!(matches!(
+        separated.tape.value_at(fields[2]),
+        Ok(TapeValue::Bool(false))
+    ));
+    for source in ["namespace\nName {}", "module\nName {}"] {
+        let parsed = parse(source, typescript_options()).expect("recover newline module keyword");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_MODULE_DECLARATION).count(),
+            0,
+            "{source}"
+        );
+    }
+
+    for options in [
+        ParseOptions::default(),
+        ParseOptions {
+            language: Language::JavaScriptJsx,
+            ..ParseOptions::default()
+        },
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    ] {
+        let parsed =
+            parse("declare namespace Excluded {}", options).expect("recover excluded namespace");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_MODULE_DECLARATION).count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn scopes_declared_namespace_semantics_and_strictness() {
+    let semantic_free = parse(
+        "\"use strict\"; namespace public {}",
+        ParseOptions {
+            semantic_errors: false,
+            ..typescript_options()
+        },
+    )
+    .expect("parse a strict-reserved namespace name without semantic diagnostics");
+    assert!(
+        semantic_free.diagnostics.is_empty(),
+        "{:#?}",
+        semantic_free.diagnostics
+    );
+    assert_eq!(
+        node_fields(&semantic_free, NodeTag::TS_MODULE_DECLARATION).count(),
+        1
+    );
+
+    let ambient_sloppy = parse(
+        "declare namespace N { function eval(): void; function arguments(): void; class C { method(eval: unknown): void; method2(arguments: unknown): void; } }",
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse ambient namespace bindings with strict grammar suspended");
+    assert!(
+        ambient_sloppy.diagnostics.is_empty(),
+        "{:#?}",
+        ambient_sloppy.diagnostics
+    );
+    let restored = parse(
+        "declare namespace N {} function eval() {}",
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("restore strict grammar after an ambient namespace");
+    assert!(!restored.diagnostics.is_empty());
+
+    for source in [
+        "function f() { declare namespace N {} }",
+        "if (condition) { declare namespace N {} }",
+    ] {
+        let misplaced = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("recover a misplaced ambient namespace");
+        assert!(!misplaced.diagnostics.is_empty(), "{source}");
+    }
+}
+
+#[test]
+fn enforces_ambient_namespace_class_and_variable_rules() {
+    let valid = parse(
+        "declare namespace Valid { function signature(): void; class C { method(): void; rest(...items: any[],): void; get value(): string; field: string; readonly inferred = Symbol(); } var value: number; let later: string; const text = 'value'; const truth = true; const count = -1; const large = -1n; const template = `value`; const member = Enum.Member; const keyword = Enum.default; const indexed = Enum['Member']; const templated = Namespace.Enum[`Member`]; namespace Nested { const value: number; } } function outside() {} class Outside { field = 1; method() {} } const runtime = 1 + 2;",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse valid ambient namespace declarations");
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+
+    for source in [
+        "declare namespace N { function implemented() {} }",
+        "declare namespace N { class C { method() {} } }",
+        "declare namespace N { class C { get value() { return 1; } } }",
+        "declare namespace N { class C { constructor() {} } }",
+        "declare namespace N { class C { static {} } }",
+        "declare namespace N { class C { field = 1; } }",
+        "declare namespace N { class C { readonly typed: number = 1; } }",
+        "declare namespace N { var value = 1; }",
+        "declare namespace N { let value: number = 1; }",
+        "declare namespace N { const value: number = 1; }",
+        "declare namespace N { const value = (1); }",
+        "declare namespace N { const value = null; }",
+        "declare namespace N { const value = 1 + 2; }",
+        "declare namespace N { const value = Namespace[member]; }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("recover invalid ambient namespace declaration");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid recovered ambient tape");
+    }
+}
+
+#[test]
+fn restricts_only_external_export_forms_in_ambient_namespaces() {
+    let valid = parse(
+        "declare namespace N { export interface Item {} export const value: number; export { value }; } export default runtime;",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse valid internal namespace exports");
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+
+    for source in [
+        "declare namespace N { export = N; }",
+        "declare namespace N { export as namespace N; }",
+        "declare namespace N { export default value; }",
+        "declare namespace N { export { value } from 'module'; }",
+        "declare namespace N { export * from 'module'; }",
+        "declare namespace N { export * as values from 'module'; }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("recover invalid internal namespace export");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid recovered export tape");
     }
 }
 

@@ -1245,6 +1245,31 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes the existing namespace declare field", () => {
+    const source = "declare namespace Library {}";
+    const tape = new HandcraftedTape();
+    const id = tape.node(2, 18, 25, [tape.string("Library")]);
+    const body = tape.node(540, 26, source.length, [tape.list([])]);
+    const declaration = tape.node(527, 0, source.length, [
+      id,
+      body,
+      tape.boolean(true),
+      tape.integer(0),
+    ]);
+    const encoded = tape.finish(declaration);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(source, encoded, { range: true })).toMatchObject({
+        type: "TSModuleDeclaration",
+        id: { name: "Library" },
+        declare: true,
+        kind: "namespace",
+        body: { type: "TSModuleBlock", body: [] },
+        range: [0, source.length],
+      });
+    }
+  });
+
   it("omits an absent mapped type readonly modifier", () => {
     const tape = new HandcraftedTape();
     const aliasId = tape.node(2, 0, 0, [tape.string("Mapped")]);
