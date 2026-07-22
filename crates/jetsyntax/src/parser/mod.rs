@@ -150,6 +150,12 @@ impl AccessorKind {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MethodBodyPolicy {
+    Block,
+    TypeScriptSignature,
+}
+
 #[derive(Clone, Copy)]
 enum ImportPhase {
     Source,
@@ -707,7 +713,9 @@ impl<'s> Parser<'s> {
         generator: bool,
         asynchronous: bool,
         accessor: Option<AccessorKind>,
+        body_policy: MethodBodyPolicy,
     ) -> Result<ParsedNode, ParseError> {
+        let signature_start = self.current.start;
         self.expect(TokenKind::LeftParen);
         let previous_grammar = self.enter_function_context(generator, asynchronous);
         self.context.set_grammar(
@@ -765,6 +773,19 @@ impl<'s> Parser<'s> {
             self.context
                 .set_grammar(self.context.grammar().with_strict(true));
         }
+        if body_policy == MethodBodyPolicy::TypeScriptSignature
+            && accessor.is_none()
+            && !generator
+            && !asynchronous
+            && let Some(semicolon) = self.eat(TokenKind::Semicolon)
+        {
+            self.leave_function_context(previous_grammar);
+            return self.node_typescript_empty_body_function(
+                Span::new(signature_start, semicolon.end),
+                params.value,
+                return_type,
+            );
+        }
         let body = self.parse_block_statement()?;
         self.leave_function_context(previous_grammar);
         let id = self.tape.push_null()?;
@@ -794,6 +815,29 @@ impl<'s> Parser<'s> {
         }
     }
 
+    #[cold]
+    #[inline(never)]
+    fn node_typescript_empty_body_function(
+        &mut self,
+        span: Span,
+        params: ValueRef,
+        return_type: Option<ValueRef>,
+    ) -> Result<ParsedNode, ParseError> {
+        let id = self.tape.push_null()?;
+        let generator = self.tape.push_bool(false)?;
+        let asynchronous = self.tape.push_bool(false)?;
+        let return_type = if let Some(return_type) = return_type {
+            return_type
+        } else {
+            self.tape.push_null()?
+        };
+        self.node(
+            NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION,
+            span,
+            &[id, params, generator, asynchronous, return_type],
+        )
+    }
+
     fn parse_method_function_with_super_call(
         &mut self,
         start: u32,
@@ -801,6 +845,7 @@ impl<'s> Parser<'s> {
         asynchronous: bool,
         accessor: Option<AccessorKind>,
         allow_super_call: bool,
+        body_policy: MethodBodyPolicy,
     ) -> Result<ParsedNode, ParseError> {
         let previous = self.context.grammar().allow_super_call();
         self.context.set_grammar(
@@ -808,7 +853,8 @@ impl<'s> Parser<'s> {
                 .grammar()
                 .with_allow_super_call(allow_super_call),
         );
-        let function = self.parse_method_function(start, generator, asynchronous, accessor);
+        let function =
+            self.parse_method_function(start, generator, asynchronous, accessor, body_policy);
         self.context
             .set_grammar(self.context.grammar().with_allow_super_call(previous));
         function
@@ -1217,8 +1263,15 @@ impl<'s> Parser<'s> {
             asynchronous,
             None,
             allow_super_call,
+            if self.options.language.is_typescript()
+                || self.options.syntax_extensions.typescript_js_compatibility
+            {
+                MethodBodyPolicy::TypeScriptSignature
+            } else {
+                MethodBodyPolicy::Block
+            },
         )?;
-        let kind = self.tape.push_u32(0)?;
+        let kind = self.tape.push_u32(if allow_super_call { 3 } else { 0 })?;
         let computed = self.tape.push_bool(computed)?;
         let is_static = self.tape.push_bool(is_static)?;
         self.node(
@@ -1283,6 +1336,7 @@ impl<'s> Parser<'s> {
             false,
             Some(accessor),
             false,
+            MethodBodyPolicy::Block,
         )?;
         let kind = self.tape.push_u32(accessor.method_kind())?;
         let computed = self.tape.push_bool(computed)?;
@@ -3117,6 +3171,7 @@ impl<'s> Parser<'s> {
                         asynchronous,
                         None,
                         false,
+                        MethodBodyPolicy::Block,
                     )?;
                     self.rollback_assignment_patterns(method_patterns);
                     (value, true, false, self.last_assignment_target)
@@ -3128,6 +3183,7 @@ impl<'s> Parser<'s> {
                         false,
                         None,
                         false,
+                        MethodBodyPolicy::Block,
                     )?;
                     self.rollback_assignment_patterns(method_patterns);
                     (value, true, false, self.last_assignment_target)
@@ -3223,6 +3279,7 @@ impl<'s> Parser<'s> {
             false,
             Some(accessor),
             false,
+            MethodBodyPolicy::Block,
         )?;
         self.rollback_assignment_patterns(method_patterns);
         let kind = self.tape.push_u32(accessor.method_kind())?;

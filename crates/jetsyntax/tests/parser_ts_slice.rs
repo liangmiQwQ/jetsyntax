@@ -527,11 +527,155 @@ fn parses_method_return_annotations_without_widening_plain_method_records() {
 }
 
 #[test]
+fn parses_bodyless_typescript_class_signatures_and_constructor_kinds() {
+    let source = [
+        "class Service extends Base {",
+        "  constructor(value: Input);",
+        "  constructor(value: Input) { super(); }",
+        "  method(required: Input, fallback = value, ...rest): Result;",
+        "  static [key](value = fallback): Result;",
+        "  'literal'();",
+        "  0();",
+        "  #private(value: Input): Output;",
+        "  implemented() {}",
+        "  static constructor() {}",
+        "  ['constructor']() {}",
+        "}",
+        "function following(value: Input): Output { return value; }",
+        "import { value } from 'module';",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse bodyless class signatures");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid bodyless-signature tape");
+
+    assert_eq!(NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION.get(), 571);
+    assert!(
+        node_fields(&parsed, NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION)
+            .all(|fields| fields.len() == 5)
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION).count(),
+        6
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::FUNCTION_EXPRESSION).count(),
+        4
+    );
+
+    let constructor_count = node_fields(&parsed, NodeTag::METHOD_DEFINITION)
+        .filter(|fields| matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::U32(3))))
+        .count();
+    assert_eq!(constructor_count, 2);
+    assert_child_tag(
+        &parsed,
+        NodeTag::METHOD_DEFINITION,
+        1,
+        NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION,
+    );
+
+    let fields = node_fields(&parsed, NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION)
+        .find(|fields| {
+            matches!(
+                parsed.tape.value_at(fields[4]),
+                Ok(TapeValue::Node {
+                    tag: NodeTag::TS_TYPE_ANNOTATION,
+                    ..
+                })
+            )
+        })
+        .expect("annotated bodyless method");
+    let TapeValue::Node { span, .. } = parsed
+        .tape
+        .value_at(fields[4])
+        .expect("bodyless return annotation")
+    else {
+        panic!("bodyless return annotation is not a node");
+    };
+    assert_eq!(&source[span.start as usize..span.end as usize], ": Result");
+}
+
+#[test]
+fn gates_bodyless_class_signatures_and_requires_explicit_semicolons() {
+    for language in [
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+        Language::TypeScriptDefinition,
+    ] {
+        let parsed = parse(
+            "class C { method(value: Input): Output; }",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse TypeScript-capable bodyless method");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:#?}",
+            parsed.diagnostics
+        );
+        assert_node_field_count(&parsed, NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION, 5);
+    }
+
+    let compatibility = parse(
+        "class C { method(); }",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse compatibility bodyless method");
+    assert!(
+        compatibility.diagnostics.is_empty(),
+        "{:#?}",
+        compatibility.diagnostics
+    );
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "class C { method(); }",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover JavaScript bodyless method");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid JavaScript recovery tape");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION).count(),
+            0
+        );
+    }
+
+    for source in [
+        "class C { method(): Output\nnext() {} }",
+        "class C { async method(): Promise<Output>; }",
+        "class C { *method(): Iterable<Output>; }",
+        "class C { get value(): Output; }",
+        "const value = { method(); };",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover excluded signature form");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid excluded-form tape");
+    }
+}
+
+#[test]
 fn diagnoses_unsupported_method_return_forms_and_setter_semantics() {
     for source in [
         "class C { predicate(value): value is string {} }",
         "class C { assertion(value): asserts value {} }",
-        "class C { overload(): string; }",
         "class C { constructor(): string {} }",
     ] {
         let parsed = parse(source, typescript_options()).expect("recoverable method parse");

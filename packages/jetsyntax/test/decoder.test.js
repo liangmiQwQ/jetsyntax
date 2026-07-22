@@ -567,6 +567,89 @@ describe("decodeTape", () => {
     });
   });
 
+  it("decodes ESTree bodyless class method records", () => {
+    const tape = new HandcraftedTape();
+    const constructorKey = tape.node(2, 0, 0, [tape.string("constructor")]);
+    const constructorValue = tape.node(571, 0, 0, [
+      tape.null(),
+      tape.list([]),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.null(),
+    ]);
+    const constructor = tape.node(60, 0, 0, [
+      constructorKey,
+      constructorValue,
+      tape.integer(3),
+      tape.boolean(false),
+      tape.boolean(false),
+    ]);
+    const methodKey = tape.node(2, 0, 0, [tape.string("method")]);
+    const returnType = tape.node(512, 0, 0, [tape.node(555, 0, 0, [])]);
+    const methodValue = tape.node(571, 0, 0, [
+      tape.null(),
+      tape.list([]),
+      tape.boolean(false),
+      tape.boolean(false),
+      returnType,
+    ]);
+    const method = tape.node(60, 0, 0, [
+      methodKey,
+      methodValue,
+      tape.integer(0),
+      tape.boolean(false),
+      tape.boolean(false),
+    ]);
+    const body = tape.node(59, 0, 0, [tape.list([constructor, method])]);
+    const id = tape.node(2, 0, 0, [tape.string("C")]);
+    const declaration = tape.node(57, 0, 0, [id, tape.null(), body]);
+    const program = tape.node(1, 0, 0, [tape.list([declaration]), tape.integer(1)]);
+
+    const decoded = decodeTape("", tape.finish(program));
+    expect(decoded.body[0].body.body).toMatchObject([
+      {
+        type: "MethodDefinition",
+        kind: "constructor",
+        value: {
+          type: "TSEmptyBodyFunctionExpression",
+          id: null,
+          params: [],
+          body: null,
+          generator: false,
+          async: false,
+          expression: false,
+          declare: false,
+        },
+      },
+      {
+        type: "MethodDefinition",
+        kind: "method",
+        value: {
+          type: "TSEmptyBodyFunctionExpression",
+          returnType: {
+            type: "TSTypeAnnotation",
+            typeAnnotation: { type: "TSVoidKeyword" },
+          },
+        },
+      },
+    ]);
+    expect(decoded.body[0].body.body[0].value).not.toHaveProperty("returnType");
+  });
+
+  it("rejects malformed bodyless function field counts", () => {
+    for (const count of [4, 6]) {
+      const tape = new HandcraftedTape();
+      const fields = Array.from({ length: count }, () => tape.null());
+      const encoded = tape.finish(tape.node(571, 0, 0, fields));
+
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid TSEmptyBodyFunctionExpression field count ${count}; expected 5`,
+        );
+      }
+    }
+  });
+
   it("rejects malformed class field counts", () => {
     for (
       const [tag, count, expected] of [

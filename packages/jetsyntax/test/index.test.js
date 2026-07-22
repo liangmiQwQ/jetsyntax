@@ -1079,12 +1079,110 @@ describe("parse", () => {
     expect(objectMethods[2].value).not.toHaveProperty("returnType");
   });
 
+  it("materializes ESTree bodyless class signatures and constructor kinds", () => {
+    const source = [
+      "class Service extends Base {",
+      "  constructor(value: Input);",
+      "  constructor(value: Input) { super(); }",
+      "  method(required: Input, fallback = value, ...rest): Result;",
+      "  static [key](value = fallback): Output;",
+      "  #private(value: Input): Hidden;",
+      "  implemented() {}",
+      "  static constructor() {}",
+      "  ['constructor']() {}",
+      "}",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const [
+      declaredConstructor,
+      constructor,
+      method,
+      computed,
+      privateMethod,
+      implemented,
+      staticConstructor,
+      computedConstructor,
+    ] = result.program.body[0].body.body;
+    expect(declaredConstructor).toMatchObject({
+      type: "MethodDefinition",
+      kind: "constructor",
+      computed: false,
+      static: false,
+      value: {
+        type: "TSEmptyBodyFunctionExpression",
+        id: null,
+        params: [{ name: "value", typeAnnotation: { type: "TSTypeAnnotation" } }],
+        body: null,
+        generator: false,
+        async: false,
+        expression: false,
+        declare: false,
+      },
+    });
+    expect(declaredConstructor.value).not.toHaveProperty("returnType");
+    expect(source.slice(declaredConstructor.value.start, declaredConstructor.value.end)).toBe(
+      "(value: Input);",
+    );
+    expect(declaredConstructor.value.range).toEqual([
+      declaredConstructor.value.start,
+      declaredConstructor.value.end,
+    ]);
+    expect(constructor).toMatchObject({
+      type: "MethodDefinition",
+      kind: "constructor",
+      value: { type: "FunctionExpression", body: { type: "BlockStatement" } },
+    });
+    expect(method).toMatchObject({
+      kind: "method",
+      value: {
+        type: "TSEmptyBodyFunctionExpression",
+        params: [{}, {}, { type: "RestElement" }],
+        returnType: { typeAnnotation: { typeName: { name: "Result" } } },
+      },
+    });
+    expect(computed).toMatchObject({
+      computed: true,
+      static: true,
+      value: { type: "TSEmptyBodyFunctionExpression" },
+    });
+    expect(privateMethod).toMatchObject({
+      key: { type: "PrivateIdentifier", name: "private" },
+      value: { type: "TSEmptyBodyFunctionExpression" },
+    });
+    expect(implemented).toMatchObject({
+      kind: "method",
+      value: { type: "FunctionExpression", body: { type: "BlockStatement" } },
+    });
+    expect(staticConstructor).toMatchObject({ kind: "method", static: true });
+    expect(computedConstructor).toMatchObject({ kind: "method", computed: true });
+
+    for (const lang of ["ts", "tsx", "dts"]) {
+      const typed = parse("class C { method(); }", { lang });
+      expect(typed.diagnostics, lang).toEqual([]);
+      expect(typed.program.body[0].body.body[0].value.type).toBe("TSEmptyBodyFunctionExpression");
+    }
+    const compatibility = parse("class C { method(); }", { typescriptJsCompatibility: true });
+    expect(compatibility.diagnostics).toEqual([]);
+    expect(compatibility.program.body[0].body.body[0].value.type).toBe("TSEmptyBodyFunctionExpression");
+
+    for (const lang of ["js", "jsx"]) {
+      const standard = parse("class C { method(); }", { lang });
+      expect(standard.diagnostics, lang).not.toEqual([]);
+      expect(JSON.stringify(standard.program), lang).not.toContain("TSEmptyBodyFunctionExpression");
+    }
+
+    const objectMethod = parse("const value = { method(); };", { lang: "ts" });
+    expect(objectMethod.diagnostics).not.toEqual([]);
+    expect(JSON.stringify(objectMethod.program)).not.toContain("TSEmptyBodyFunctionExpression");
+  });
+
   it("keeps unsupported method return forms diagnostic", () => {
     for (
       const [source, options] of [
         ["class C { predicate(value): value is string {} }", { lang: "ts" }],
         ["class C { assertion(value): asserts value {} }", { lang: "ts" }],
-        ["class C { overload(): string; }", { lang: "ts" }],
         ["class C { constructor(): string {} }", { lang: "ts" }],
         ["class C { method(): string {} }", { lang: "js" }],
         ["class C { method(): string {} }", { lang: "jsx" }],
