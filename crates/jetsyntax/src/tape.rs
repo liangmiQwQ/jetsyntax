@@ -252,6 +252,8 @@ impl NodeTag {
     pub const TS_GENERIC_CLASS_EXPRESSION: Self = Self(570);
     pub const TS_EMPTY_BODY_FUNCTION_EXPRESSION: Self = Self(571);
     pub const TS_DECLARE_FUNCTION: Self = Self(572);
+    pub const TS_MODIFIED_METHOD_DEFINITION: Self = Self(573);
+    pub const TS_MODIFIED_PROPERTY_DEFINITION: Self = Self(574);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {

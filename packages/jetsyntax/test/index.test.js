@@ -1177,6 +1177,126 @@ describe("parse", () => {
     expect(JSON.stringify(objectMethod.program)).not.toContain("TSEmptyBodyFunctionExpression");
   });
 
+  it("materializes ESTree TypeScript class member modifiers", () => {
+    const source = [
+      "class Base {}",
+      "class Derived extends Base {",
+      "  public constructor() { super(); }",
+      "  protected static declared(): Output;",
+      "  private field: Input;",
+      "  readonly value = initial;",
+      "  public override method() {}",
+      "  override readonly size = 1;",
+      "  protected get item() { return this.field; }",
+      "}",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const members = result.program.body[1].body.body;
+    expect(members).toMatchObject([
+      { type: "MethodDefinition", kind: "constructor", accessibility: "public" },
+      {
+        type: "MethodDefinition",
+        kind: "method",
+        accessibility: "protected",
+        static: true,
+        value: { type: "TSEmptyBodyFunctionExpression" },
+      },
+      { type: "PropertyDefinition", accessibility: "private" },
+      { type: "PropertyDefinition", readonly: true },
+      { type: "MethodDefinition", accessibility: "public", override: true },
+      { type: "PropertyDefinition", override: true, readonly: true },
+      { type: "MethodDefinition", kind: "get", accessibility: "protected" },
+    ]);
+    expect(members[0]).not.toHaveProperty("override");
+    expect(members[2]).not.toHaveProperty("readonly");
+    expect(members[3]).not.toHaveProperty("accessibility");
+    for (const member of members) expect(member.range).toEqual([member.start, member.end]);
+  });
+
+  it("preserves modifier-shaped class member names and escaped modifier spellings", () => {
+    const source = [
+      "class Base {}",
+      "class Names extends Base {",
+      "  public() {}",
+      "  private() {}",
+      "  protected;",
+      "  readonly = 0;",
+      "  override() {}",
+      "  public static() {}",
+      "  override readonly() {}",
+      "  static static() {}",
+      "  p\\u0075blic escapedField;",
+      "  r\\u0065adonly escapedReadonly;",
+      "  ov\\u0065rride escapedOverride() {}",
+      "  public",
+      "  private() {}",
+      "  static",
+      "  readonly",
+      "  protected() {}",
+      "  async = 1;",
+      "  async() {}",
+      "}",
+    ].join("\n");
+    const result = parse(source, { lang: "ts" });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[1].body.body).toMatchObject([
+      { type: "MethodDefinition", key: { name: "public" } },
+      { type: "MethodDefinition", key: { name: "private" } },
+      { type: "PropertyDefinition", key: { name: "protected" } },
+      { type: "PropertyDefinition", key: { name: "readonly" } },
+      { type: "MethodDefinition", key: { name: "override" } },
+      { type: "MethodDefinition", key: { name: "static" }, accessibility: "public" },
+      { type: "MethodDefinition", key: { name: "readonly" }, override: true },
+      { type: "MethodDefinition", key: { name: "static" }, static: true },
+      { type: "PropertyDefinition", key: { name: "escapedField" }, accessibility: "public" },
+      { type: "PropertyDefinition", key: { name: "escapedReadonly" }, readonly: true },
+      { type: "MethodDefinition", key: { name: "escapedOverride" }, override: true },
+      { type: "PropertyDefinition", key: { name: "public" } },
+      { type: "MethodDefinition", key: { name: "private" } },
+      { type: "PropertyDefinition", key: { name: "readonly" }, static: true },
+      { type: "MethodDefinition", key: { name: "protected" } },
+      { type: "PropertyDefinition", key: { name: "async" } },
+      { type: "MethodDefinition", key: { name: "async" } },
+    ]);
+  });
+
+  it("gates and diagnoses TypeScript class member modifiers", () => {
+    const compatibility = parse("class C { public field; protected method() {} }", {
+      typescriptJsCompatibility: true,
+    });
+    expect(compatibility.diagnostics).toEqual([]);
+    expect(compatibility.program.body[0].body.body).toMatchObject([
+      { type: "PropertyDefinition", accessibility: "public" },
+      { type: "MethodDefinition", accessibility: "protected" },
+    ]);
+
+    for (const lang of ["js", "jsx"]) {
+      const gated = parse("class C { public field; protected method() {} }", { lang });
+      expect(gated.diagnostics).not.toEqual([]);
+      for (const member of gated.program.body[0].body.body) {
+        expect(member).not.toHaveProperty("accessibility");
+      }
+    }
+
+    for (
+      const source of [
+        "class C { readonly method() {} }",
+        "class C extends B { override constructor() {} }",
+        "class C { override method() {} }",
+        "class C { public #field; }",
+        "class C { public static {} }",
+        "class C { readonly public field; }",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts", semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
   it("materializes top-level TypeScript overload signatures", () => {
     const source = [
       "export function overloaded<T>(value: T): T;",

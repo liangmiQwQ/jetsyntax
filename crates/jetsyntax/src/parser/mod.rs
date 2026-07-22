@@ -200,6 +200,50 @@ struct ParsedParameters {
 }
 
 #[derive(Clone, Copy)]
+enum AccessibilityModifier {
+    Public,
+    Protected,
+    Private,
+}
+
+impl AccessibilityModifier {
+    const fn wire_value(self) -> u8 {
+        match self {
+            Self::Public => 1,
+            Self::Protected => 2,
+            Self::Private => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct TypeScriptModifiers {
+    accessibility: Option<AccessibilityModifier>,
+    readonly: bool,
+    r#override: bool,
+}
+
+impl TypeScriptModifiers {
+    const fn any(self) -> bool {
+        self.accessibility.is_some() || self.readonly || self.r#override
+    }
+
+    const fn wire_flags(self) -> u8 {
+        let accessibility = match self.accessibility {
+            Some(accessibility) => accessibility.wire_value(),
+            None => 0,
+        };
+        accessibility | ((self.readonly as u8) << 2) | ((self.r#override as u8) << 3)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TypeScriptClassMemberContext {
+    modifiers: TypeScriptModifiers,
+    class_has_super: bool,
+}
+
+#[derive(Clone, Copy)]
 struct AssignmentPatternCandidate {
     node: NodeRef,
     tag: NodeTag,
@@ -958,7 +1002,8 @@ impl<'s> Parser<'s> {
             }
             self.tape.push_null()?
         };
-        let super_class = if self.eat(TokenKind::Extends).is_some() {
+        let has_super = self.eat(TokenKind::Extends).is_some();
+        let super_class = if has_super {
             self.parse_assignment_expression(true)?.value()
         } else {
             self.tape.push_null()?
@@ -1139,7 +1184,7 @@ impl<'s> Parser<'s> {
             if self.eat(TokenKind::Semicolon).is_some() {
                 continue;
             }
-            elements.push(self.parse_class_element()?.value());
+            elements.push(self.parse_typescript_class_element(saw_extends)?.value());
         }
         let end = self.expect(TokenKind::RightBrace).end;
         self.context.set_grammar(previous_grammar);
@@ -1237,7 +1282,6 @@ impl<'s> Parser<'s> {
         } else {
             false
         };
-
         if leading_key.is_none()
             && let Some(accessor) = self.current_accessor_kind(true)
         {
@@ -1290,6 +1334,180 @@ impl<'s> Parser<'s> {
             );
         }
 
+        let type_annotation = self.tape.push_null()?;
+        let value = if self.eat(TokenKind::Eq).is_some() {
+            self.parse_assignment_expression(true)?.value()
+        } else {
+            self.tape.push_null()?
+        };
+        let end = self.consume_semicolon();
+        if property_name.shorthand
+            && self.reports_ecmascript_early_errors()
+            && self.static_property_name_matches(key.span, "constructor")
+        {
+            self.error(key.span, "classes cannot have a field named constructor");
+        }
+        let computed = self.tape.push_bool(computed)?;
+        let is_static = self.tape.push_bool(is_static)?;
+        self.node(
+            NodeTag::PROPERTY_DEFINITION,
+            Span::new(start, end),
+            &[key.value(), value, computed, is_static, type_annotation],
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn parse_typescript_class_element(
+        &mut self,
+        class_has_super: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let start = self.current.start;
+        let mut modifiers = TypeScriptModifiers::default();
+        let mut last_modifier_rank = None;
+        let mut leading_key = None;
+        let mut is_static = false;
+
+        // Parse the contextual TypeScript prelude without stealing modifier-shaped member names.
+        loop {
+            if let Some(accessibility) = self.current_accessibility_modifier()
+                && self.typescript_modifier_has_class_member_follower(false)
+            {
+                let token = self.take();
+                self.diagnose_typescript_modifier_order(
+                    0,
+                    &mut last_modifier_rank,
+                    modifiers.accessibility.is_some(),
+                    Self::token_span(token),
+                );
+                modifiers.accessibility.get_or_insert(accessibility);
+                continue;
+            }
+
+            if !is_static && self.current_typescript_modifier_matches(TokenKind::Static, "static") {
+                let has_member_follower = self.typescript_modifier_has_class_member_follower(true);
+                let token = self.take();
+                if self.current.kind == TokenKind::LeftBrace {
+                    if modifiers.any() && self.options.semantic_errors {
+                        self.error(
+                            Span::new(start, token.end),
+                            "static blocks cannot have TypeScript modifiers",
+                        );
+                    }
+                    let block = self.parse_block_statement()?;
+                    return self.node(
+                        NodeTag::STATIC_BLOCK,
+                        Span::new(start, block.span.end),
+                        &[block.value()],
+                    );
+                }
+                if !has_member_follower {
+                    leading_key = Some(self.identifier_from_span(Self::token_span(token))?);
+                    break;
+                }
+                self.diagnose_typescript_modifier_order(
+                    1,
+                    &mut last_modifier_rank,
+                    false,
+                    Self::token_span(token),
+                );
+                is_static = true;
+                continue;
+            }
+
+            if self.current_typescript_modifier_matches(TokenKind::Override, "override")
+                && self.typescript_modifier_has_class_member_follower(false)
+            {
+                let token = self.take();
+                self.diagnose_typescript_modifier_order(
+                    2,
+                    &mut last_modifier_rank,
+                    modifiers.r#override,
+                    Self::token_span(token),
+                );
+                modifiers.r#override = true;
+                continue;
+            }
+
+            if self.current_typescript_modifier_matches(TokenKind::Readonly, "readonly")
+                && self.typescript_modifier_has_class_member_follower(false)
+            {
+                let token = self.take();
+                self.diagnose_typescript_modifier_order(
+                    3,
+                    &mut last_modifier_rank,
+                    modifiers.readonly,
+                    Self::token_span(token),
+                );
+                modifiers.readonly = true;
+                continue;
+            }
+            break;
+        }
+        let member_context = TypeScriptClassMemberContext {
+            modifiers,
+            class_has_super,
+        };
+
+        // Resolve contextual accessor and async introducers before parsing the property name.
+        if leading_key.is_none()
+            && let Some(accessor) = self.current_accessor_kind(true)
+        {
+            return self.parse_typescript_class_accessor(
+                start,
+                is_static,
+                accessor,
+                member_context,
+            );
+        }
+
+        let async_token = if leading_key.is_none() && self.current.kind == TokenKind::Async {
+            Some(self.take())
+        } else {
+            None
+        };
+        let async_modifier = async_token.is_some_and(|token| {
+            !token.flags.escaped()
+                && !self.current.flags.line_break_before()
+                && (self.current.kind == TokenKind::Star
+                    || Self::is_property_name_start(self.current.kind, true))
+        });
+        let generator =
+            self.current.kind == TokenKind::Star && async_token.is_none_or(|_| async_modifier);
+        let asynchronous = async_modifier;
+        if generator {
+            self.bump();
+        } else if let Some(token) = async_token
+            && !asynchronous
+        {
+            leading_key = Some(self.identifier_from_span(Self::token_span(token))?);
+        }
+
+        let property_name = if generator || asynchronous {
+            self.parse_property_name(true)?
+        } else if let Some(key) = leading_key {
+            ParsedPropertyName {
+                key,
+                computed: false,
+                shorthand: true,
+            }
+        } else {
+            self.parse_property_name(true)?
+        };
+        let key = property_name.key;
+        let computed = property_name.computed;
+
+        if generator || asynchronous || self.current.kind == TokenKind::LeftParen {
+            return self.parse_typescript_class_method_definition(
+                start,
+                &property_name,
+                is_static,
+                generator,
+                asynchronous,
+                member_context,
+            );
+        }
+
+        // Fields share their legacy five-value payload; modifiers select only the cold outer tag.
         let type_annotation =
             if self.options.language.is_typescript() && self.eat(TokenKind::Colon).is_some() {
                 self.parse_type_annotation()?.value()
@@ -1302,8 +1520,25 @@ impl<'s> Parser<'s> {
             self.tape.push_null()?
         };
         let end = self.consume_semicolon();
+        if property_name.shorthand && self.static_property_name_matches(key.span, "constructor") {
+            self.error(key.span, "classes cannot have a field named constructor");
+        }
+        self.diagnose_typescript_class_member_modifiers(
+            modifiers,
+            key.span,
+            false,
+            false,
+            member_context.class_has_super,
+        );
         let computed = self.tape.push_bool(computed)?;
         let is_static = self.tape.push_bool(is_static)?;
+        if modifiers.any() {
+            return self.node_typescript_modified_property_definition(
+                Span::new(start, end),
+                [key.value(), value, computed, is_static, type_annotation],
+                modifiers,
+            );
+        }
         self.node(
             NodeTag::PROPERTY_DEFINITION,
             Span::new(start, end),
@@ -1346,13 +1581,7 @@ impl<'s> Parser<'s> {
             asynchronous,
             None,
             allow_super_call,
-            if self.options.language.is_typescript()
-                || self.options.syntax_extensions.typescript_js_compatibility
-            {
-                MethodBodyPolicy::TypeScriptSignature
-            } else {
-                MethodBodyPolicy::Block
-            },
+            MethodBodyPolicy::Block,
         )?;
         let kind = self.tape.push_u32(if allow_super_call { 3 } else { 0 })?;
         let computed = self.tape.push_bool(computed)?;
@@ -1362,6 +1591,103 @@ impl<'s> Parser<'s> {
             Span::new(start, function.span.end),
             &[key.value(), function.value(), kind, computed, is_static],
         )
+    }
+
+    fn parse_typescript_class_method_definition(
+        &mut self,
+        start: u32,
+        property_name: &ParsedPropertyName,
+        is_static: bool,
+        generator: bool,
+        asynchronous: bool,
+        member_context: TypeScriptClassMemberContext,
+    ) -> Result<ParsedNode, ParseError> {
+        let modifiers = member_context.modifiers;
+        let key = property_name.key;
+        let computed = property_name.computed;
+        if (generator || asynchronous)
+            && !is_static
+            && !computed
+            && self.static_property_name_matches(key.span, "constructor")
+        {
+            self.error(key.span, "class constructor cannot be async or a generator");
+        }
+        if (generator || asynchronous)
+            && is_static
+            && !computed
+            && self.static_property_name_matches(key.span, "prototype")
+        {
+            self.error(key.span, "static class method cannot be named `prototype`");
+        }
+        let allow_super_call = !is_static
+            && !computed
+            && !generator
+            && !asynchronous
+            && self.static_property_name_matches(key.span, "constructor");
+        self.diagnose_typescript_class_member_modifiers(
+            modifiers,
+            key.span,
+            true,
+            allow_super_call,
+            member_context.class_has_super,
+        );
+        let function = self.parse_method_function_with_super_call(
+            key.span.start,
+            generator,
+            asynchronous,
+            None,
+            allow_super_call,
+            MethodBodyPolicy::TypeScriptSignature,
+        )?;
+        let kind = self.tape.push_u32(if allow_super_call { 3 } else { 0 })?;
+        let computed = self.tape.push_bool(computed)?;
+        let is_static = self.tape.push_bool(is_static)?;
+        if modifiers.any() {
+            return self.node_typescript_modified_method_definition(
+                Span::new(start, function.span.end),
+                [key.value(), function.value(), kind, computed, is_static],
+                modifiers,
+            );
+        }
+        self.node(
+            NodeTag::METHOD_DEFINITION,
+            Span::new(start, function.span.end),
+            &[key.value(), function.value(), kind, computed, is_static],
+        )
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn node_typescript_modified_method_definition(
+        &mut self,
+        span: Span,
+        fields: [ValueRef; 5],
+        modifiers: TypeScriptModifiers,
+    ) -> Result<ParsedNode, ParseError> {
+        let tag = NodeTag::TS_MODIFIED_METHOD_DEFINITION;
+        let node = self
+            .tape
+            .push_node(tag, span, modifiers.wire_flags(), &fields)?;
+        self.last_node_tag = Some(tag);
+        self.last_assignment_target = AssignmentTargetType::Invalid;
+        Ok(ParsedNode { node, span })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn node_typescript_modified_property_definition(
+        &mut self,
+        span: Span,
+        fields: [ValueRef; 5],
+        modifiers: TypeScriptModifiers,
+    ) -> Result<ParsedNode, ParseError> {
+        let tag = NodeTag::TS_MODIFIED_PROPERTY_DEFINITION;
+        let node = self
+            .tape
+            .push_node(tag, span, modifiers.wire_flags(), &fields)?;
+        self.last_node_tag = Some(tag);
+        self.last_assignment_target = AssignmentTargetType::Invalid;
+        Ok(ParsedNode { node, span })
     }
 
     fn parse_class_accessor(
@@ -1424,6 +1750,89 @@ impl<'s> Parser<'s> {
         let kind = self.tape.push_u32(accessor.method_kind())?;
         let computed = self.tape.push_bool(computed)?;
         let is_static = self.tape.push_bool(is_static)?;
+        self.node(
+            NodeTag::METHOD_DEFINITION,
+            Span::new(start, function.span.end),
+            &[key.value(), function.value(), kind, computed, is_static],
+        )
+    }
+
+    fn parse_typescript_class_accessor(
+        &mut self,
+        start: u32,
+        is_static: bool,
+        accessor: AccessorKind,
+        member_context: TypeScriptClassMemberContext,
+    ) -> Result<ParsedNode, ParseError> {
+        let modifiers = member_context.modifiers;
+        self.bump();
+        let (property_name, private) = if self.current.kind == TokenKind::PrivateIdentifier {
+            let (key, name) = self.parse_private_identifier()?;
+            let name_span = Span::new(key.span.start.saturating_add(1), key.span.end);
+            if name == "constructor" && self.reports_private_early_errors() {
+                self.error(key.span, "private name `#constructor` is not allowed");
+            }
+            let _ = self.context.declare_private_accessor(
+                name,
+                name_span,
+                accessor.private_kind(),
+                is_static,
+            );
+            (
+                ParsedPropertyName {
+                    key,
+                    computed: false,
+                    shorthand: false,
+                },
+                true,
+            )
+        } else {
+            (self.parse_property_name(true)?, false)
+        };
+        let key = property_name.key;
+        let computed = property_name.computed;
+        if !private
+            && !computed
+            && !is_static
+            && self.static_property_name_matches(key.span, "constructor")
+        {
+            self.error(key.span, "class constructor cannot be an accessor");
+        }
+        if !private
+            && !computed
+            && is_static
+            && self.static_property_name_matches(key.span, "prototype")
+        {
+            self.error(
+                key.span,
+                "static class accessor cannot be named `prototype`",
+            );
+        }
+        self.diagnose_typescript_class_member_modifiers(
+            modifiers,
+            key.span,
+            true,
+            false,
+            member_context.class_has_super,
+        );
+        let function = self.parse_method_function_with_super_call(
+            key.span.start,
+            false,
+            false,
+            Some(accessor),
+            false,
+            MethodBodyPolicy::Block,
+        )?;
+        let kind = self.tape.push_u32(accessor.method_kind())?;
+        let computed = self.tape.push_bool(computed)?;
+        let is_static = self.tape.push_bool(is_static)?;
+        if modifiers.any() {
+            return self.node_typescript_modified_method_definition(
+                Span::new(start, function.span.end),
+                [key.value(), function.value(), kind, computed, is_static],
+                modifiers,
+            );
+        }
         self.node(
             NodeTag::METHOD_DEFINITION,
             Span::new(start, function.span.end),
@@ -5359,6 +5768,88 @@ impl<'s> Parser<'s> {
             )
             || Self::is_member_identifier_name(next))
         .then_some(accessor)
+    }
+
+    fn current_accessibility_modifier(&self) -> Option<AccessibilityModifier> {
+        if self.current_typescript_modifier_matches(TokenKind::Public, "public") {
+            Some(AccessibilityModifier::Public)
+        } else if self.current_typescript_modifier_matches(TokenKind::Protected, "protected") {
+            Some(AccessibilityModifier::Protected)
+        } else if self.current_typescript_modifier_matches(TokenKind::Private, "private") {
+            Some(AccessibilityModifier::Private)
+        } else {
+            None
+        }
+    }
+
+    fn current_typescript_modifier_matches(&self, kind: TokenKind, name: &str) -> bool {
+        self.current.kind == kind
+            || self.current.kind == TokenKind::Identifier
+                && self.current.flags.escaped()
+                && self.identifier_name_matches(self.current_span(), name, true)
+    }
+
+    fn typescript_modifier_has_class_member_follower(&self, allow_line_break: bool) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let follower = lookahead.next_token();
+        (allow_line_break || !follower.flags.line_break_before())
+            && (matches!(
+                follower.kind,
+                TokenKind::LeftBrace | TokenKind::Star | TokenKind::Ellipsis
+            ) || Self::is_property_name_start(follower.kind, true))
+    }
+
+    fn diagnose_typescript_modifier_order(
+        &mut self,
+        rank: u8,
+        last_rank: &mut Option<u8>,
+        duplicate: bool,
+        span: Span,
+    ) {
+        if self.options.semantic_errors {
+            if duplicate {
+                self.error(span, "duplicate TypeScript class member modifier");
+            }
+            if last_rank.is_some_and(|previous| previous > rank) {
+                self.error(span, "TypeScript class member modifiers are out of order");
+            }
+        }
+        *last_rank = Some(last_rank.map_or(rank, |previous| previous.max(rank)));
+    }
+
+    fn diagnose_typescript_class_member_modifiers(
+        &mut self,
+        modifiers: TypeScriptModifiers,
+        key_span: Span,
+        method: bool,
+        constructor: bool,
+        class_has_super: bool,
+    ) {
+        if !self.options.semantic_errors {
+            return;
+        }
+        if modifiers.readonly && method {
+            self.error(key_span, "class methods cannot have the readonly modifier");
+        }
+        if modifiers.r#override && constructor {
+            self.error(
+                key_span,
+                "class constructors cannot have the override modifier",
+            );
+        }
+        if modifiers.r#override && !class_has_super {
+            self.error(
+                key_span,
+                "override requires the containing class to extend another class",
+            );
+        }
+        if modifiers.accessibility.is_some() && self.source_text(key_span).starts_with('#') {
+            self.error(
+                key_span,
+                "private class elements cannot have an accessibility modifier",
+            );
+        }
     }
 
     fn static_property_name_matches(&self, span: Span, expected: &str) -> bool {

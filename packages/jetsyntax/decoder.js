@@ -189,6 +189,8 @@ for (
     [570, ["ClassExpression", ["id", "superClass", "body", "implements", "typeParameters"]]],
     [571, ["TSEmptyBodyFunctionExpression", ["id", "params", "generator", "async", "returnType"]]],
     [572, ["TSDeclareFunction", ["id", "params", "generator", "async", "returnType", "typeParameters"]]],
+    [573, ["MethodDefinition", ["key", "value", "kind", "computed", "static"]]],
+    [574, ["PropertyDefinition", ["key", "value", "computed", "static", "typeAnnotation"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -261,6 +263,7 @@ const IMPORT_EXPORT_KINDS = ["value", "type", "typeof"];
 const IMPORT_PHASES = ["source", "defer"];
 const SOURCE_TYPES = ["script", "module", "commonjs"];
 const TS_MODULE_KINDS = ["namespace", "module"];
+const TS_CLASS_MEMBER_ACCESSIBILITIES = [undefined, "public", "protected", "private"];
 
 export function decodeTape(source, tape, options = {}) {
   return decodeTapeInternal(source, tape, options, false);
@@ -829,6 +832,8 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.body = array(fields[0], tag);
         return node;
       case 60:
+      case 573:
+        if (tag === 573) decodeTypeScriptClassMemberModifiers(node, record, tag);
         node.key = fields[0];
         node.value = fields[1];
         node.kind = enumValue(METHOD_KINDS, fields[2], tag);
@@ -836,6 +841,8 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.static = boolean(fields[4], tag);
         return node;
       case 61:
+      case 574:
+        if (tag === 574) decodeTypeScriptClassMemberModifiers(node, record, tag);
         node.key = fields[0];
         node.value = fields[1];
         node.computed = boolean(fields[2], tag);
@@ -1299,6 +1306,17 @@ function decodeQuotedString(raw) {
     }
   }
   return value;
+}
+
+function decodeTypeScriptClassMemberModifiers(node, record, tag) {
+  const flags = (record & NODE_FLAGS_MASK) >>> 16;
+  if (flags === 0 || (flags & ~0x0F) !== 0) {
+    throw new Error(`invalid TypeScript class member modifier flags ${flags} for tag ${tag}`);
+  }
+  const accessibility = flags & 0x03;
+  if (accessibility !== 0) node.accessibility = TS_CLASS_MEMBER_ACCESSIBILITIES[accessibility];
+  if ((flags & 0x04) !== 0) node.readonly = true;
+  if ((flags & 0x08) !== 0) node.override = true;
 }
 
 function lastRegexpSlash(raw) {

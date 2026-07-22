@@ -767,6 +767,239 @@ fn parses_bodyless_typescript_class_signatures_and_constructor_kinds() {
 }
 
 #[test]
+fn parses_typescript_class_member_modifiers_on_cold_tape_tags() {
+    let source = [
+        "class Base {}",
+        "class Derived extends Base {",
+        "  public constructor() { super(); }",
+        "  protected static declared(): Output;",
+        "  private field: Input;",
+        "  readonly value = initial;",
+        "  public override method() {}",
+        "  override readonly size = 1;",
+        "  protected get item() { return this.field; }",
+        "}",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse modified class members");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid modified-member tape");
+
+    assert_eq!(NodeTag::TS_MODIFIED_METHOD_DEFINITION.get(), 573);
+    assert_eq!(NodeTag::TS_MODIFIED_PROPERTY_DEFINITION.get(), 574);
+    let method_flags: Vec<_> = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node {
+                tag: NodeTag::TS_MODIFIED_METHOD_DEFINITION,
+                flags,
+                fields,
+                ..
+            } => {
+                assert_eq!(fields.len(), 5);
+                Some(flags)
+            }
+            _ => None,
+        })
+        .collect();
+    let property_flags: Vec<_> = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node {
+                tag: NodeTag::TS_MODIFIED_PROPERTY_DEFINITION,
+                flags,
+                fields,
+                ..
+            } => {
+                assert_eq!(fields.len(), 5);
+                Some(flags)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(method_flags, [1, 2, 9, 2]);
+    assert_eq!(property_flags, [3, 4, 12]);
+}
+
+#[test]
+fn keeps_typescript_modifier_words_ambiguous_and_decodes_escaped_spellings() {
+    let source = [
+        "class Base {}",
+        "class Names extends Base {",
+        "  public() {}",
+        "  private() {}",
+        "  protected;",
+        "  readonly = 0;",
+        "  override() {}",
+        "  public static() {}",
+        "  override readonly() {}",
+        "  static static() {}",
+        "  p\\u0075blic escapedField;",
+        "  r\\u0065adonly escapedReadonly;",
+        "  ov\\u0065rride escapedOverride() {}",
+        "  public",
+        "  private() {}",
+        "  static",
+        "  readonly",
+        "  protected() {}",
+        "  async = 1;",
+        "  async() {}",
+        "}",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse modifier ambiguities");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid ambiguity tape");
+
+    let modified_methods = node_fields(&parsed, NodeTag::TS_MODIFIED_METHOD_DEFINITION).count();
+    let modified_properties =
+        node_fields(&parsed, NodeTag::TS_MODIFIED_PROPERTY_DEFINITION).count();
+    assert_eq!(modified_methods, 3);
+    assert_eq!(modified_properties, 2);
+    assert_eq!(node_fields(&parsed, NodeTag::METHOD_DEFINITION).count(), 7);
+    assert_eq!(
+        node_fields(&parsed, NodeTag::PROPERTY_DEFINITION).count(),
+        5
+    );
+
+    for source in [
+        "class C { public<T>() {} }",
+        "class C { private?: number }",
+        "class C { protected!: number }",
+        "class C { readonly: number }",
+        "class C { override() {} }",
+        "class C { static<T>() {} }",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover excluded ambiguity form");
+        parsed
+            .tape
+            .validate()
+            .expect("valid excluded ambiguity tape");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_MODIFIED_METHOD_DEFINITION).count()
+                + node_fields(&parsed, NodeTag::TS_MODIFIED_PROPERTY_DEFINITION).count(),
+            0,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn gates_class_member_modifiers_and_preserves_ordinary_compatibility_tapes() {
+    let source = "class C { static method() {} field = 1; readonly() {} async = 2; }";
+    let javascript = parse(source, ParseOptions::default()).expect("parse JavaScript class");
+    let compatibility = parse(
+        source,
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse compatibility class");
+    assert_eq!(javascript.tape.words(), compatibility.tape.words());
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "class C { public field; protected method() {} }",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover gated modifiers");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_MODIFIED_METHOD_DEFINITION).count()
+                + node_fields(&parsed, NodeTag::TS_MODIFIED_PROPERTY_DEFINITION).count(),
+            0
+        );
+    }
+
+    let compatibility = parse(
+        "class C { public field; protected method() {} }",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse compatibility modifiers");
+    assert!(
+        compatibility.diagnostics.is_empty(),
+        "{:#?}",
+        compatibility.diagnostics
+    );
+    assert_eq!(
+        node_fields(&compatibility, NodeTag::TS_MODIFIED_METHOD_DEFINITION).count(),
+        1
+    );
+    assert_eq!(
+        node_fields(&compatibility, NodeTag::TS_MODIFIED_PROPERTY_DEFINITION).count(),
+        1
+    );
+}
+
+#[test]
+fn diagnoses_invalid_typescript_class_member_modifier_combinations() {
+    for source in [
+        "class C { readonly method() {} }",
+        "class C extends B { override constructor() {} }",
+        "class C { override method() {} }",
+        "class C { public #field; }",
+        "class C { public static {} }",
+        "class C { readonly public field; }",
+        "class C { public constructor; }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("recover invalid modifiers");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid modifier recovery tape");
+    }
+
+    for source in [
+        "class C { constructor; }",
+        "class C { public constructor; }",
+        "class C { public static constructor; }",
+        "class C { constructor: number; }",
+        "class C { constructor = 1; }",
+        "class C { public constr\\u0075ctor; }",
+    ] {
+        let syntax_only = parse(source, typescript_options()).expect("recover constructor field");
+        assert!(!syntax_only.diagnostics.is_empty(), "{source}");
+    }
+    for source in [
+        "class C { public 'constructor'; }",
+        "class C { public ['constructor']; }",
+    ] {
+        let syntax_only =
+            parse(source, typescript_options()).expect("parse constructor-like field");
+        assert!(
+            syntax_only.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            syntax_only.diagnostics
+        );
+    }
+}
+
+#[test]
 fn gates_bodyless_class_signatures_and_requires_explicit_semicolons() {
     for language in [
         Language::TypeScript,

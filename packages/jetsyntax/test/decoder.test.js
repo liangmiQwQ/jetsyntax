@@ -45,10 +45,10 @@ class HandcraftedTape {
     return this.record([(KIND_LIST << KIND_SHIFT) >>> 0, 3 + items.length, items.length, ...items]);
   }
 
-  node(tag, start, end, fields) {
+  node(tag, start, end, fields, flags = 0) {
     this.references.push(...fields);
     return this.record([
-      ((KIND_NODE << KIND_SHIFT) | tag) >>> 0,
+      ((KIND_NODE << KIND_SHIFT) | (flags << 16) | tag) >>> 0,
       5 + fields.length,
       start,
       end,
@@ -735,6 +735,84 @@ describe("decodeTape", () => {
       for (const decode of [decodeTape, decodeTrustedTape]) {
         expect(() => decode("", encoded)).toThrow(
           `invalid ${type} field count ${count}; expected ${expected}`,
+        );
+      }
+    }
+  });
+
+  it("decodes compact TypeScript class member modifier flags", () => {
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      const methodTape = new HandcraftedTape();
+      const methodKey = methodTape.node(2, 0, 0, [methodTape.string("method")]);
+      const method = methodTape.node(573, 0, 0, [
+        methodKey,
+        methodTape.null(),
+        methodTape.integer(0),
+        methodTape.boolean(false),
+        methodTape.boolean(false),
+      ], 0x09);
+      const decodedMethod = decode("", methodTape.finish(method));
+      expect(decodedMethod).toMatchObject({
+        type: "MethodDefinition",
+        key: { name: "method" },
+        kind: "method",
+        computed: false,
+        static: false,
+        accessibility: "public",
+        override: true,
+      });
+      expect(decodedMethod).not.toHaveProperty("readonly");
+
+      const propertyTape = new HandcraftedTape();
+      const propertyKey = propertyTape.node(2, 0, 0, [propertyTape.string("field")]);
+      const property = propertyTape.node(574, 0, 0, [
+        propertyKey,
+        propertyTape.null(),
+        propertyTape.boolean(false),
+        propertyTape.boolean(true),
+        propertyTape.null(),
+      ], 0x06);
+      const decodedProperty = decode("", propertyTape.finish(property));
+      expect(decodedProperty).toMatchObject({
+        type: "PropertyDefinition",
+        key: { name: "field" },
+        computed: false,
+        static: true,
+        typeAnnotation: null,
+        accessibility: "protected",
+        readonly: true,
+      });
+      expect(decodedProperty).not.toHaveProperty("override");
+    }
+  });
+
+  it("rejects malformed TypeScript class member records", () => {
+    for (
+      const [tag, count, expected] of [
+        [573, 4, 5],
+        [573, 6, 5],
+        [574, 4, 5],
+        [574, 6, 5],
+      ]
+    ) {
+      const tape = new HandcraftedTape();
+      const fields = Array.from({ length: count }, () => tape.null());
+      const encoded = tape.finish(tape.node(tag, 0, 0, fields, 1));
+      const type = tag === 573 ? "MethodDefinition" : "PropertyDefinition";
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid ${type} field count ${count}; expected ${expected}`,
+        );
+      }
+    }
+
+    for (const flags of [0, 0x10, 0xFF]) {
+      const tape = new HandcraftedTape();
+      const fields = Array.from({ length: 5 }, () => tape.null());
+      const encoded = tape.finish(tape.node(573, 0, 0, fields, flags));
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid TypeScript class member modifier flags ${flags} for tag 573`,
         );
       }
     }
