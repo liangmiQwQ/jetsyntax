@@ -203,6 +203,7 @@ for (
     [584, ["CallExpression", ["callee", "arguments", "optional", "typeArguments"]]],
     [585, ["TaggedTemplateExpression", ["tag", "quasi", "typeArguments"]]],
     [586, ["TSInstantiationExpression", ["expression", "typeArguments"]]],
+    [587, ["TSTypeQuery", ["exprName", "typeArguments"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -1100,6 +1101,10 @@ function decodeTapeInternal(source, tape, options, trusted) {
       case 586:
         node.expression = fields[0];
         node.typeArguments = fields[1];
+        return node;
+      case 587:
+        node.exprName = fields[0];
+        if (fields[1] !== null) node.typeArguments = fields[1];
         return node;
       case 571:
         node.id = fields[0];

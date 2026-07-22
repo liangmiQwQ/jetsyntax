@@ -275,6 +275,68 @@ describe("decodeTape", () => {
     });
   });
 
+  it("decodes TypeScript entity-name type queries", () => {
+    const source = "typeof Namespace.value<Result>";
+    const tape = new HandcraftedTape();
+    const namespace = tape.node(2, 7, 16, [tape.string("Namespace")]);
+    const property = tape.node(2, 17, 22, [tape.string("value")]);
+    const qualified = tape.node(514, 7, 22, [namespace, property]);
+    const argumentName = tape.node(2, 23, 29, [tape.string("Result")]);
+    const argument = tape.node(513, 23, 29, [argumentName, tape.null()]);
+    const typeArguments = tape.node(542, 22, 30, [tape.list([argument])]);
+    const encoded = tape.finish(tape.node(587, 0, 30, [qualified, typeArguments]));
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(source, encoded, { range: true })).toMatchObject({
+        type: "TSTypeQuery",
+        start: 0,
+        end: 30,
+        range: [0, 30],
+        exprName: {
+          type: "TSQualifiedName",
+          left: { type: "Identifier", name: "Namespace" },
+          right: { type: "Identifier", name: "value" },
+        },
+        typeArguments: {
+          type: "TSTypeParameterInstantiation",
+          start: 22,
+          end: 30,
+          range: [22, 30],
+          params: [{ type: "TSTypeReference", typeName: { name: "Result" } }],
+        },
+      });
+    }
+
+    const plainSource = "typeof value";
+    const plainTape = new HandcraftedTape();
+    const value = plainTape.node(2, 7, 12, [plainTape.string("value")]);
+    const plainEncoded = plainTape.finish(
+      plainTape.node(587, 0, 12, [value, plainTape.null()]),
+    );
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      const query = decode(plainSource, plainEncoded);
+      expect(query).toMatchObject({
+        type: "TSTypeQuery",
+        exprName: { type: "Identifier", name: "value" },
+      });
+      expect(query).not.toHaveProperty("typeArguments");
+    }
+  });
+
+  it("rejects malformed TypeScript type-query field counts", () => {
+    for (const count of [1, 3]) {
+      const tape = new HandcraftedTape();
+      const fields = Array.from({ length: count }, () => tape.null());
+      const encoded = tape.finish(tape.node(587, 0, 0, fields));
+
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid TSTypeQuery field count ${count}; expected 2`,
+        );
+      }
+    }
+  });
+
   it("decodes legacy, annotated, and generic function field counts", () => {
     const source = "function plain() {} function typed(): number {} function generic<T>() {}";
     const tape = new HandcraftedTape();

@@ -686,6 +686,92 @@ describe("parse", () => {
     expect(plain).not.toHaveProperty("returnType");
   });
 
+  it("materializes entity-name TypeScript type queries", () => {
+    // The line break in Boundary leaves `<T>` for the following call signature.
+    const source = [
+      "type Plain = typeof value;",
+      "type Qualified = typeof Namespace.value;",
+      "type Current = typeof this;",
+      "type Generic = typeof factory<Input>;",
+      "interface Boundary {",
+      "  (value: Input): typeof value",
+      "  <T>(): void",
+      "}",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const [plain, qualified, current, generic, boundary] = result.program.body;
+    const queries = [plain, qualified, current, generic].map(alias => alias.typeAnnotation);
+    expect(queries).toMatchObject([
+      {
+        type: "TSTypeQuery",
+        exprName: { type: "Identifier", name: "value" },
+      },
+      {
+        type: "TSTypeQuery",
+        exprName: {
+          type: "TSQualifiedName",
+          left: { type: "Identifier", name: "Namespace" },
+          right: { type: "Identifier", name: "value" },
+        },
+      },
+      {
+        type: "TSTypeQuery",
+        exprName: { type: "ThisExpression" },
+      },
+      {
+        type: "TSTypeQuery",
+        exprName: { type: "Identifier", name: "factory" },
+        typeArguments: {
+          type: "TSTypeParameterInstantiation",
+          params: [{ type: "TSTypeReference", typeName: { name: "Input" } }],
+        },
+      },
+    ]);
+    expect(queries.slice(0, 3).every(query => !("typeArguments" in query))).toBe(true);
+    expect(queries.map(query => source.slice(query.start, query.end))).toEqual([
+      "typeof value",
+      "typeof Namespace.value",
+      "typeof this",
+      "typeof factory<Input>",
+    ]);
+    for (const query of queries) {
+      expect(query.range).toEqual([query.start, query.end]);
+      expect(query.exprName.range).toEqual([query.exprName.start, query.exprName.end]);
+    }
+    expect(source.slice(generic.typeAnnotation.typeArguments.start, generic.typeAnnotation.typeArguments.end))
+      .toBe("<Input>");
+    expect(generic.typeAnnotation.typeArguments.range).toEqual([
+      generic.typeAnnotation.typeArguments.start,
+      generic.typeAnnotation.typeArguments.end,
+    ]);
+
+    const [querySignature, genericSignature] = boundary.body.body;
+    expect([querySignature, genericSignature]).toMatchObject([
+      {
+        type: "TSCallSignatureDeclaration",
+        returnType: {
+          typeAnnotation: {
+            type: "TSTypeQuery",
+            exprName: { name: "value" },
+          },
+        },
+      },
+      {
+        type: "TSCallSignatureDeclaration",
+        typeParameters: {
+          params: [{ name: { name: "T" } }],
+        },
+        returnType: { typeAnnotation: { type: "TSVoidKeyword" } },
+      },
+    ]);
+    const boundaryQuery = querySignature.returnType.typeAnnotation;
+    expect(boundaryQuery).not.toHaveProperty("typeArguments");
+    expect(source.slice(boundaryQuery.start, boundaryQuery.end)).toBe("typeof value");
+    expect(boundaryQuery.range).toEqual([boundaryQuery.start, boundaryQuery.end]);
+  });
+
   it("materializes TypeScript property signatures without annotations", () => {
     const source = [
       "interface Shape {",

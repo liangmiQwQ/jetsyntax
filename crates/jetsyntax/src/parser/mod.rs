@@ -5756,6 +5756,7 @@ impl<'s> Parser<'s> {
             TokenKind::LeftBrace => self.parse_type_literal(),
             TokenKind::Lt => self.parse_function_type(true),
             TokenKind::Infer => self.parse_infer_type(),
+            TokenKind::Typeof => self.parse_type_query(),
             kind if Self::is_type_reference_name(kind) => self.parse_type_reference(),
             _ => self.invalid_type(),
         }
@@ -5792,6 +5793,77 @@ impl<'s> Parser<'s> {
             Span::new(start, end),
             &[type_name.value(), type_arguments],
         )
+    }
+
+    fn parse_type_query(&mut self) -> Result<ParsedNode, ParseError> {
+        let operator = self.expect(TokenKind::Typeof);
+        let start = operator.start;
+        let mut expression_name = if self.current.kind == TokenKind::This {
+            let token = self.take();
+            self.node(NodeTag::THIS_EXPRESSION, Self::token_span(token), &[])?
+        } else {
+            self.parse_type_query_identifier(false, operator.end)?
+        };
+        while let Some(dot) = self.eat(TokenKind::Dot) {
+            let right = self.parse_type_query_identifier(true, dot.end)?;
+            expression_name = self.node(
+                NodeTag::TS_QUALIFIED_NAME,
+                Span::new(expression_name.span.start, right.span.end),
+                &[expression_name.value(), right.value()],
+            )?;
+        }
+
+        let (type_arguments, end) =
+            if !self.current.flags.line_break_before() && self.current.kind == TokenKind::Lt {
+                let (arguments, end, _, _) =
+                    self.parse_type_arguments_impl(self.options.semantic_errors)?;
+                (arguments, end)
+            } else {
+                (self.tape.push_null()?, expression_name.span.end)
+            };
+        self.node(
+            NodeTag::TS_TYPE_QUERY,
+            Span::new(start, end),
+            &[expression_name.value(), type_arguments],
+        )
+    }
+
+    fn parse_type_query_identifier(
+        &mut self,
+        after_dot: bool,
+        missing: u32,
+    ) -> Result<ParsedNode, ParseError> {
+        let valid = if after_dot {
+            Self::is_member_identifier_name(self.current.kind)
+                && !self.type_query_name_starts_statement()
+        } else {
+            self.current.kind != TokenKind::Import
+                && Self::is_member_identifier_name(self.current.kind)
+        };
+        if valid {
+            let token = self.take();
+            let name = self.tape.push_source_slice(Self::token_span(token))?;
+            return self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name]);
+        }
+
+        let diagnostic = if self.current.flags.line_break_before() && after_dot {
+            Span::new(missing, missing)
+        } else {
+            self.current_span()
+        };
+        self.error(diagnostic, "expected a type query name");
+        let name = self.tape.push_string("<invalid>")?;
+        self.node(NodeTag::IDENTIFIER, Span::new(missing, missing), &[name])
+    }
+
+    fn type_query_name_starts_statement(&self) -> bool {
+        if !self.current.flags.line_break_before() {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let follower = lookahead.next_token();
+        !follower.flags.line_break_before() && Self::is_member_identifier_name(follower.kind)
     }
 
     fn parse_const_assertion_type(&mut self) -> Result<ParsedNode, ParseError> {
@@ -6555,7 +6627,13 @@ impl<'s> Parser<'s> {
         diagnose_empty_type_arguments: bool,
     ) -> Result<ParsedNode, ParseError> {
         let start = self.current.start;
-        let mut expression = self.parse_type_identifier()?;
+        let starts_with_this = self.current.kind == TokenKind::This;
+        let mut expression = if starts_with_this {
+            let token = self.take();
+            self.node(NodeTag::THIS_EXPRESSION, Self::token_span(token), &[])?
+        } else {
+            self.parse_type_identifier()?
+        };
         while self.eat(TokenKind::Dot).is_some() {
             let right = self.parse_type_identifier()?;
             let computed = self.tape.push_bool(false)?;
@@ -6578,6 +6656,12 @@ impl<'s> Parser<'s> {
         } else {
             (self.tape.push_null()?, expression.span.end)
         };
+        if starts_with_this && self.options.semantic_errors {
+            self.error(
+                Span::new(start, expression.span.end),
+                "heritage clauses can only include identifiers or qualified names",
+            );
+        }
         self.node(
             tag,
             Span::new(start, end),

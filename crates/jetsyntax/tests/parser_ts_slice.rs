@@ -102,6 +102,224 @@ fn parses_typescript_type_families_without_diagnostics() {
 }
 
 #[test]
+fn parses_entity_name_type_queries_and_preserves_boundaries() {
+    let source = [
+        "type Plain = typeof value;",
+        "type Qualified = typeof namespace.value;",
+        "type Generic = typeof factory<Input>[];",
+        "type Self = typeof this;",
+        "type ThisMember = typeof this.value;",
+        "interface Boundary { (value: Input): typeof value",
+        "<T>(): void }",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse type queries");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid type-query tape");
+
+    assert_eq!(NodeTag::TS_TYPE_QUERY.get(), 587);
+    assert_eq!(node_fields(&parsed, NodeTag::TS_TYPE_QUERY).count(), 6);
+    assert!(node_fields(&parsed, NodeTag::TS_TYPE_QUERY).all(|fields| fields.len() == 2));
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_TYPE_QUERY)
+            .filter(|fields| matches!(
+                parsed.tape.value_at(fields[1]),
+                Ok(TapeValue::Node {
+                    tag: NodeTag::TS_TYPE_PARAMETER_INSTANTIATION,
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_TYPE_QUERY,
+        0,
+        NodeTag::TS_QUALIFIED_NAME,
+    );
+    assert_child_tag(&parsed, NodeTag::TS_TYPE_QUERY, 0, NodeTag::THIS_EXPRESSION);
+    assert_child_tag(&parsed, NodeTag::TS_ARRAY_TYPE, 0, NodeTag::TS_TYPE_QUERY);
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_CALL_SIGNATURE_DECLARATION).count(),
+        2
+    );
+
+    let spans = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_TYPE_QUERY,
+                span,
+                ..
+            } => Some(&source[span.start as usize..span.end as usize]),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spans,
+        [
+            "typeof value",
+            "typeof namespace.value",
+            "typeof factory<Input>",
+            "typeof this",
+            "typeof this.value",
+            "typeof value",
+        ]
+    );
+}
+
+#[test]
+fn recovers_invalid_type_query_operands_without_widening_javascript() {
+    let malformed = parse(
+        "type Parenthesized = typeof (value); type Numeric = typeof 1; type Trailing = typeof A.; type Shifted = typeof f<<T>() => T>;",
+        typescript_options(),
+    )
+    .expect("recover malformed type queries");
+    assert!(!malformed.diagnostics.is_empty());
+    malformed
+        .tape
+        .validate()
+        .expect("valid malformed type-query tape");
+
+    let leading_source = "type T = typeof (value);";
+    let leading = parse(leading_source, typescript_options()).expect("recover leading query name");
+    let query = leading
+        .tape
+        .validation()
+        .find_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_TYPE_QUERY,
+                span,
+                fields,
+                ..
+            } => Some((span, fields[0])),
+            _ => None,
+        })
+        .expect("recovered type query");
+    assert_eq!(
+        &leading_source[query.0.start as usize..query.0.end as usize],
+        "typeof"
+    );
+    assert!(matches!(
+        leading.tape.value_at(query.1),
+        Ok(TapeValue::Node { span, .. }) if span.start == query.0.end && span.end == query.0.end
+    ));
+
+    let empty_syntax = parse("type T = typeof factory<>;", typescript_options())
+        .expect("parse syntax-only empty query arguments");
+    assert!(empty_syntax.diagnostics.is_empty());
+    let empty_semantic = parse(
+        "type T = typeof factory<>;",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("diagnose semantic empty query arguments");
+    assert!(
+        empty_semantic
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "type argument list cannot be empty")
+    );
+
+    let babel_recovery = parse(
+        "interface A extends this.B {} type T = typeof var.bar;",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover invalid this heritage beside a valid query");
+    assert_eq!(babel_recovery.diagnostics.len(), 1);
+    assert_eq!(
+        babel_recovery.diagnostics[0].message,
+        "heritage clauses can only include identifiers or qualified names"
+    );
+    assert_child_tag(
+        &babel_recovery,
+        NodeTag::TS_INTERFACE_HERITAGE,
+        0,
+        NodeTag::MEMBER_EXPRESSION,
+    );
+    assert_child_tag(
+        &babel_recovery,
+        NodeTag::MEMBER_EXPRESSION,
+        0,
+        NodeTag::THIS_EXPRESSION,
+    );
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "typeof value;",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse JavaScript typeof expression");
+        assert!(parsed.diagnostics.is_empty(), "{language:?}");
+        assert_eq!(node_fields(&parsed, NodeTag::TS_TYPE_QUERY).count(), 0);
+        assert_eq!(node_fields(&parsed, NodeTag::UNARY_EXPRESSION).count(), 1);
+    }
+}
+
+#[test]
+fn recovers_missing_type_query_names_without_consuming_boundaries() {
+    for source in [
+        "type T = typeof A.; type U = string;",
+        "type T = typeof A.\ntype U = string;",
+        "type T = typeof A.\nB C; type U = string;",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover missing query name");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid boundary-recovery tape");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_TYPE_ALIAS_DECLARATION).count(),
+            2,
+            "{source}"
+        );
+        let query_span = parsed
+            .tape
+            .validation()
+            .find_map(|record| match record.expect("valid record").value {
+                TapeValue::Node {
+                    tag: NodeTag::TS_TYPE_QUERY,
+                    span,
+                    ..
+                } => Some(span),
+                _ => None,
+            })
+            .expect("type query");
+        assert_eq!(
+            &source[query_span.start as usize..query_span.end as usize],
+            "typeof A.",
+            "{source}"
+        );
+    }
+
+    let multiline = parse(
+        "type T = typeof A.\nB; type U = string;",
+        typescript_options(),
+    )
+    .expect("parse multiline qualified query");
+    assert!(
+        multiline.diagnostics.is_empty(),
+        "{:#?}",
+        multiline.diagnostics
+    );
+    assert_eq!(
+        node_fields(&multiline, NodeTag::TS_TYPE_ALIAS_DECLARATION).count(),
+        2
+    );
+}
+
+#[test]
 fn parses_untyped_property_signatures_and_type_member_separators() {
     let source = [
         "interface Shape {",
