@@ -5846,7 +5846,68 @@ impl<'s> Parser<'s> {
         readonly: bool,
         in_interface: bool,
     ) -> Result<ParsedNode, ParseError> {
-        self.expect(TokenKind::LeftBracket);
+        let left_bracket = self.expect(TokenKind::LeftBracket);
+        let mut parameters = Vec::new();
+        let mut trailing_comma = None;
+        while !matches!(self.current.kind, TokenKind::RightBracket | TokenKind::Eof) {
+            parameters.push(self.parse_index_signature_parameter(in_interface)?.value());
+            let Some(comma) = self.eat(TokenKind::Comma) else {
+                break;
+            };
+            if self.current.kind == TokenKind::RightBracket {
+                trailing_comma = Some(comma);
+                break;
+            }
+        }
+        let bracket_end = self.expect(TokenKind::RightBracket).end;
+        if self.options.semantic_errors {
+            if parameters.len() != 1 {
+                self.error(
+                    Span::new(left_bracket.start, bracket_end),
+                    "an index signature must have exactly one parameter",
+                );
+            }
+            if let Some(comma) = trailing_comma {
+                self.error(
+                    Self::token_span(comma),
+                    "an index signature parameter cannot have a trailing comma",
+                );
+            }
+        }
+        let (type_annotation, end) = if self.eat(TokenKind::Colon).is_some() {
+            let annotation = self.parse_type_annotation()?;
+            (annotation.value(), annotation.span.end)
+        } else {
+            (self.tape.push_null()?, bracket_end)
+        };
+        let parameters = self.tape.push_list(&parameters)?;
+        let readonly = self.tape.push_bool(readonly)?;
+        let static_member = self.tape.push_bool(false)?;
+        self.node(
+            NodeTag::TS_INDEX_SIGNATURE,
+            Span::new(start, end),
+            &[parameters, type_annotation, readonly, static_member],
+        )
+    }
+
+    fn parse_index_signature_parameter(
+        &mut self,
+        in_interface: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let accessibility = if matches!(
+            self.current.kind,
+            TokenKind::Public | TokenKind::Protected | TokenKind::Private
+        ) && self
+            .typescript_index_accessibility_has_parameter_follower(in_interface)
+        {
+            Some(self.take())
+        } else {
+            None
+        };
+        let rest = self.eat(TokenKind::Ellipsis);
+        let parameter_start = accessibility
+            .or(rest)
+            .map_or(self.current.start, |token| token.start);
         let name_token = self.take();
         if !self.is_index_signature_parameter_name(name_token.kind, in_interface) {
             self.error(
@@ -5855,29 +5916,82 @@ impl<'s> Parser<'s> {
             );
         }
         let name = self.tape.push_source_slice(Self::token_span(name_token))?;
-        self.expect(TokenKind::Colon);
-        let parameter_type = self.parse_type_annotation()?;
-        let optional = self.tape.push_bool(false)?;
-        let parameter = self.node(
-            NodeTag::IDENTIFIER,
-            Span::new(name_token.start, parameter_type.span.end),
-            &[name, parameter_type.value(), optional],
-        )?;
-        let bracket_end = self.expect(TokenKind::RightBracket).end;
-        let (type_annotation, end) = if self.eat(TokenKind::Colon).is_some() {
-            let annotation = self.parse_type_annotation()?;
-            (annotation.value(), annotation.span.end)
+        let optional = self.eat(TokenKind::Question);
+        let annotation = if self.eat(TokenKind::Colon).is_some() {
+            Some(self.parse_type_annotation()?)
         } else {
-            (self.tape.push_null()?, bracket_end)
+            None
         };
-        let parameters = self.tape.push_list(&[parameter.value()])?;
-        let readonly = self.tape.push_bool(readonly)?;
-        let static_member = self.tape.push_bool(false)?;
-        self.node(
-            NodeTag::TS_INDEX_SIGNATURE,
-            Span::new(start, end),
-            &[parameters, type_annotation, readonly, static_member],
-        )
+        let initializer = self.eat(TokenKind::Eq);
+        if self.options.semantic_errors {
+            if let Some(token) = accessibility {
+                self.error(
+                    Self::token_span(token),
+                    "index signatures cannot have an accessibility modifier",
+                );
+            }
+            if let Some(token) = rest {
+                self.error(
+                    Self::token_span(token),
+                    "an index signature parameter cannot be a rest parameter",
+                );
+            }
+            if let Some(token) = optional {
+                self.error(
+                    Self::token_span(token),
+                    "an index signature parameter cannot be optional",
+                );
+            }
+            if annotation.is_none() {
+                self.error(
+                    Self::token_span(name_token),
+                    "an index signature parameter requires a type annotation",
+                );
+            }
+            if let Some(token) = initializer {
+                self.error(
+                    Self::token_span(token),
+                    "an index signature parameter cannot have an initializer",
+                );
+            }
+        }
+        let identifier = if annotation.is_some() || optional.is_some() {
+            let end = annotation.as_ref().map_or_else(
+                || optional.map_or(name_token.end, |token| token.end),
+                |node| node.span.end,
+            );
+            let annotation = match annotation {
+                Some(node) => node.value(),
+                None => self.tape.push_null()?,
+            };
+            let optional = self.tape.push_bool(optional.is_some())?;
+            self.node(
+                NodeTag::IDENTIFIER,
+                Span::new(name_token.start, end),
+                &[name, annotation, optional],
+            )?
+        } else {
+            self.node(NodeTag::IDENTIFIER, Self::token_span(name_token), &[name])?
+        };
+        let parameter = if initializer.is_some() {
+            let right = self.parse_assignment_expression(true)?;
+            self.node(
+                NodeTag::ASSIGNMENT_PATTERN,
+                Span::new(identifier.span.start, right.span.end),
+                &[identifier.value(), right.value()],
+            )?
+        } else {
+            identifier
+        };
+        if rest.is_some() {
+            self.node(
+                NodeTag::REST_ELEMENT,
+                Span::new(parameter_start, parameter.span.end),
+                &[parameter.value()],
+            )
+        } else {
+            Ok(parameter)
+        }
     }
 
     fn typescript_readonly_has_type_member_follower(&self) -> bool {
@@ -5915,9 +6029,57 @@ impl<'s> Parser<'s> {
         lookahead: &mut Lexer<'s>,
         in_interface: bool,
     ) -> bool {
-        let parameter = lookahead.next_token();
-        self.is_index_signature_parameter_name(parameter.kind, in_interface)
-            && lookahead.next_token().kind == TokenKind::Colon
+        let mut parameter = lookahead.next_token();
+        if parameter.kind == TokenKind::RightBracket {
+            return true;
+        }
+        if parameter.kind == TokenKind::Ellipsis {
+            parameter = lookahead.next_token();
+            if !self.is_index_signature_parameter_name(parameter.kind, in_interface) {
+                return false;
+            }
+            return matches!(
+                lookahead.next_token().kind,
+                TokenKind::Colon
+                    | TokenKind::Question
+                    | TokenKind::Comma
+                    | TokenKind::RightBracket
+                    | TokenKind::Eq
+            );
+        }
+        if !self.is_index_signature_parameter_name(parameter.kind, in_interface) {
+            return false;
+        }
+        let mut follower = lookahead.next_token();
+        if matches!(
+            parameter.kind,
+            TokenKind::Public | TokenKind::Protected | TokenKind::Private
+        ) && self.is_index_signature_parameter_name(follower.kind, in_interface)
+        {
+            follower = lookahead.next_token();
+            return matches!(
+                follower.kind,
+                TokenKind::Colon
+                    | TokenKind::Question
+                    | TokenKind::Comma
+                    | TokenKind::RightBracket
+                    | TokenKind::Eq
+            );
+        }
+        match follower.kind {
+            TokenKind::Question => matches!(
+                lookahead.next_token().kind,
+                TokenKind::Colon | TokenKind::Comma | TokenKind::RightBracket
+            ),
+            TokenKind::Colon | TokenKind::Comma => true,
+            _ => false,
+        }
+    }
+
+    fn typescript_index_accessibility_has_parameter_follower(&self, in_interface: bool) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        self.is_index_signature_parameter_name(lookahead.next_token().kind, in_interface)
     }
 
     const fn is_index_signature_parameter_name(&self, kind: TokenKind, in_interface: bool) -> bool {

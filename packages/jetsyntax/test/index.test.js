@@ -959,6 +959,72 @@ describe("parse", () => {
     }
   });
 
+  it("recovers noncanonical index parameters by semantic mode", () => {
+    const source = [
+      "interface Recovered {",
+      "  [key: string,]: string;",
+      "  [...rest]: string;",
+      "  [public named: string]: number;",
+      "  [optional?: number]: unknown;",
+      "  [first: string, second: number]: boolean;",
+      "  []: never;",
+      "  [typedDefault: string = '']: number;",
+      "  [...restDefault = 1]: string;",
+      "  [public untyped]: number;",
+      "}",
+      "type Literal = { [untyped, other]: string }",
+    ].join("\n");
+    const syntax = parse(source, { lang: "ts" });
+
+    expect(syntax.diagnostics).toEqual([]);
+    const signatures = [
+      ...syntax.program.body[0].body.body,
+      ...syntax.program.body[1].typeAnnotation.members,
+    ];
+    expect(signatures.map(signature => signature.parameters.length)).toEqual([1, 1, 1, 1, 2, 0, 1, 1, 1, 2]);
+    expect(signatures[1].parameters[0]).toMatchObject({
+      type: "RestElement",
+      argument: { type: "Identifier", name: "rest" },
+    });
+    expect(signatures[3].parameters[0]).toMatchObject({
+      type: "Identifier",
+      name: "optional",
+      optional: true,
+      typeAnnotation: { typeAnnotation: { type: "TSNumberKeyword" } },
+    });
+    expect(signatures[6].parameters[0]).toMatchObject({
+      type: "AssignmentPattern",
+      left: { type: "Identifier", name: "typedDefault" },
+      right: { type: "Literal", value: "" },
+    });
+    expect(signatures[7].parameters[0]).toMatchObject({
+      type: "RestElement",
+      argument: {
+        type: "AssignmentPattern",
+        left: { type: "Identifier", name: "restDefault" },
+        right: { type: "Literal", value: 1 },
+      },
+    });
+    expect(signatures[8].parameters[0]).toMatchObject({ type: "Identifier", name: "untyped" });
+
+    const semantic = parse(source, { lang: "ts", semanticErrors: true });
+    expect(semantic.diagnostics).toEqual(expect.arrayContaining([
+      "an index signature parameter cannot have a trailing comma",
+      "an index signature parameter cannot be a rest parameter",
+      "index signatures cannot have an accessibility modifier",
+      "an index signature parameter cannot be optional",
+      "an index signature parameter requires a type annotation",
+      "an index signature parameter cannot have an initializer",
+      "an index signature must have exactly one parameter",
+    ]));
+    expect(JSON.stringify(semantic.program).match(/TSIndexSignature/gu)).toHaveLength(10);
+
+    for (const computed of ["[plain]", "[assigned = 0]", "[x ? y : z]"]) {
+      const result = parse(`type Computed = { ${computed}: number }`, { lang: "ts" });
+      expect(JSON.stringify(result.program), computed).not.toContain("TSIndexSignature");
+    }
+  });
+
   it("materializes untyped TypeScript signature parameters", () => {
     const source = [
       "type Callback = (this, value, optional?) => void;",

@@ -370,7 +370,7 @@ fn distinguishes_index_signatures_from_mapped_and_computed_members() {
     let source = [
         "type Mapped<T> = { readonly [yield in keyof T]?: T[string] };",
         "type MultilineMapped<T> = { readonly\n[Key in keyof T]: T[Key] };",
-        "type Computed = { [Symbol.iterator](): Iterator<unknown> };",
+        "type Computed = { [Symbol.iterator](): Iterator<unknown>; [plain]: number; [assigned = 0]: number; [x ? y : z]: number };",
     ]
     .join("\n");
     let parsed = parse(&source, typescript_options()).expect("recover type-member ambiguities");
@@ -436,6 +436,76 @@ fn distinguishes_index_signatures_from_mapped_and_computed_members() {
         assert!(!parsed.diagnostics.is_empty(), "{language:?}");
         assert_eq!(node_fields(&parsed, NodeTag::TS_INDEX_SIGNATURE).count(), 0);
     }
+}
+
+#[test]
+fn recovers_noncanonical_index_parameters_by_semantic_mode() {
+    let source = [
+        "interface Recovered {",
+        "  [key: string,]: string;",
+        "  [...rest]: string;",
+        "  [public named: string]: number;",
+        "  [optional?: number]: unknown;",
+        "  [first: string, second: number]: boolean;",
+        "  []: never;",
+        "  [typedDefault: string = '']: number;",
+        "  [...restDefault = 1]: string;",
+        "  [public untyped]: number;",
+        "}",
+        "type Literal = { [untyped, other]: string }",
+    ]
+    .join("\n");
+    let syntax = parse(&source, typescript_options()).expect("recover index parameters");
+
+    assert!(syntax.diagnostics.is_empty(), "{:#?}", syntax.diagnostics);
+    syntax.tape.validate().expect("valid recovered index tape");
+    let signatures = node_fields(&syntax, NodeTag::TS_INDEX_SIGNATURE).collect::<Vec<_>>();
+    assert_eq!(signatures.len(), 10);
+    let parameter_counts = signatures
+        .iter()
+        .map(|fields| match syntax.tape.value_at(fields[0]) {
+            Ok(TapeValue::List { items, .. }) => items.len(),
+            value => panic!("expected parameter list, got {value:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(parameter_counts, [1, 1, 1, 1, 2, 0, 1, 1, 1, 2]);
+    assert_eq!(node_fields(&syntax, NodeTag::REST_ELEMENT).count(), 2);
+    assert_eq!(node_fields(&syntax, NodeTag::ASSIGNMENT_PATTERN).count(), 2);
+
+    let semantic = parse(
+        &source,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("diagnose invalid index parameters");
+    for message in [
+        "an index signature parameter cannot have a trailing comma",
+        "an index signature parameter cannot be a rest parameter",
+        "index signatures cannot have an accessibility modifier",
+        "an index signature parameter cannot be optional",
+        "an index signature parameter requires a type annotation",
+        "an index signature parameter cannot have an initializer",
+        "an index signature must have exactly one parameter",
+    ] {
+        assert!(
+            semantic
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == message),
+            "{message}: {:#?}",
+            semantic.diagnostics
+        );
+    }
+    semantic
+        .tape
+        .validate()
+        .expect("valid semantically diagnosed index tape");
+    assert_eq!(
+        node_fields(&semantic, NodeTag::TS_INDEX_SIGNATURE).count(),
+        10
+    );
 }
 
 #[test]
