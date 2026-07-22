@@ -405,6 +405,9 @@ impl<'s> Parser<'s> {
             {
                 self.parse_module_declaration()
             }
+            TokenKind::Identifier if self.starts_typescript_global_augmentation() => {
+                self.parse_typescript_contextual_global_augmentation()
+            }
             TokenKind::Abstract if self.starts_typescript_abstract_class_declaration() => {
                 self.parse_typescript_abstract_class_declaration(false)
             }
@@ -5960,15 +5963,35 @@ impl<'s> Parser<'s> {
                 "global augmentations are only allowed at the top level of a namespace or module",
             );
         }
+        self.parse_typescript_global_augmentation(start, true)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_contextual_global_augmentation(
+        &mut self,
+    ) -> Result<ParsedNode, ParseError> {
+        self.parse_typescript_global_augmentation(self.current.start, false)
+    }
+
+    fn parse_typescript_global_augmentation(
+        &mut self,
+        start: u32,
+        explicitly_declared: bool,
+    ) -> Result<ParsedNode, ParseError> {
         let global = self.take();
         let id = self.typescript_module_identifier_from_token(global)?;
         let previous_grammar = self.context.grammar();
-        self.context
-            .set_grammar(previous_grammar.with_ambient(true).with_strict(false));
+        if explicitly_declared {
+            self.context
+                .set_grammar(previous_grammar.with_ambient(true).with_strict(false));
+        }
         let body = self.parse_typescript_global_module_block();
-        self.context.set_grammar(previous_grammar);
+        if explicitly_declared {
+            self.context.set_grammar(previous_grammar);
+        }
         let body = body?;
-        let declare = self.tape.push_bool(true)?;
+        let declare = self.tape.push_bool(explicitly_declared)?;
         let kind = self.tape.push_u32(2)?;
         self.node(
             NodeTag::TS_MODULE_DECLARATION,
@@ -6706,6 +6729,19 @@ impl<'s> Parser<'s> {
         let mut lookahead = Lexer::new(self.source);
         lookahead.set_position(self.current.end as usize);
         !lookahead.next_token().flags.line_break_before()
+    }
+
+    fn starts_typescript_global_augmentation(&self) -> bool {
+        if !self.options.language.is_typescript()
+            || self.current.kind != TokenKind::Identifier
+            || self.current.flags.escaped()
+            || !self.identifier_name_matches(self.current_span(), "global", false)
+        {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        lookahead.next_token().kind == TokenKind::LeftBrace
     }
 
     fn is_typescript_namespace_binding_identifier(&self, token: Token) -> bool {

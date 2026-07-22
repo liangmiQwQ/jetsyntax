@@ -1055,6 +1055,157 @@ fn parses_explicit_ambient_external_modules_and_global_augmentations() {
 }
 
 #[test]
+fn contextual_global_augmentations_preserve_their_ambient_grammar() {
+    let source = [
+        "let topLevel: string; global\n{ let topLevel: number; function topImplementation() {} class Top { method() {} field = 1; } let topInitializer = 1; }",
+        r#"declare module "ambient" { let nested: string; global { let nested: number; function ambientImplementation() {} class Ambient { method() {} field = 1; } let ambientInitializer = 1; } }"#,
+        "namespace Ordinary { global { function namespaceImplementation() {} class Nested { method() {} field = 1; } let namespaceInitializer = 1; } }",
+        "declare namespace Ambient { global {} }",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse contextual global augmentations");
+
+    for message in ["duplicate binding `topLevel`", "duplicate binding `nested`"] {
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == message),
+            "{message}: {:#?}",
+            parsed.diagnostics
+        );
+    }
+    let ambient_messages = [
+        "function implementations are not allowed in ambient contexts",
+        "class method implementations are not allowed in ambient contexts",
+        "class property initializers are not allowed in ambient contexts",
+        "initializers are not allowed in ambient contexts",
+    ];
+    for message in ambient_messages {
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == message),
+            "{message}: {:#?}",
+            parsed.diagnostics
+        );
+    }
+    assert_eq!(
+        parsed
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| ambient_messages.contains(&diagnostic.message.as_ref()))
+            .count(),
+        ambient_messages.len(),
+        "{:#?}",
+        parsed.diagnostics
+    );
+    parsed
+        .tape
+        .validate()
+        .expect("valid contextual global tape");
+    let globals = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_MODULE_DECLARATION,
+                fields,
+                ..
+            } if matches!(parsed.tape.value_at(fields[3]), Ok(TapeValue::U32(2))) => {
+                Some(fields.to_vec())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(globals.len(), 4);
+    for fields in globals {
+        assert!(matches!(
+            parsed.tape.value_at(fields[2]),
+            Ok(TapeValue::Bool(false))
+        ));
+        assert!(matches!(
+            parsed.tape.value_at(fields[0]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::IDENTIFIER,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parsed.tape.value_at(fields[1]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::TS_MODULE_BLOCK,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn parses_contextual_global_augmentations_in_all_typescript_statement_scopes() {
+    let placed = parse(
+        "function f() { global {} } { global {} } declare global { global {} }",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse contextual global in nested statement scopes");
+    assert!(placed.diagnostics.is_empty(), "{:#?}", placed.diagnostics);
+    let global_declare_fields = node_fields(&placed, NodeTag::TS_MODULE_DECLARATION)
+        .filter_map(|fields| {
+            matches!(placed.tape.value_at(fields[3]), Ok(TapeValue::U32(2))).then_some(fields[2])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(global_declare_fields.len(), 4);
+    assert_eq!(
+        global_declare_fields
+            .iter()
+            .filter(|field| matches!(placed.tape.value_at(**field), Ok(TapeValue::Bool(true))))
+            .count(),
+        1
+    );
+
+    for source in [r"gl\u006fbal {}", "global;", "global\n;"] {
+        let recovered = parse(source, typescript_options()).expect("recover contextual global");
+        assert_eq!(
+            node_fields(&recovered, NodeTag::TS_MODULE_DECLARATION).count(),
+            0,
+            "{source}"
+        );
+    }
+
+    for options in [
+        ParseOptions::default(),
+        ParseOptions {
+            language: Language::JavaScriptJsx,
+            ..ParseOptions::default()
+        },
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    ] {
+        let recovered = parse("global {}", options).expect("recover excluded contextual global");
+        assert_eq!(
+            node_fields(&recovered, NodeTag::TS_MODULE_DECLARATION).count(),
+            0
+        );
+    }
+}
+
+#[test]
 fn recovers_ambient_module_heads_without_broadening_contextual_syntax() {
     let legacy = parse("declare module Legacy.Deep {}", typescript_options())
         .expect("parse legacy ambient internal module");

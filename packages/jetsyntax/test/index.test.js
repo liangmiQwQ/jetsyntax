@@ -1741,6 +1741,76 @@ describe("parse", () => {
     }
   });
 
+  it("materializes contextual global augmentations with transparent bindings", () => {
+    const source = [
+      "let topLevel: string; global\n{ let topLevel: number; function topImplementation() {} class Top { method() {} field = 1; } let topInitializer = 1; }",
+      "declare module \"ambient\" { let nested: string; global { let nested: number; function ambientImplementation() {} class Ambient { method() {} field = 1; } let ambientInitializer = 1; } }",
+      "namespace Ordinary { global { function namespaceImplementation() {} class Nested { method() {} field = 1; } let namespaceInitializer = 1; } }",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", semanticErrors: true, range: true });
+
+    const ambientDiagnostics = [
+      "function implementations are not allowed in ambient contexts",
+      "class method implementations are not allowed in ambient contexts",
+      "class property initializers are not allowed in ambient contexts",
+      "initializers are not allowed in ambient contexts",
+    ];
+    expect(result.diagnostics).toEqual(expect.arrayContaining([
+      "duplicate binding `topLevel`",
+      "duplicate binding `nested`",
+      ...ambientDiagnostics,
+    ]));
+    expect(result.diagnostics.filter(diagnostic => ambientDiagnostics.includes(diagnostic))).toEqual(
+      ambientDiagnostics,
+    );
+    const topLevelGlobal = result.program.body[1];
+    const externalGlobal = result.program.body[2].body.body[1];
+    const namespaceGlobal = result.program.body[3].body.body[0];
+    for (const declaration of [topLevelGlobal, externalGlobal, namespaceGlobal]) {
+      expect(declaration).toMatchObject({
+        type: "TSModuleDeclaration",
+        id: { type: "Identifier", name: "global" },
+        body: { type: "TSModuleBlock" },
+        declare: false,
+        kind: "global",
+      });
+      expect(declaration.range).toEqual([declaration.start, declaration.end]);
+    }
+
+    const placed = parse(
+      "function f() { global {} } { global {} } declare global { global {} }",
+      { lang: "ts", semanticErrors: true },
+    );
+    expect(placed.diagnostics).toEqual([]);
+    expect([
+      placed.program.body[0].body.body[0],
+      placed.program.body[1].body[0],
+      placed.program.body[2],
+      placed.program.body[2].body.body[0],
+    ]).toMatchObject([
+      { type: "TSModuleDeclaration", kind: "global", declare: false },
+      { type: "TSModuleDeclaration", kind: "global", declare: false },
+      { type: "TSModuleDeclaration", kind: "global", declare: true },
+      { type: "TSModuleDeclaration", kind: "global", declare: false },
+    ]);
+
+    for (const source of ["gl\\u006fbal {}", "global;", "global\n;"]) {
+      const recovered = parse(source, { lang: "ts" });
+      expect(JSON.stringify(recovered.program), source).not.toContain("TSModuleDeclaration");
+    }
+
+    for (
+      const options of [
+        { lang: "js" },
+        { lang: "jsx" },
+        { typescriptJsCompatibility: true },
+      ]
+    ) {
+      const recovered = parse("global {}", options);
+      expect(JSON.stringify(recovered.program)).not.toContain("TSModuleDeclaration");
+    }
+  });
+
   it("recovers ambient module heads and preserves scope-specific diagnostics", () => {
     const semanticLegacy = parse("declare module Legacy.Deep {}", {
       lang: "ts",

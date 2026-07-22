@@ -1283,14 +1283,14 @@ describe("decodeTape", () => {
     ]);
     const encodedExternal = externalTape.finish(external);
 
-    const globalSource = "declare global {}";
+    const globalSource = "global {}";
     const globalTape = new HandcraftedTape();
-    const globalId = globalTape.node(2, 8, 14, [globalTape.source(8, 14)]);
-    const body = globalTape.node(540, 15, globalSource.length, [globalTape.list([])]);
+    const globalId = globalTape.node(2, 0, 6, [globalTape.source(0, 6)]);
+    const body = globalTape.node(540, 7, globalSource.length, [globalTape.list([])]);
     const global = globalTape.node(527, 0, globalSource.length, [
       globalId,
       body,
-      globalTape.boolean(true),
+      globalTape.boolean(false),
       globalTape.integer(2),
     ]);
     const encodedGlobal = globalTape.finish(global);
@@ -1308,7 +1308,7 @@ describe("decodeTape", () => {
         type: "TSModuleDeclaration",
         id: { type: "Identifier", name: "global" },
         body: { type: "TSModuleBlock", body: [] },
-        declare: true,
+        declare: false,
         kind: "global",
         range: [0, globalSource.length],
       });
