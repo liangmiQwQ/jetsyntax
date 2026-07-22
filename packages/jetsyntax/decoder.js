@@ -194,6 +194,7 @@ for (
     [575, ["VariableDeclaration", ["declarations", "kind"]]],
     [576, ["TSAbstractMethodDefinition", ["key", "value", "kind", "computed", "static"]]],
     [577, ["TSAbstractPropertyDefinition", ["key", "value", "computed", "static", "typeAnnotation"]]],
+    [578, ["TSDeclareFunction", ["id", "params", "generator", "async", "returnType", "typeParameters", "body"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -1077,6 +1078,9 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.declare = false;
         if (fields[4] !== null) node.returnType = fields[4];
         return node;
+      case 578:
+        node.declare = true;
+        if (fields[6] !== null) node.body = fields[6];
       case 572:
         node.id = fields[0];
         node.params = array(fields[1], tag);

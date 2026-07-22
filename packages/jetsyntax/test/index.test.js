@@ -1032,7 +1032,6 @@ describe("parse", () => {
       const [source, options] of [
         ["function predicate(value: unknown): value is string { return true; }", { lang: "ts" }],
         ["function assertion(value: unknown): asserts value {}", { lang: "ts" }],
-        ["declare function declared(): string;", { lang: "ts" }],
         ["function missing(): ; {}", { lang: "ts" }],
         ["function javascript(): string {}", { lang: "js" }],
       ]
@@ -1228,7 +1227,6 @@ describe("parse", () => {
     const result = parse(source, {
       lang: "ts",
       range: true,
-      semanticErrors: true,
       sourceType: "module",
     });
 
@@ -1610,6 +1608,134 @@ describe("parse", () => {
       const excluded = parse(source, options);
       expect(excluded.diagnostics, source).not.toEqual([]);
       expect(JSON.stringify(excluded.program), source).not.toContain("TSDeclareFunction");
+    }
+  });
+
+  it("materializes explicit TypeScript declared functions", () => {
+    const source = [
+      "declare function plain(value: string): void;",
+      "declare function* generated<T>(...values: T[],): Iterable<T>",
+      "declare async function asynchronous(): Promise<void>;",
+      "declare async function* asynchronousGenerator<T>(): AsyncIterable<T>;",
+      "function outer() { declare function nested(): void; }",
+      "export declare function exported<T>(): T;",
+      "function overload(): void;",
+      "declare function eof(): void",
+    ].join("\n");
+    const result = parse(source, {
+      lang: "ts",
+      range: true,
+      sourceType: "module",
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    const explicit = [
+      result.program.body[0],
+      result.program.body[1],
+      result.program.body[2],
+      result.program.body[3],
+      result.program.body[4].body.body[0],
+      result.program.body[5].declaration,
+      result.program.body[7],
+    ];
+    for (const declaration of explicit) {
+      expect(declaration).toMatchObject({
+        type: "TSDeclareFunction",
+        declare: true,
+      });
+      expect(source.slice(declaration.start, declaration.start + 7)).toBe("declare");
+      expect(declaration.range).toEqual([declaration.start, declaration.end]);
+    }
+    expect(result.program.body[1]).toMatchObject({ generator: true, async: false });
+    expect(result.program.body[2]).toMatchObject({ generator: false, async: true });
+    expect(result.program.body[3]).toMatchObject({ generator: true, async: true });
+    expect(result.program.body[5]).toMatchObject({
+      type: "ExportNamedDeclaration",
+      exportKind: "type",
+    });
+    expect(result.program.body[6]).toMatchObject({
+      type: "TSDeclareFunction",
+      id: { name: "overload" },
+    });
+    expect(result.program.body[6]).not.toHaveProperty("declare");
+  });
+
+  it("keeps explicit declared functions contextual and restores ambient grammar", () => {
+    for (
+      const source of [
+        "declare\nfunction separated(): void;",
+        "declare async\nfunction separated(): void;",
+        "declar\\u0065 function escaped(): void;",
+        "declare f\\u0075nction escaped(): void;",
+        "declare as\\u0079nc function escaped(): void;",
+        "export declare\nfunction separated(): void;",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts", sourceType: "module" });
+      expect(JSON.stringify(result.program), source).not.toContain("\"declare\":true");
+    }
+
+    for (const lang of ["js", "jsx"]) {
+      const result = parse("declare function excluded(): void;", { lang });
+      expect(result.diagnostics, lang).not.toEqual([]);
+      expect(JSON.stringify(result.program), lang).not.toContain("\"declare\":true");
+    }
+    const compatibility = parse("declare function excluded(): void;", {
+      typescriptJsCompatibility: true,
+    });
+    expect(compatibility.diagnostics).not.toEqual([]);
+    expect(JSON.stringify(compatibility.program)).not.toContain("\"declare\":true");
+
+    const recovered = parse(
+      "declare function initialized(value = 1): void; declare function implemented() {} function ordinary() {}",
+      { lang: "ts", semanticErrors: true },
+    );
+    expect(recovered.diagnostics).toHaveLength(2);
+    expect(recovered.program.body).toMatchObject([
+      { type: "TSDeclareFunction", declare: true },
+      { type: "TSDeclareFunction", declare: true, body: { type: "BlockStatement" } },
+      { type: "FunctionDeclaration", body: { type: "BlockStatement" } },
+    ]);
+
+    const invalidModifiers = parse(
+      "declare async function asynchronous(): void; declare function* generated(): void; declare async function* both(): void;",
+      { lang: "ts", semanticErrors: true },
+    );
+    expect(invalidModifiers.diagnostics).toHaveLength(4);
+    expect(invalidModifiers.diagnostics.filter((diagnostic) => diagnostic.includes("async functions"))).toHaveLength(2);
+    expect(invalidModifiers.diagnostics.filter((diagnostic) => diagnostic.includes("generators"))).toHaveLength(2);
+
+    const ambientNames = parse("declare function eval(arguments: unknown): void;", {
+      lang: "ts",
+      semanticErrors: true,
+      sourceType: "module",
+    });
+    expect(ambientNames.diagnostics).toEqual([]);
+    const restorationSource = "declare function eval(arguments: unknown): void; function arguments() {}";
+    const restoration = parse(restorationSource, {
+      lang: "ts",
+      semanticErrors: true,
+      sourceType: "module",
+    });
+    expect(restoration.diagnostics).not.toEqual([]);
+  });
+
+  it("permits rest trailing commas only in TypeScript signatures", () => {
+    for (
+      const source of [
+        "declare function explicit(...values: unknown[], );",
+        "function overload(...values: unknown[], ): void;",
+      ]
+    ) {
+      expect(parse(source, { lang: "ts", semanticErrors: true }).diagnostics, source).toEqual([]);
+    }
+    for (
+      const [source, options] of [
+        ["function runtime(...values: unknown[], ) {}", { lang: "ts", semanticErrors: true }],
+        ["function javascript(...values, ) {}", { semanticErrors: true }],
+      ]
+    ) {
+      expect(parse(source, options).diagnostics, source).not.toEqual([]);
     }
   });
 

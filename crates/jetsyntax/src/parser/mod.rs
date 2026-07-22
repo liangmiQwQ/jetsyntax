@@ -161,6 +161,13 @@ enum MethodBodyPolicy {
 struct FunctionFlags {
     generator: bool,
     asynchronous: bool,
+    explicit_typescript_declare: bool,
+}
+
+#[derive(Clone, Copy)]
+enum TypeScriptDeclareDeclarationKind {
+    Variable,
+    Function { asynchronous: bool },
 }
 
 #[derive(Clone, Copy)]
@@ -379,9 +386,7 @@ impl<'s> Parser<'s> {
             TokenKind::Var | TokenKind::Let | TokenKind::Const => {
                 self.parse_variable_declaration(true)
             }
-            TokenKind::Declare if self.starts_typescript_declare_variable_declaration() => {
-                self.parse_typescript_declare_variable_declaration()
-            }
+            TokenKind::Declare => self.parse_typescript_declare_or_expression_statement(),
             TokenKind::Type if self.options.language.is_typescript() => {
                 self.parse_type_alias_declaration()
             }
@@ -511,11 +516,63 @@ impl<'s> Parser<'s> {
         Ok(declaration)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_declare_or_expression_statement(
+        &mut self,
+    ) -> Result<ParsedNode, ParseError> {
+        let Some(kind) = self.typescript_declare_declaration_kind() else {
+            return self.parse_expression_or_labeled_statement();
+        };
+        self.parse_typescript_declare_declaration(kind)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_declare_declaration(
+        &mut self,
+        kind: TypeScriptDeclareDeclarationKind,
+    ) -> Result<ParsedNode, ParseError> {
+        match kind {
+            TypeScriptDeclareDeclarationKind::Variable => {
+                self.parse_typescript_declare_variable_declaration()
+            }
+            TypeScriptDeclareDeclarationKind::Function { asynchronous } => {
+                self.parse_typescript_declare_function(asynchronous)
+            }
+        }
+    }
+
     fn parse_function(
         &mut self,
         declaration: bool,
         asynchronous: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        // Const specialization keeps explicit-only ambient handling out of ordinary functions.
+        self.parse_function_impl::<false>(declaration, asynchronous, 0)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_declare_function(
+        &mut self,
+        asynchronous: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Declare).start;
+        let previous_grammar = self.context.grammar();
+        self.context
+            .set_grammar(previous_grammar.with_ambient(true).with_strict(false));
+        let declaration = self.parse_function_impl::<true>(true, asynchronous, start);
+        self.context.set_grammar(previous_grammar);
+        declaration
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn parse_function_impl<const EXPLICIT_TYPESCRIPT_DECLARE: bool>(
+        &mut self,
+        declaration: bool,
+        asynchronous: bool,
+        declaration_start: u32,
     ) -> Result<ParsedNode, ParseError> {
         let start = if asynchronous {
             let start = self.expect(TokenKind::Async).start;
@@ -524,7 +581,11 @@ impl<'s> Parser<'s> {
         } else {
             self.expect(TokenKind::Function).start
         };
-        let generator = self.eat(TokenKind::Star).is_some();
+        let generator_token = self.eat(TokenKind::Star);
+        let generator = generator_token.is_some();
+        if self.options.semantic_errors && self.context.grammar().ambient() {
+            self.diagnose_ambient_function_modifiers(start, asynchronous, generator_token);
+        }
         let id = if Self::is_identifier_name(self.current.kind) {
             Some(if declaration {
                 let declaration_binding = self.context.function_declaration_binding_kind();
@@ -566,7 +627,8 @@ impl<'s> Parser<'s> {
         let params = self.parse_parameter_list()?;
         self.context
             .set_grammar(self.context.grammar().with_parameters(false));
-        self.diagnose_rest_parameter_trailing_comma(&params);
+        let rest_trailing_comma_span =
+            (params.has_rest && params.has_trailing_comma).then(|| self.current_span());
         self.expect(TokenKind::RightParen);
         let return_type = self.parse_function_return_type()?;
         let has_use_strict = self.current.kind == TokenKind::LeftBrace
@@ -585,16 +647,28 @@ impl<'s> Parser<'s> {
         {
             self.leave_function_context(previous_grammar);
             return self.node_typescript_declare_function(
-                Span::new(start, end),
+                Span::new(
+                    if EXPLICIT_TYPESCRIPT_DECLARE {
+                        declaration_start
+                    } else {
+                        start
+                    },
+                    end,
+                ),
                 id.map(ParsedNode::value),
                 params.value,
                 FunctionFlags {
                     generator,
                     asynchronous,
+                    explicit_typescript_declare: EXPLICIT_TYPESCRIPT_DECLARE,
                 },
                 return_type,
                 type_parameters,
+                None,
             );
+        }
+        if let Some(span) = rest_trailing_comma_span {
+            self.diagnose_rest_parameter_trailing_comma(&params, span);
         }
         if self.context.grammar().ambient()
             && self.options.semantic_errors
@@ -607,6 +681,29 @@ impl<'s> Parser<'s> {
         }
         let body = self.parse_block_statement()?;
         self.leave_function_context(previous_grammar);
+        let span = Span::new(
+            if EXPLICIT_TYPESCRIPT_DECLARE {
+                declaration_start
+            } else {
+                start
+            },
+            body.span.end,
+        );
+        if EXPLICIT_TYPESCRIPT_DECLARE {
+            return self.node_typescript_declare_function(
+                span,
+                id.map(ParsedNode::value),
+                params.value,
+                FunctionFlags {
+                    generator,
+                    asynchronous,
+                    explicit_typescript_declare: true,
+                },
+                return_type,
+                type_parameters,
+                Some(body.value()),
+            );
+        }
         let id = if let Some(id) = id {
             id.value()
         } else {
@@ -619,7 +716,6 @@ impl<'s> Parser<'s> {
         } else {
             NodeTag::FUNCTION_EXPRESSION
         };
-        let span = Span::new(start, body.span.end);
         // Field six remains the return type so existing annotated function tapes keep their shape.
         let mut fields = [
             id,
@@ -652,6 +748,29 @@ impl<'s> Parser<'s> {
 
     #[cold]
     #[inline(never)]
+    fn diagnose_ambient_function_modifiers(
+        &mut self,
+        start: u32,
+        asynchronous: bool,
+        generator_token: Option<Token>,
+    ) {
+        if asynchronous {
+            self.error(
+                Span::new(start, start + 5),
+                "async functions are not allowed in ambient contexts",
+            );
+        }
+        if let Some(star) = generator_token {
+            self.error(
+                Self::token_span(star),
+                "generators are not allowed in ambient contexts",
+            );
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn node_typescript_declare_function(
         &mut self,
         span: Span,
@@ -660,6 +779,7 @@ impl<'s> Parser<'s> {
         flags: FunctionFlags,
         return_type: Option<ValueRef>,
         type_parameters: Option<ValueRef>,
+        body: Option<ValueRef>,
     ) -> Result<ParsedNode, ParseError> {
         let id = if let Some(id) = id {
             id
@@ -678,18 +798,48 @@ impl<'s> Parser<'s> {
         } else {
             self.tape.push_null()?
         };
-        self.node(
-            NodeTag::TS_DECLARE_FUNCTION,
-            span,
-            &[
-                id,
-                params,
-                generator,
-                asynchronous,
-                return_type,
-                type_parameters,
-            ],
-        )
+        let (tag, node) = if flags.explicit_typescript_declare {
+            let body = if let Some(body) = body {
+                body
+            } else {
+                self.tape.push_null()?
+            };
+            let tag = NodeTag::TS_EXPLICIT_DECLARE_FUNCTION;
+            let node = self.tape.push_node(
+                tag,
+                span,
+                0,
+                &[
+                    id,
+                    params,
+                    generator,
+                    asynchronous,
+                    return_type,
+                    type_parameters,
+                    body,
+                ],
+            )?;
+            (tag, node)
+        } else {
+            let tag = NodeTag::TS_DECLARE_FUNCTION;
+            let node = self.tape.push_node(
+                tag,
+                span,
+                0,
+                &[
+                    id,
+                    params,
+                    generator,
+                    asynchronous,
+                    return_type,
+                    type_parameters,
+                ],
+            )?;
+            (tag, node)
+        };
+        self.last_node_tag = Some(tag);
+        self.last_assignment_target = AssignmentTargetType::Invalid;
+        Ok(ParsedNode { node, span })
     }
 
     #[cold]
@@ -758,12 +908,9 @@ impl<'s> Parser<'s> {
         }
     }
 
-    fn diagnose_rest_parameter_trailing_comma(&mut self, params: &ParsedParameterList) {
+    fn diagnose_rest_parameter_trailing_comma(&mut self, params: &ParsedParameterList, span: Span) {
         if self.reports_ecmascript_early_errors() && params.has_rest && params.has_trailing_comma {
-            self.error(
-                self.current_span(),
-                "rest parameter cannot have a trailing comma",
-            );
+            self.error(span, "rest parameter cannot have a trailing comma");
         }
     }
 
@@ -906,7 +1053,7 @@ impl<'s> Parser<'s> {
                 "setter must have exactly one non-rest parameter without a trailing comma",
             );
         }
-        self.diagnose_rest_parameter_trailing_comma(&params);
+        self.diagnose_rest_parameter_trailing_comma(&params, self.current_span());
         self.expect(TokenKind::RightParen);
         // Only canonical constructors enable direct super calls, and their return annotations remain unsupported.
         let return_type = if self.context.grammar().allow_super_call() {
@@ -2339,8 +2486,8 @@ impl<'s> Parser<'s> {
                 ],
             );
         }
-        if self.starts_typescript_declare_variable_declaration() {
-            let declaration = self.parse_typescript_declare_variable_declaration()?;
+        if let Some(kind) = self.typescript_declare_declaration_kind() {
+            let declaration = self.parse_typescript_declare_declaration(kind)?;
             let specifiers = self.tape.push_list(&[])?;
             let source = self.tape.push_null()?;
             let attributes = self.tape.push_list(&[])?;
@@ -4776,8 +4923,17 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_binding_default(&mut self, pattern: ParsedNode) -> Result<ParsedNode, ParseError> {
-        if self.eat(TokenKind::Eq).is_none() {
+        let Some(equals) = self.eat(TokenKind::Eq) else {
             return Ok(pattern);
+        };
+        if self.context.grammar().parameters()
+            && self.context.grammar().ambient()
+            && self.options.semantic_errors
+        {
+            self.error(
+                Self::token_span(equals),
+                "parameter initializers are not allowed in ambient contexts",
+            );
         }
         let right = self.parse_assignment_expression(true)?;
         self.node(
@@ -6012,27 +6168,39 @@ impl<'s> Parser<'s> {
             .is_some()
     }
 
-    fn starts_typescript_declare_variable_declaration(&self) -> bool {
+    #[cold]
+    #[inline(never)]
+    fn typescript_declare_declaration_kind(&self) -> Option<TypeScriptDeclareDeclarationKind> {
         if !self.options.language.is_typescript()
             || self.current.kind != TokenKind::Declare
             || self.current.flags.escaped()
         {
-            return false;
+            return None;
         }
         let mut lookahead = Lexer::new(self.source);
         lookahead.set_position(self.current.end as usize);
-        let kind = lookahead.next_token();
-        if kind.flags.line_break_before()
-            || kind.flags.escaped()
-            || !matches!(
-                kind.kind,
-                TokenKind::Var | TokenKind::Let | TokenKind::Const
-            )
-        {
-            return false;
+        // One cold lexer pass classifies every supported declare target without stacking probes.
+        let follower = lookahead.next_token();
+        if follower.flags.line_break_before() || follower.flags.escaped() {
+            return None;
         }
-        kind.kind != TokenKind::Const
-            || !matches!(lookahead.next_token(), token if token.kind == TokenKind::Enum && !token.flags.escaped())
+        match follower.kind {
+            TokenKind::Var | TokenKind::Let => Some(TypeScriptDeclareDeclarationKind::Variable),
+            TokenKind::Const if !matches!(lookahead.next_token(), token if token.kind == TokenKind::Enum && !token.flags.escaped()) => {
+                Some(TypeScriptDeclareDeclarationKind::Variable)
+            }
+            TokenKind::Function => Some(TypeScriptDeclareDeclarationKind::Function {
+                asynchronous: false,
+            }),
+            TokenKind::Async => {
+                let function = lookahead.next_token();
+                (function.kind == TokenKind::Function
+                    && !function.flags.line_break_before()
+                    && !function.flags.escaped())
+                .then_some(TypeScriptDeclareDeclarationKind::Function { asynchronous: true })
+            }
+            _ => None,
+        }
     }
 
     fn starts_typescript_abstract_class_declaration(&self) -> bool {

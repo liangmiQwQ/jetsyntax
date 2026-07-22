@@ -319,7 +319,6 @@ fn parses_top_level_typescript_function_signatures_and_restores_context() {
         &source,
         ParseOptions {
             source_kind: SourceKind::Module,
-            semantic_errors: true,
             ..typescript_options()
         },
     )
@@ -393,6 +392,241 @@ fn parses_nested_generator_async_and_asi_function_signatures() {
             .iter()
             .any(|fields| matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(true))))
     );
+}
+
+#[test]
+fn parses_explicit_declared_functions_on_cold_signature_records() {
+    let source = [
+        "declare function plain(value: string): void;",
+        "declare function* generated<T>(...values: T[],): Iterable<T>",
+        "declare async function asynchronous(): Promise<void>;",
+        "declare async function* asynchronousGenerator<T>(): AsyncIterable<T>;",
+        "function outer() { declare function nested(): void; }",
+        "export declare function exported<T>(): T;",
+        "function overload(): void;",
+        "declare function eof(): void",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            ..typescript_options()
+        },
+    )
+    .expect("parse explicit declared functions");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid explicit-declare-function tape");
+    let declarations = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node {
+                tag: NodeTag::TS_EXPLICIT_DECLARE_FUNCTION,
+                flags: 0,
+                span,
+                fields,
+                ..
+            } => Some((span, fields.to_vec())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 7);
+    assert_eq!(NodeTag::TS_EXPLICIT_DECLARE_FUNCTION.get(), 578);
+    assert!(declarations.iter().all(|(_, fields)| fields.len() == 7));
+    assert!(
+        declarations
+            .iter()
+            .all(|(_, fields)| { matches!(parsed.tape.value_at(fields[6]), Ok(TapeValue::Null)) })
+    );
+    assert!(declarations.iter().all(|(span, _)| {
+        source[span.start as usize..span.end as usize].starts_with("declare")
+    }));
+    assert!(parsed.tape.validation().any(|record| {
+        matches!(
+            record.expect("valid record").value,
+            TapeValue::Node {
+                tag: NodeTag::TS_DECLARE_FUNCTION,
+                flags: 0,
+                ..
+            }
+        )
+    }));
+    let export = first_node_fields(&parsed, NodeTag::EXPORT_NAMED_DECLARATION);
+    assert!(matches!(
+        parsed.tape.value_at(export[4]),
+        Ok(TapeValue::U32(1))
+    ));
+}
+
+#[test]
+fn keeps_explicit_declare_function_contextual_and_restores_ambient_grammar() {
+    for source in [
+        "declare\nfunction separated(): void;",
+        "declare async\nfunction separated(): void;",
+        "declar\\u0065 function escaped(): void;",
+        "declare f\\u0075nction escaped(): void;",
+        "declare as\\u0079nc function escaped(): void;",
+        "export declare\nfunction separated(): void;",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                ..typescript_options()
+            },
+        )
+        .expect("recover contextual declare function");
+        parsed.tape.validate().expect("valid contextual tape");
+        assert!(
+            parsed.tape.validation().all(|record| {
+                !matches!(
+                    record.expect("valid record").value,
+                    TapeValue::Node {
+                        tag: NodeTag::TS_EXPLICIT_DECLARE_FUNCTION,
+                        ..
+                    }
+                )
+            }),
+            "{source}"
+        );
+    }
+
+    let recovered = parse(
+        "declare function initialized(value = 1): void; declare function implemented() {} function ordinary() {}",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover invalid explicit declared functions");
+    recovered.tape.validate().expect("valid recovered tape");
+    assert_eq!(
+        recovered
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains("ambient contexts"))
+            .count(),
+        2,
+        "{:#?}",
+        recovered.diagnostics
+    );
+    let explicit =
+        node_fields(&recovered, NodeTag::TS_EXPLICIT_DECLARE_FUNCTION).collect::<Vec<_>>();
+    assert_eq!(explicit.len(), 2);
+    assert!(matches!(
+        recovered.tape.value_at(explicit[0][6]),
+        Ok(TapeValue::Null)
+    ));
+    assert!(matches!(
+        recovered.tape.value_at(explicit[1][6]),
+        Ok(TapeValue::Node {
+            tag: NodeTag::BLOCK_STATEMENT,
+            ..
+        })
+    ));
+    assert_eq!(
+        node_fields(&recovered, NodeTag::FUNCTION_DECLARATION).count(),
+        1
+    );
+
+    let restoration_source =
+        "declare function eval(arguments: unknown): void; function arguments() {}";
+    let ordinary_start = restoration_source
+        .find("function arguments")
+        .expect("ordinary function offset");
+    let restoration = parse(
+        restoration_source,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("restore strict module grammar after explicit declaration");
+    assert!(!restoration.diagnostics.is_empty());
+    assert!(
+        restoration
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.span.start as usize >= ordinary_start)
+    );
+}
+
+#[test]
+fn diagnoses_async_and_generator_modifiers_in_ambient_functions() {
+    let parsed = parse(
+        "declare async function asynchronous(): void; declare function* generated(): void; declare async function* both(): void;",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover invalid ambient function modifiers");
+    assert_eq!(parsed.diagnostics.len(), 4);
+    assert_eq!(
+        parsed
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains("async functions"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        parsed
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains("generators"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn permits_rest_trailing_commas_only_in_typescript_signatures() {
+    for source in [
+        "declare function explicit(...values: unknown[], );",
+        "function overload(...values: unknown[], ): void;",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("parse TypeScript signature trailing comma");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+    }
+
+    for (source, options) in [
+        (
+            "function runtime(...values: unknown[], ) {}",
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        ),
+        (
+            "function javascript(...values, ) {}",
+            ParseOptions {
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        ),
+    ] {
+        let parsed = parse(source, options).expect("recover runtime rest trailing comma");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+    }
 }
 
 #[test]
@@ -799,7 +1033,6 @@ fn limits_function_return_annotations_to_supported_typescript_bodies() {
             "assertion",
             "function assertText(value: unknown): asserts value { }",
         ),
-        ("declare", "declare function convert(): string;"),
         ("missing type", "function missing(): ; {}"),
     ];
     for (name, source) in cases {

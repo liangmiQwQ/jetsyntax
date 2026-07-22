@@ -696,6 +696,56 @@ describe("decodeTape", () => {
     expect(decoded).not.toHaveProperty("declare");
   });
 
+  it("decodes explicit TypeScript declare-function records", () => {
+    const source = "declare function f(): void;";
+    const tape = new HandcraftedTape();
+    const id = tape.node(2, 17, 18, [tape.string("f")]);
+    const signature = tape.node(578, 0, source.length, [
+      id,
+      tape.list([]),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.null(),
+      tape.null(),
+      tape.null(),
+    ]);
+    const encoded = tape.finish(signature);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(source, encoded)).toMatchObject({
+        type: "TSDeclareFunction",
+        declare: true,
+        id: { name: "f" },
+      });
+      expect(decode(source, encoded)).not.toHaveProperty("body");
+    }
+  });
+
+  it("decodes recovered bodies on explicit TypeScript declare functions", () => {
+    const source = "declare function f() {}";
+    const tape = new HandcraftedTape();
+    const id = tape.node(2, 17, 18, [tape.string("f")]);
+    const body = tape.node(6, 21, source.length, [tape.list([])]);
+    const signature = tape.node(578, 0, source.length, [
+      id,
+      tape.list([]),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.null(),
+      tape.null(),
+      body,
+    ]);
+    const encoded = tape.finish(signature);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(source, encoded)).toMatchObject({
+        type: "TSDeclareFunction",
+        declare: true,
+        body: { type: "BlockStatement", body: [] },
+      });
+    }
+  });
+
   it("decodes TypeScript declared-variable records", () => {
     const source = "declare var value;";
     const tape = new HandcraftedTape();
@@ -739,15 +789,17 @@ describe("decodeTape", () => {
   });
 
   it("rejects malformed TypeScript declare-function field counts", () => {
-    for (const count of [5, 7]) {
-      const tape = new HandcraftedTape();
-      const fields = Array.from({ length: count }, () => tape.null());
-      const encoded = tape.finish(tape.node(572, 0, 0, fields));
+    for (const [tag, expected] of [[572, 6], [578, 7]]) {
+      for (const count of [expected - 1, expected + 1]) {
+        const tape = new HandcraftedTape();
+        const fields = Array.from({ length: count }, () => tape.null());
+        const encoded = tape.finish(tape.node(tag, 0, 0, fields));
 
-      for (const decode of [decodeTape, decodeTrustedTape]) {
-        expect(() => decode("", encoded)).toThrow(
-          `invalid TSDeclareFunction field count ${count}; expected 6`,
-        );
+        for (const decode of [decodeTape, decodeTrustedTape]) {
+          expect(() => decode("", encoded)).toThrow(
+            `invalid TSDeclareFunction field count ${count}; expected ${expected}`,
+          );
+        }
       }
     }
   });
