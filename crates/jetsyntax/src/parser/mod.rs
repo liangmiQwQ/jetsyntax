@@ -168,6 +168,7 @@ struct FunctionFlags {
 enum TypeScriptDeclareDeclarationKind {
     Variable,
     Function { asynchronous: bool },
+    Enum { is_const: bool },
 }
 
 #[derive(Clone, Copy)]
@@ -539,6 +540,9 @@ impl<'s> Parser<'s> {
             }
             TypeScriptDeclareDeclarationKind::Function { asynchronous } => {
                 self.parse_typescript_declare_function(asynchronous)
+            }
+            TypeScriptDeclareDeclarationKind::Enum { is_const } => {
+                self.parse_typescript_declare_enum(is_const)
             }
         }
     }
@@ -5602,12 +5606,33 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_enum_declaration(&mut self, is_const: bool) -> Result<ParsedNode, ParseError> {
-        let start = if is_const {
+        // Const specialization keeps explicit-only metadata out of ordinary enum parsing.
+        self.parse_enum_declaration_impl::<false>(is_const, 0)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_declare_enum(&mut self, is_const: bool) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Declare).start;
+        self.parse_enum_declaration_impl::<true>(is_const, start)
+    }
+
+    fn parse_enum_declaration_impl<const EXPLICIT_TYPESCRIPT_DECLARE: bool>(
+        &mut self,
+        is_const: bool,
+        declaration_start: u32,
+    ) -> Result<ParsedNode, ParseError> {
+        let enum_start = if is_const {
             let start = self.expect(TokenKind::Const).start;
             self.expect(TokenKind::Enum);
             start
         } else {
             self.expect(TokenKind::Enum).start
+        };
+        let start = if EXPLICIT_TYPESCRIPT_DECLARE {
+            declaration_start
+        } else {
+            enum_start
         };
         let id = self.parse_binding_identifier(BindingKind::Type)?;
         let body_start = self.expect(TokenKind::LeftBrace).start;
@@ -5646,7 +5671,7 @@ impl<'s> Parser<'s> {
             &[members],
         )?;
         let is_const = self.tape.push_bool(is_const)?;
-        let declare = self.tape.push_bool(false)?;
+        let declare = self.tape.push_bool(EXPLICIT_TYPESCRIPT_DECLARE)?;
         self.node(
             NodeTag::TS_ENUM_DECLARATION,
             Span::new(start, end),
@@ -6186,9 +6211,15 @@ impl<'s> Parser<'s> {
         }
         match follower.kind {
             TokenKind::Var | TokenKind::Let => Some(TypeScriptDeclareDeclarationKind::Variable),
-            TokenKind::Const if !matches!(lookahead.next_token(), token if token.kind == TokenKind::Enum && !token.flags.escaped()) => {
-                Some(TypeScriptDeclareDeclarationKind::Variable)
+            TokenKind::Const => {
+                let enum_keyword = lookahead.next_token();
+                if enum_keyword.kind == TokenKind::Enum && !enum_keyword.flags.escaped() {
+                    Some(TypeScriptDeclareDeclarationKind::Enum { is_const: true })
+                } else {
+                    Some(TypeScriptDeclareDeclarationKind::Variable)
+                }
             }
+            TokenKind::Enum => Some(TypeScriptDeclareDeclarationKind::Enum { is_const: false }),
             TokenKind::Function => Some(TypeScriptDeclareDeclarationKind::Function {
                 asynchronous: false,
             }),

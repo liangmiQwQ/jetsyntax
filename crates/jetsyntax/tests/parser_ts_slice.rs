@@ -630,6 +630,164 @@ fn permits_rest_trailing_commas_only_in_typescript_signatures() {
 }
 
 #[test]
+fn parses_explicit_declared_enums_with_existing_enum_records() {
+    let source = [
+        "declare enum Direction { Up, Down = 2 }",
+        "declare const\nenum ConstantDirection { Up = calculate() }",
+        "export declare enum ExportedDirection { Up }",
+        "export declare const enum ExportedConstantDirection { Up }",
+        "enum OrdinaryDirection { Up }",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            ..typescript_options()
+        },
+    )
+    .expect("parse explicit declared enums");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid explicit-declare-enum tape");
+    let enums = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_ENUM_DECLARATION,
+                span,
+                fields,
+                ..
+            } => Some((span, fields.to_vec())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(enums.len(), 5);
+    assert!(enums.iter().all(|(_, fields)| fields.len() == 4));
+    for (index, (span, fields)) in enums.iter().enumerate() {
+        assert!(matches!(
+            parsed.tape.value_at(fields[2]),
+            Ok(TapeValue::Bool(value)) if value == matches!(index, 1 | 3)
+        ));
+        assert!(matches!(
+            parsed.tape.value_at(fields[3]),
+            Ok(TapeValue::Bool(value)) if value == (index < 4)
+        ));
+        let prefix = if index < 4 { "declare" } else { "enum" };
+        assert!(source[span.start as usize..span.end as usize].starts_with(prefix));
+    }
+    assert!(node_fields(&parsed, NodeTag::TS_ENUM_MEMBER).any(|fields| {
+        matches!(
+            parsed.tape.value_at(fields[1]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::CALL_EXPRESSION,
+                ..
+            })
+        )
+    }));
+
+    let exports = node_fields(&parsed, NodeTag::EXPORT_NAMED_DECLARATION).collect::<Vec<_>>();
+    assert_eq!(exports.len(), 2);
+    for fields in exports {
+        assert!(matches!(
+            parsed.tape.value_at(fields[0]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::TS_ENUM_DECLARATION,
+                span,
+                ..
+            }) if source[span.start as usize..span.end as usize].starts_with("declare")
+        ));
+        assert!(matches!(
+            parsed.tape.value_at(fields[4]),
+            Ok(TapeValue::U32(1))
+        ));
+    }
+}
+
+#[test]
+fn keeps_explicit_declared_enums_contextual_and_typescript_only() {
+    for language in [
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+        Language::TypeScriptDefinition,
+    ] {
+        let parsed = parse(
+            "declare enum Choice { First }",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse TypeScript declared enum");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:#?}",
+            parsed.diagnostics
+        );
+        let fields = first_node_fields(&parsed, NodeTag::TS_ENUM_DECLARATION);
+        assert!(matches!(
+            parsed.tape.value_at(fields[3]),
+            Ok(TapeValue::Bool(true))
+        ));
+    }
+
+    for source in [
+        "declare\nenum Choice {}",
+        "declar\\u0065 enum Choice {}",
+        "declare en\\u0075m Choice {}",
+        "declare c\\u006fnst enum Choice {}",
+        "declare const en\\u0075m Choice {}",
+        "export declare\nenum Choice {}",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                ..typescript_options()
+            },
+        )
+        .expect("recover contextual declare enum");
+        parsed.tape.validate().expect("valid contextual enum tape");
+        assert!(
+            node_fields(&parsed, NodeTag::TS_ENUM_DECLARATION).all(|fields| {
+                matches!(parsed.tape.value_at(fields[3]), Ok(TapeValue::Bool(false)))
+            }),
+            "{source}"
+        );
+    }
+
+    for options in [
+        ParseOptions {
+            language: Language::JavaScript,
+            ..ParseOptions::default()
+        },
+        ParseOptions {
+            language: Language::JavaScriptJsx,
+            ..ParseOptions::default()
+        },
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    ] {
+        let parsed = parse("declare enum Choice {}", options).expect("recover excluded enum");
+        assert!(!parsed.diagnostics.is_empty());
+        assert!(
+            node_fields(&parsed, NodeTag::TS_ENUM_DECLARATION).all(|fields| {
+                matches!(parsed.tape.value_at(fields[3]), Ok(TapeValue::Bool(false)))
+            })
+        );
+    }
+}
+
+#[test]
 fn gates_typescript_function_signatures() {
     for language in [
         Language::TypeScript,
@@ -785,7 +943,6 @@ fn keeps_declare_variable_contextual_and_typescript_only() {
         "declare\nvar value;",
         "declar\\u0065 var value;",
         "declare v\\u0061r value;",
-        "declare const enum Choice {}",
         "export declare\nvar value;",
     ] {
         let parsed = parse(source, typescript_options()).expect("recover contextual declare");

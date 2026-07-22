@@ -1220,6 +1220,31 @@ describe("decodeTape", () => {
     });
   });
 
+  it("decodes the existing enum declare field", () => {
+    const source = "declare const enum Choice {}";
+    const tape = new HandcraftedTape();
+    const id = tape.node(2, 19, 25, [tape.string("Choice")]);
+    const body = tape.node(557, 26, source.length, [tape.list([])]);
+    const declaration = tape.node(526, 0, source.length, [
+      id,
+      body,
+      tape.boolean(true),
+      tape.boolean(true),
+    ]);
+    const encoded = tape.finish(declaration);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(source, encoded, { range: true })).toMatchObject({
+        type: "TSEnumDeclaration",
+        id: { name: "Choice" },
+        const: true,
+        declare: true,
+        body: { type: "TSEnumBody", members: [] },
+        range: [0, source.length],
+      });
+    }
+  });
+
   it("omits an absent mapped type readonly modifier", () => {
     const tape = new HandcraftedTape();
     const aliasId = tape.node(2, 0, 0, [tape.string("Mapped")]);

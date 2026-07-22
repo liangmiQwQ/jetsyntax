@@ -1482,7 +1482,6 @@ describe("parse", () => {
         "declare\nvar value;",
         "declar\\u0065 var value;",
         "declare v\\u0061r value;",
-        "declare const enum Choice {}",
         "export declare\nvar value;",
       ]
     ) {
@@ -1509,6 +1508,120 @@ describe("parse", () => {
     const compatibility = parse("declare var value;", { typescriptJsCompatibility: true });
     expect(compatibility.diagnostics).not.toEqual([]);
     expect(JSON.stringify(compatibility.program)).not.toContain("\"declare\":true");
+  });
+
+  it("materializes explicit TypeScript declared enums and type-only exports", () => {
+    const source = [
+      "declare enum Direction { Up, Down = 2 }",
+      "declare const",
+      "enum ConstantDirection { Up = calculate() }",
+      "export declare enum ExportedDirection { Up }",
+      "export declare const enum ExportedConstantDirection { Up }",
+      "enum OrdinaryDirection { Up }",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", sourceType: "module", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      {
+        type: "TSEnumDeclaration",
+        id: { name: "Direction" },
+        const: false,
+        declare: true,
+        body: {
+          members: [
+            { id: { name: "Up" }, initializer: null },
+            { id: { name: "Down" }, initializer: { type: "Literal", value: 2 } },
+          ],
+        },
+      },
+      {
+        type: "TSEnumDeclaration",
+        id: { name: "ConstantDirection" },
+        const: true,
+        declare: true,
+        body: {
+          members: [{ initializer: { type: "CallExpression", callee: { name: "calculate" } } }],
+        },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        declaration: {
+          type: "TSEnumDeclaration",
+          id: { name: "ExportedDirection" },
+          const: false,
+          declare: true,
+        },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        declaration: {
+          type: "TSEnumDeclaration",
+          id: { name: "ExportedConstantDirection" },
+          const: true,
+          declare: true,
+        },
+      },
+      {
+        type: "TSEnumDeclaration",
+        id: { name: "OrdinaryDirection" },
+        const: false,
+        declare: false,
+      },
+    ]);
+
+    for (const statement of result.program.body.slice(0, 4)) {
+      const declaration = statement.declaration ?? statement;
+      expect(source.slice(declaration.start, declaration.start + 7)).toBe("declare");
+      expect(declaration.range).toEqual([declaration.start, declaration.end]);
+      if (statement.declaration) {
+        expect(source.slice(statement.start, statement.start + 6)).toBe("export");
+        expect(statement.range).toEqual([statement.start, statement.end]);
+      }
+    }
+  });
+
+  it("keeps explicit declared enums contextual and TypeScript-only", () => {
+    for (const lang of ["ts", "tsx", "dts"]) {
+      const result = parse("declare enum Choice { First }", { lang });
+      expect(result.diagnostics, lang).toEqual([]);
+      expect(result.program.body[0]).toMatchObject({
+        type: "TSEnumDeclaration",
+        declare: true,
+      });
+    }
+
+    for (
+      const source of [
+        "declare\nenum Choice {}",
+        "declar\\u0065 enum Choice {}",
+        "declare en\\u0075m Choice {}",
+        "declare c\\u006fnst enum Choice {}",
+        "declare const en\\u0075m Choice {}",
+        "export declare\nenum Choice {}",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts", sourceType: "module" });
+      const enums = result.program.body
+        .map(statement => statement.declaration ?? statement)
+        .filter(statement => statement.type === "TSEnumDeclaration");
+      expect(enums.every(declaration => declaration.declare === false), source).toBe(true);
+    }
+
+    for (
+      const options of [
+        { lang: "js" },
+        { lang: "jsx" },
+        { typescriptJsCompatibility: true },
+      ]
+    ) {
+      const result = parse("declare enum Choice {}", options);
+      expect(result.diagnostics).not.toEqual([]);
+      const enums = result.program.body.filter(statement => statement.type === "TSEnumDeclaration");
+      expect(enums.every(declaration => declaration.declare === false)).toBe(true);
+    }
   });
 
   it("materializes top-level TypeScript overload signatures", () => {
