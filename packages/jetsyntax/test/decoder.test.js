@@ -994,6 +994,34 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes TypeScript property signatures without annotations", () => {
+    const source = "readonly value?";
+    const tape = new HandcraftedTape();
+    const key = tape.node(2, 9, 14, [tape.string("value")]);
+    const property = tape.node(535, 0, source.length, [
+      key,
+      tape.null(),
+      tape.boolean(false),
+      tape.boolean(true),
+      tape.boolean(true),
+    ]);
+    const encoded = tape.finish(property);
+
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(decode(source, encoded, { range: true })).toMatchObject({
+        type: "TSPropertySignature",
+        key: { name: "value" },
+        typeAnnotation: null,
+        computed: false,
+        optional: true,
+        readonly: true,
+        accessibility: null,
+        static: false,
+        range: [0, source.length],
+      });
+    }
+  });
+
   it("decodes compound TypeScript type and declaration records", () => {
     const tape = new HandcraftedTape();
     const aliasId = tape.node(2, 0, 0, [tape.string("Shape")]);

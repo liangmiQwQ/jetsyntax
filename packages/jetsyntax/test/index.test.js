@@ -686,6 +686,146 @@ describe("parse", () => {
     expect(plain).not.toHaveProperty("returnType");
   });
 
+  it("materializes TypeScript property signatures without annotations", () => {
+    const source = [
+      "interface Shape {",
+      "  plain;",
+      "  optional?,",
+      "  readonly inferred",
+      "  \"quoted\";",
+      "  0?",
+      "  typed: string",
+      "}",
+      "type Literal = { left; right?: number }",
+      "export {};",
+      "declare global { interface Array<T> { x } }",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", sourceType: "module", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const interfaceProperties = result.program.body[0].body.body;
+    const literalProperties = result.program.body[1].typeAnnotation.members;
+    const globalProperty = result.program.body[3].body.body[0].body.body[0];
+    const properties = [...interfaceProperties, ...literalProperties, globalProperty];
+    expect(properties).toMatchObject([
+      { type: "TSPropertySignature", key: { name: "plain" }, typeAnnotation: null },
+      {
+        type: "TSPropertySignature",
+        key: { name: "optional" },
+        typeAnnotation: null,
+        optional: true,
+      },
+      {
+        type: "TSPropertySignature",
+        key: { name: "inferred" },
+        typeAnnotation: null,
+        readonly: true,
+      },
+      {
+        type: "TSPropertySignature",
+        key: { type: "Literal", value: "quoted" },
+        typeAnnotation: null,
+      },
+      {
+        type: "TSPropertySignature",
+        key: { type: "Literal", value: 0 },
+        typeAnnotation: null,
+        optional: true,
+      },
+      {
+        type: "TSPropertySignature",
+        key: { name: "typed" },
+        typeAnnotation: { typeAnnotation: { type: "TSStringKeyword" } },
+      },
+      { type: "TSPropertySignature", key: { name: "left" }, typeAnnotation: null },
+      {
+        type: "TSPropertySignature",
+        key: { name: "right" },
+        typeAnnotation: { typeAnnotation: { type: "TSNumberKeyword" } },
+        optional: true,
+      },
+      { type: "TSPropertySignature", key: { name: "x" }, typeAnnotation: null },
+    ]);
+    expect(properties.map(property => source.slice(property.start, property.end))).toEqual([
+      "plain",
+      "optional?",
+      "readonly inferred",
+      "\"quoted\"",
+      "0?",
+      "typed: string",
+      "left",
+      "right?: number",
+      "x",
+    ]);
+    for (const property of properties) {
+      expect(property.computed).toBe(false);
+      expect(property.range).toEqual([property.start, property.end]);
+    }
+  });
+
+  it("preserves readonly as a type-member name when it has no member follower", () => {
+    const source = [
+      "interface Names {",
+      "  readonly;",
+      "  readonly: boolean;",
+      "  readonly?;",
+      "  readonly(): void;",
+      "  readonly",
+      "  following",
+      "  readonly value",
+      "}",
+    ].join("\n");
+    const result = parse(source, { lang: "ts" });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[0].body.body).toMatchObject([
+      { type: "TSPropertySignature", key: { name: "readonly" }, readonly: false },
+      {
+        type: "TSPropertySignature",
+        key: { name: "readonly" },
+        typeAnnotation: { typeAnnotation: { type: "TSBooleanKeyword" } },
+        readonly: false,
+      },
+      {
+        type: "TSPropertySignature",
+        key: { name: "readonly" },
+        optional: true,
+        readonly: false,
+      },
+      { type: "TSMethodSignature", key: { name: "readonly" } },
+      { type: "TSPropertySignature", key: { name: "readonly" }, readonly: false },
+      { type: "TSPropertySignature", key: { name: "following" }, readonly: false },
+      { type: "TSPropertySignature", key: { name: "value" }, readonly: true },
+    ]);
+  });
+
+  it("keeps unsupported and JavaScript type-member forms diagnostic", () => {
+    const sameLine = parse("interface Broken { first second }", { lang: "ts" });
+    expect(sameLine.diagnostics.some(diagnostic => diagnostic.includes("type member separator")))
+      .toBe(true);
+    expect(sameLine.program.body[0].body.body).toMatchObject([
+      { type: "TSPropertySignature", key: { name: "first" }, typeAnnotation: null },
+      { type: "TSPropertySignature", key: { name: "second" }, typeAnnotation: null },
+    ]);
+
+    for (
+      const source of [
+        "interface I { field = 1; }",
+        "interface I { [computed]?; }",
+        "interface I { [key: string]: number; }",
+        "interface I { (): void; }",
+        "interface I { get value(): string; }",
+      ]
+    ) {
+      expect(parse(source, { lang: "ts" }).diagnostics, source).not.toEqual([]);
+    }
+    for (const lang of ["js", "jsx"]) {
+      const result = parse("interface Shape { value }", { lang });
+      expect(result.diagnostics, lang).not.toEqual([]);
+      expect(JSON.stringify(result.program), lang).not.toContain("TSPropertySignature");
+    }
+  });
+
   it("materializes TypeScript runtime function type parameters", () => {
     const source = [
       "function convert<T extends Input, U = T>(value: T): U { return value; }",

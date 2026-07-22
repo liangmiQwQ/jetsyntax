@@ -5645,7 +5645,9 @@ impl<'s> Parser<'s> {
             members.push(self.parse_type_member()?.value());
             if matches!(self.current.kind, TokenKind::Semicolon | TokenKind::Comma) {
                 self.bump();
-            } else if self.current.kind != TokenKind::RightBrace {
+            } else if self.current.kind != TokenKind::RightBrace
+                && !self.current.flags.line_break_before()
+            {
                 self.error(self.current_span(), "expected a type member separator");
             }
         }
@@ -5701,9 +5703,13 @@ impl<'s> Parser<'s> {
 
     fn parse_type_member(&mut self) -> Result<ParsedNode, ParseError> {
         let start = self.current.start;
-        let readonly = self.eat(TokenKind::Readonly).is_some();
+        let readonly = self.current_typescript_modifier_matches(TokenKind::Readonly, "readonly")
+            && self.typescript_readonly_has_type_member_follower();
+        if readonly {
+            self.bump();
+        }
         let key = self.parse_type_member_key()?;
-        let optional = self.eat(TokenKind::Question).is_some();
+        let optional = self.eat(TokenKind::Question);
         if matches!(self.current.kind, TokenKind::Lt | TokenKind::LeftParen) {
             let type_parameters = if self.current.kind == TokenKind::Lt {
                 self.parse_type_parameters()?
@@ -5718,7 +5724,7 @@ impl<'s> Parser<'s> {
             };
             let end = self.previous_end(parameters_end);
             let computed = self.tape.push_bool(false)?;
-            let optional = self.tape.push_bool(optional)?;
+            let optional = self.tape.push_bool(optional.is_some())?;
             return self.node(
                 NodeTag::TS_METHOD_SIGNATURE,
                 Span::new(start, end),
@@ -5733,22 +5739,34 @@ impl<'s> Parser<'s> {
             );
         }
 
-        self.expect(TokenKind::Colon);
-        let annotation = self.parse_type_annotation()?;
+        let (annotation, end) = if self.eat(TokenKind::Colon).is_some() {
+            let annotation = self.parse_type_annotation()?;
+            (annotation.value(), annotation.span.end)
+        } else {
+            (
+                self.tape.push_null()?,
+                optional.map_or(key.span.end, |token| token.end),
+            )
+        };
         let computed = self.tape.push_bool(false)?;
-        let optional = self.tape.push_bool(optional)?;
+        let optional = self.tape.push_bool(optional.is_some())?;
         let readonly = self.tape.push_bool(readonly)?;
         self.node(
             NodeTag::TS_PROPERTY_SIGNATURE,
-            Span::new(start, annotation.span.end),
-            &[
-                key.value(),
-                annotation.value(),
-                computed,
-                optional,
-                readonly,
-            ],
+            Span::new(start, end),
+            &[key.value(), annotation, computed, optional, readonly],
         )
+    }
+
+    fn typescript_readonly_has_type_member_follower(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let follower = lookahead.next_token();
+        !follower.flags.line_break_before()
+            && (matches!(
+                follower.kind,
+                TokenKind::String | TokenKind::Number | TokenKind::New
+            ) || Self::is_identifier_name(follower.kind))
     }
 
     fn parse_type_member_key(&mut self) -> Result<ParsedNode, ParseError> {

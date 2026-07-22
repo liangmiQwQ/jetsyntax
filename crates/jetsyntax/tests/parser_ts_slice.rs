@@ -101,6 +101,207 @@ fn parses_typescript_type_families_without_diagnostics() {
 }
 
 #[test]
+fn parses_untyped_property_signatures_and_type_member_separators() {
+    let source = [
+        "interface Shape {",
+        "  plain;",
+        "  optional?,",
+        "  readonly inferred",
+        "  \"quoted\";",
+        "  0?",
+        "  typed: string",
+        "}",
+        "type Literal = { left; right?: number }",
+        "export {};",
+        "declare global { interface Array<T> { x } }",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            ..typescript_options()
+        },
+    )
+    .expect("parse untyped property signatures");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid property-signature tape");
+    let properties = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_PROPERTY_SIGNATURE,
+                span,
+                fields,
+                ..
+            } => Some((span, fields.to_vec())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(properties.len(), 9);
+    assert_eq!(
+        properties
+            .iter()
+            .map(|(span, _)| &source[span.start as usize..span.end as usize])
+            .collect::<Vec<_>>(),
+        [
+            "plain",
+            "optional?",
+            "readonly inferred",
+            "\"quoted\"",
+            "0?",
+            "typed: string",
+            "left",
+            "right?: number",
+            "x",
+        ]
+    );
+    for (index, (_, fields)) in properties.iter().enumerate() {
+        assert_eq!(fields.len(), 5);
+        if matches!(index, 5 | 7) {
+            assert!(matches!(
+                parsed.tape.value_at(fields[1]),
+                Ok(TapeValue::Node {
+                    tag: NodeTag::TS_TYPE_ANNOTATION,
+                    ..
+                })
+            ));
+        } else {
+            assert!(matches!(
+                parsed.tape.value_at(fields[1]),
+                Ok(TapeValue::Null)
+            ));
+        }
+        assert!(matches!(
+            parsed.tape.value_at(fields[2]),
+            Ok(TapeValue::Bool(false))
+        ));
+        assert!(matches!(
+            parsed.tape.value_at(fields[3]),
+            Ok(TapeValue::Bool(value)) if value == matches!(index, 1 | 4 | 7)
+        ));
+        assert!(matches!(
+            parsed.tape.value_at(fields[4]),
+            Ok(TapeValue::Bool(value)) if value == (index == 2)
+        ));
+    }
+}
+
+#[test]
+fn preserves_readonly_type_member_names_and_modifiers() {
+    let source = [
+        "interface Names {",
+        "  readonly;",
+        "  readonly: boolean;",
+        "  readonly?;",
+        "  readonly(): void;",
+        "  readonly",
+        "  following",
+        "  readonly value",
+        "}",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse contextual readonly members");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid readonly-member tape");
+    let properties = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_PROPERTY_SIGNATURE,
+                span,
+                fields,
+                ..
+            } => Some((span, fields.to_vec())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(properties.len(), 6);
+    assert_eq!(
+        properties
+            .iter()
+            .map(|(span, _)| &source[span.start as usize..span.end as usize])
+            .collect::<Vec<_>>(),
+        [
+            "readonly",
+            "readonly: boolean",
+            "readonly?",
+            "readonly",
+            "following",
+            "readonly value",
+        ]
+    );
+    for (index, (_, fields)) in properties.iter().enumerate() {
+        assert!(matches!(
+            parsed.tape.value_at(fields[4]),
+            Ok(TapeValue::Bool(value)) if value == (index == 5)
+        ));
+    }
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_METHOD_SIGNATURE).count(),
+        1
+    );
+}
+
+#[test]
+fn keeps_same_line_and_unsupported_type_members_diagnostic() {
+    let same_line = parse("interface Broken { first second }", typescript_options())
+        .expect("recover a missing same-line separator");
+    same_line.tape.validate().expect("valid recovered tape");
+    assert!(
+        same_line
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("type member separator"))
+    );
+    assert_eq!(
+        node_fields(&same_line, NodeTag::TS_PROPERTY_SIGNATURE).count(),
+        2
+    );
+
+    for source in [
+        "interface I { field = 1; }",
+        "interface I { [computed]?; }",
+        "interface I { [key: string]: number; }",
+        "interface I { (): void; }",
+        "interface I { get value(): string; }",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover unsupported type member");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid unsupported-member tape");
+    }
+}
+
+#[test]
+fn keeps_untyped_property_signatures_out_of_javascript() {
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "interface Shape { value }",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover JavaScript interface syntax");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_PROPERTY_SIGNATURE).count(),
+            0
+        );
+    }
+}
+
+#[test]
 fn parses_named_typescript_declarations_and_nested_generics() {
     assert_clean_with_tags(
         "nested generic reference",
