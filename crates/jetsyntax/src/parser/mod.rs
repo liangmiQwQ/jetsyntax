@@ -191,6 +191,12 @@ struct FunctionFlags {
 }
 
 #[derive(Clone, Copy)]
+struct FunctionContext {
+    grammar: GrammarContext,
+    cover_arrow_parameter_yield: Option<Span>,
+}
+
+#[derive(Clone, Copy)]
 enum TypeScriptDeclareDeclarationKind {
     Variable,
     Function { asynchronous: bool },
@@ -392,6 +398,7 @@ struct Parser<'s> {
     function_depth: u32,
     using_declaration_allowed: bool,
     class_static_block_function_depth: Option<u32>,
+    cover_arrow_parameter_yield: Option<Span>,
     // Parentheses-transparent semantic tag for immediate grammar checks, without widening ParsedNode.
     last_node_tag: Option<NodeTag>,
     last_assignment_target: AssignmentTargetType,
@@ -429,6 +436,7 @@ impl<'s> Parser<'s> {
                 SourceKind::Module | SourceKind::Unambiguous | SourceKind::CommonJs
             ),
             class_static_block_function_depth: None,
+            cover_arrow_parameter_yield: None,
             last_node_tag: None,
             last_assignment_target: AssignmentTargetType::Invalid,
             assignment_pattern_candidates: Vec::new(),
@@ -1345,12 +1353,16 @@ impl<'s> Parser<'s> {
         }
     }
 
-    fn enter_function_context(&mut self, generator: bool, asynchronous: bool) -> GrammarContext {
+    fn enter_function_context(&mut self, generator: bool, asynchronous: bool) -> FunctionContext {
         self.function_depth = self.function_depth.saturating_add(1);
         self.context.enter_scope(ScopeKind::Function);
-        let previous = self.context.grammar();
+        let previous = FunctionContext {
+            grammar: self.context.grammar(),
+            cover_arrow_parameter_yield: self.cover_arrow_parameter_yield.take(),
+        };
         self.context.set_grammar(
             previous
+                .grammar
                 .with_function(true)
                 .with_generator(generator)
                 .with_async_function(asynchronous)
@@ -1369,8 +1381,9 @@ impl<'s> Parser<'s> {
         previous
     }
 
-    fn leave_function_context(&mut self, previous: GrammarContext) {
-        self.context.set_grammar(previous);
+    fn leave_function_context(&mut self, previous: FunctionContext) {
+        self.context.set_grammar(previous.grammar);
+        self.cover_arrow_parameter_yield = previous.cover_arrow_parameter_yield;
         let _ = self.context.leave_scope();
         self.function_depth = self.function_depth.saturating_sub(1);
     }
@@ -1439,7 +1452,7 @@ impl<'s> Parser<'s> {
             && self.current.kind != TokenKind::LeftBrace
             && let Some(end) = self.consume_typescript_function_signature_terminator(signature_end)
         {
-            if !previous_grammar.ambient()
+            if !previous_grammar.grammar.ambient()
                 && let Some(span) = rest_trailing_comma_span
             {
                 self.diagnose_rest_parameter_trailing_comma(&params, span);
@@ -1453,7 +1466,7 @@ impl<'s> Parser<'s> {
                 return_type.map(ParsedNode::value),
             );
         }
-        if !previous_grammar.ambient()
+        if !previous_grammar.grammar.ambient()
             && let Some(span) = rest_trailing_comma_span
         {
             self.diagnose_rest_parameter_trailing_comma(&params, span);
@@ -3711,6 +3724,7 @@ impl<'s> Parser<'s> {
 
     fn parse_assignment_expression(&mut self, allow_in: bool) -> Result<ParsedNode, ParseError> {
         let assignment_patterns = self.assignment_pattern_checkpoint();
+        let previous_cover_arrow_parameter_yield = self.cover_arrow_parameter_yield;
         if self.current.kind == TokenKind::Async && self.looks_like_async_arrow() {
             let start = self.take().start;
             let arrow = self.parse_async_arrow_function(start, allow_in);
@@ -3740,6 +3754,7 @@ impl<'s> Parser<'s> {
         }
         let left = self.parse_conditional_expression(allow_in)?;
         if self.eat(TokenKind::Arrow).is_some() {
+            self.diagnose_cover_arrow_parameter_yield(previous_cover_arrow_parameter_yield);
             if self.reports_ecmascript_early_errors() {
                 match self.last_assignment_target {
                     AssignmentTargetType::OptionalChain => {
@@ -3808,6 +3823,22 @@ impl<'s> Parser<'s> {
         );
         self.rollback_assignment_patterns(assignment_patterns);
         assignment
+    }
+
+    fn diagnose_cover_arrow_parameter_yield(&mut self, previous: Option<Span>) {
+        if self.cover_arrow_parameter_yield == previous {
+            return;
+        }
+        if self.reports_ecmascript_early_errors()
+            && let Some(span) = self.cover_arrow_parameter_yield
+        {
+            self.error(
+                span,
+                "yield expressions are not allowed in arrow parameters",
+            );
+        }
+        // Nested arrows do not contribute their parameters to an enclosing cover head.
+        self.cover_arrow_parameter_yield = previous;
     }
 
     fn parse_parenthesized_arrow_function(
@@ -4141,7 +4172,13 @@ impl<'s> Parser<'s> {
             !self.current.flags.line_break_before() && self.eat(TokenKind::Star).is_some();
         let missing_argument = matches!(
             self.current.kind,
-            TokenKind::Semicolon | TokenKind::RightBrace | TokenKind::Eof
+            TokenKind::Semicolon
+                | TokenKind::RightBrace
+                | TokenKind::RightParen
+                | TokenKind::RightBracket
+                | TokenKind::Comma
+                | TokenKind::Colon
+                | TokenKind::Eof
         );
         let argument = if !delegate && (self.current.flags.line_break_before() || missing_argument)
         {
@@ -4156,11 +4193,13 @@ impl<'s> Parser<'s> {
             self.parse_assignment_expression(true)?.value()
         };
         let delegate = self.tape.push_bool(delegate)?;
-        self.node(
+        let expression = self.node(
             NodeTag::YIELD_EXPRESSION,
             Span::new(token.start, self.previous_end(token.start)),
             &[argument, delegate],
-        )
+        )?;
+        self.cover_arrow_parameter_yield = Some(expression.span);
+        Ok(expression)
     }
 
     fn parse_type_assertion(&mut self) -> Result<ParsedNode, ParseError> {

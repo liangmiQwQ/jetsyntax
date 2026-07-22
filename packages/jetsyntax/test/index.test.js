@@ -596,6 +596,50 @@ describe("parse", () => {
     ]);
   });
 
+  it("ends bare yield expressions at enclosing expression boundaries", () => {
+    const source = [
+      "function* sequence(value) {",
+      "  const array = [yield, yield yield];",
+      "  const object = { key: yield, ...yield };",
+      "  consume(yield);",
+      "  switch (value) { case yield: break; }",
+      "}",
+    ].join("\n");
+    const result = parse(source, { semanticErrors: true, sourceType: "script" });
+
+    expect(result.diagnostics).toEqual([]);
+    const declaration = result.program.body[0];
+    const yields = [];
+    const visit = (value) => {
+      if (!value || typeof value !== "object") return;
+      if (value.type === "YieldExpression") yields.push(value);
+      for (const child of Object.values(value)) {
+        if (Array.isArray(child)) child.forEach(visit);
+        else visit(child);
+      }
+    };
+    visit(declaration);
+    expect(yields).toHaveLength(7);
+    expect(yields.filter(expression => expression.argument === null)).toHaveLength(6);
+    expect(yields.every(expression => expression.delegate === false)).toBe(true);
+
+    for (
+      const invalid of [
+        "function* sequence() { yield ? one : two; }",
+        "function* sequence(source) { yield in source; }",
+        "function* sequence() { (value = yield) => value; }",
+      ]
+    ) {
+      expect(parse(invalid, { semanticErrors: true }).diagnostics, invalid).not.toEqual([]);
+    }
+
+    const nested = parse(
+      "function* outer() { (value = function* () { yield; }) => value; }",
+      { semanticErrors: true },
+    );
+    expect(nested.diagnostics).toEqual([]);
+  });
+
   it("materializes async function and generator expressions", () => {
     const source = [
       "const anonymous = async function (value) { return await load(value); };",

@@ -1714,6 +1714,67 @@ fn parser_should_accept_async_functions_and_generators() {
     assert_clean_cases(&cases);
 }
 
+/// A bare yield ends before enclosing punctuation, while another yield can begin its argument.
+#[test]
+fn parser_should_end_bare_yield_at_expression_boundaries() {
+    assert_clean_cases(&[
+        GrammarCase::script(
+            "bare yield expression boundaries",
+            "function* sequence(value) { const array = [yield, yield yield]; const object = { key: yield, ...yield }; consume(yield); switch (value) { case yield: break; } }",
+            &[
+                NodeTag::FUNCTION_DECLARATION,
+                NodeTag::YIELD_EXPRESSION,
+                NodeTag::ARRAY_EXPRESSION,
+                NodeTag::OBJECT_EXPRESSION,
+            ],
+        ),
+        GrammarCase::script(
+            "nested generator yield outside arrow parameters",
+            "function* outer() { (value = function* () { yield; }) => value; }",
+            &[
+                NodeTag::ARROW_FUNCTION_EXPRESSION,
+                NodeTag::FUNCTION_EXPRESSION,
+                NodeTag::YIELD_EXPRESSION,
+            ],
+        ),
+    ]);
+
+    let delegated = parse(
+        "function* sequence() { consume(yield*); }",
+        ParseOptions {
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("recover missing delegated yield argument");
+    assert!(
+        delegated
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "yield delegation requires an expression"),
+        "{:?}",
+        delegated.diagnostics
+    );
+    delegated.tape.validate().expect("valid recovery tape");
+
+    for source in [
+        "function* sequence() { yield ? one : two; }",
+        "function* sequence(source) { yield in source; }",
+        "function* sequence() { (value = yield) => value; }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover invalid yield continuation");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid recovery tape");
+    }
+}
+
 /// Escapes and line terminators keep `async` from introducing a function expression.
 #[test]
 fn parser_should_respect_async_function_expression_introducer_boundaries() {
