@@ -4387,6 +4387,298 @@ fn parses_typescript_generic_classes_without_widening_existing_class_records() {
 }
 
 #[test]
+fn parses_typescript_superclass_type_arguments_without_widening_legacy_class_records() {
+    let source = [
+        "class Plain {}",
+        "class Derived extends Base<T> {}",
+        "class Generic<Key> extends Namespace.Base<Map<Key, string>> implements Repository<Key> {}",
+        "(class extends AnonymousBase<Result<number>> {});",
+        "abstract class AbstractDerived extends Base<unknown> {}",
+        "class Repeated extends First<One> extends Discarded<Two> {}",
+        "class Relational extends (left < middle > right) {}",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse superclass type arguments");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid superclass-type-arguments tape");
+
+    assert_eq!(
+        NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION.get(),
+        582
+    );
+    assert_eq!(NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_EXPRESSION.get(), 583);
+    assert_node_field_count(&parsed, NodeTag::CLASS_DECLARATION, 3);
+    assert!(
+        node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION)
+            .all(|fields| fields.len() == 6)
+    );
+    assert_node_field_count(
+        &parsed,
+        NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_EXPRESSION,
+        6,
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION).count(),
+        4
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION,
+        5,
+        NodeTag::TS_TYPE_PARAMETER_INSTANTIATION,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_EXPRESSION,
+        5,
+        NodeTag::TS_TYPE_PARAMETER_INSTANTIATION,
+    );
+
+    let classes = node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION)
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        parsed.tape.value_at(classes[0][3]),
+        Ok(TapeValue::Null)
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(classes[0][4]),
+        Ok(TapeValue::Null)
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(classes[1][3]),
+        Ok(TapeValue::List { items, .. }) if items.len() == 1
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(classes[1][4]),
+        Ok(TapeValue::Node {
+            tag: NodeTag::TS_TYPE_PARAMETER_DECLARATION,
+            ..
+        })
+    ));
+    assert!(parsed.tape.validation().any(|record| matches!(
+        record.expect("valid record").value,
+        TapeValue::Node {
+            tag: NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION,
+            flags: 1,
+            ..
+        }
+    )));
+    let expression = first_node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_EXPRESSION);
+    assert!(matches!(
+        parsed.tape.value_at(expression[0]),
+        Ok(TapeValue::Null)
+    ));
+}
+
+#[test]
+fn preserves_typescript_superclass_type_argument_spans_and_ambiguities() {
+    let source = [
+        "class Plain {}",
+        "class Derived extends Base<T> {}",
+        "class Generic<Key> extends Namespace.Base<Map<Key, string>> implements Repository<Key> {}",
+        "(class extends AnonymousBase<Result<number>> {});",
+        "abstract class AbstractDerived extends Base<unknown> {}",
+        "class Repeated extends First<One> extends Discarded<Two> {}",
+        "class Relational extends (left < middle > right) {}",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse superclass argument spans");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid superclass-type-argument spans");
+    let classes = node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION)
+        .collect::<Vec<_>>();
+
+    let super_classes = classes
+        .iter()
+        .map(|fields| {
+            let TapeValue::Node { span, .. } = parsed
+                .tape
+                .value_at(fields[1])
+                .expect("generic superclass node")
+            else {
+                panic!("generic superclass is not a node");
+            };
+            &source[span.start as usize..span.end as usize]
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(super_classes, ["Base", "Namespace.Base", "Base", "First"]);
+    let super_type_arguments = classes
+        .iter()
+        .map(|fields| {
+            let TapeValue::Node { span, .. } = parsed
+                .tape
+                .value_at(fields[5])
+                .expect("superclass type arguments")
+            else {
+                panic!("superclass type arguments are not a node");
+            };
+            &source[span.start as usize..span.end as usize]
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        super_type_arguments,
+        ["<T>", "<Map<Key, string>>", "<unknown>", "<One>"]
+    );
+    let expression = first_node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_EXPRESSION);
+    let TapeValue::Node {
+        span: expression_arguments_span,
+        ..
+    } = parsed
+        .tape
+        .value_at(expression[5])
+        .expect("class-expression superclass type arguments")
+    else {
+        panic!("class-expression superclass type arguments are not a node");
+    };
+    assert_eq!(
+        &source[expression_arguments_span.start as usize..expression_arguments_span.end as usize],
+        "<Result<number>>"
+    );
+
+    let relational = node_fields(&parsed, NodeTag::CLASS_DECLARATION)
+        .find(|fields| {
+            matches!(
+                parsed.tape.value_at(fields[1]),
+                Ok(TapeValue::Node {
+                    tag: NodeTag::PARENTHESIZED_EXPRESSION,
+                    ..
+                })
+            )
+        })
+        .expect("relational superclass stays an expression");
+    assert_eq!(relational.len(), 3);
+
+    for source in [
+        "class Ambiguous extends left < middle > right {}",
+        "class Indexed extends Base<Input>[key] {}",
+        "class Asserted extends Base<Input>! {}",
+    ] {
+        let malformed =
+            parse(source, typescript_options()).expect("recover malformed generic heritage");
+        assert!(!malformed.diagnostics.is_empty(), "{source}");
+        malformed
+            .tape
+            .validate()
+            .expect("valid malformed generic-heritage tape");
+        assert_node_field_count(
+            &malformed,
+            NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION,
+            6,
+        );
+    }
+}
+
+#[test]
+fn gates_and_recovers_typescript_superclass_type_arguments() {
+    for language in [
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+        Language::TypeScriptDefinition,
+    ] {
+        let parsed = parse(
+            "class Derived extends Base<Input> {}",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse typed superclass arguments");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:#?}",
+            parsed.diagnostics
+        );
+        assert_node_field_count(
+            &parsed,
+            NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION,
+            6,
+        );
+    }
+
+    let compatibility = parse(
+        "class Derived extends Base<Input> {}",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse compatibility-mode superclass arguments");
+    assert!(
+        compatibility.diagnostics.is_empty(),
+        "{:#?}",
+        compatibility.diagnostics
+    );
+    assert_node_field_count(
+        &compatibility,
+        NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION,
+        6,
+    );
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "class Derived extends Base<Input> {}",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover JavaScript relational heritage");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION).count(),
+            0
+        );
+    }
+
+    let empty = parse("class Empty extends Base<> {}", typescript_options())
+        .expect("parse syntax-only empty superclass arguments");
+    assert!(empty.diagnostics.is_empty(), "{:#?}", empty.diagnostics);
+    assert_child_tag(
+        &empty,
+        NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION,
+        5,
+        NodeTag::TS_TYPE_PARAMETER_INSTANTIATION,
+    );
+    let semantic = parse(
+        "class Empty extends Base<> {}",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("diagnose semantic empty superclass arguments");
+    assert!(
+        semantic
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "type argument list cannot be empty")
+    );
+
+    for source in [
+        "class GenericCall extends factory<Input>() {}",
+        "class InstantiationMember extends Base<Input>.Member {}",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover postfix instantiation");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid rollback tape");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION).count(),
+            0,
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn gates_and_recovers_typescript_generic_classes() {
     for language in [
         Language::TypeScript,

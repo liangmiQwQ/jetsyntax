@@ -1481,6 +1481,7 @@ impl<'s> Parser<'s> {
 
         // 2. Recover reordered and repeated clauses while retaining the first base and merging implementation lists.
         let mut super_class = None;
+        let mut super_type_arguments = None;
         let mut implementations = Vec::new();
         let mut saw_extends = false;
         let mut saw_implements = false;
@@ -1518,7 +1519,8 @@ impl<'s> Parser<'s> {
                             self.last_assignment_target,
                         )
                     });
-                    let base = self.parse_assignment_expression(true)?;
+                    let (base, base_type_arguments) =
+                        self.parse_typescript_class_extends_expression()?;
                     if let Some((
                         tape,
                         assignment_patterns,
@@ -1532,6 +1534,7 @@ impl<'s> Parser<'s> {
                         self.last_assignment_target = last_assignment_target;
                     } else {
                         super_class = Some(base.value());
+                        super_type_arguments = base_type_arguments;
                     }
                 }
                 TokenKind::Implements => {
@@ -1607,7 +1610,17 @@ impl<'s> Parser<'s> {
         let _ = self.context.leave_scope();
         let elements = self.tape.push_list(&elements)?;
         let body = self.node(NodeTag::CLASS_BODY, Span::new(body_start, end), &[elements])?;
-        // 4. Keep nongeneric classes on their existing wire tags.
+        // 4. Keep classes without superclass type arguments on their existing wire tags.
+        if let Some(super_type_arguments) = super_type_arguments {
+            return self.node_typescript_super_type_arguments_class(
+                declaration,
+                Span::new(start, end),
+                [id, super_class, body.value(), super_type_arguments],
+                saw_implements.then_some(implementations.as_slice()),
+                type_parameters,
+                abstract_class,
+            );
+        }
         if let Some(type_parameters) = type_parameters {
             return self.node_typescript_generic_class(
                 declaration,
@@ -1647,6 +1660,52 @@ impl<'s> Parser<'s> {
     }
 
     #[cold]
+    fn parse_typescript_class_extends_expression(
+        &mut self,
+    ) -> Result<(ParsedNode, Option<ValueRef>), ParseError> {
+        debug_assert!(
+            self.options.language.is_typescript()
+                || self.options.syntax_extensions.typescript_js_compatibility
+        );
+
+        // A superclass instantiation overlaps relational and postfix expressions, so speculative state must roll back as one unit.
+        let current = self.current;
+        let lexer = self.lexer.checkpoint();
+        let tape = self.tape.checkpoint();
+        let context = self.context.checkpoint();
+        let assignment_patterns = self.assignment_pattern_checkpoint();
+        let last_node_tag = self.last_node_tag;
+        let last_assignment_target = self.last_assignment_target;
+
+        let base = self.parse_postfix_expression()?;
+        if matches!(self.current.kind, TokenKind::Lt | TokenKind::ShiftLeft) {
+            if self.current.kind == TokenKind::ShiftLeft {
+                self.current.kind = TokenKind::Lt;
+                self.current.end = self.current.start + 1;
+                self.lexer.set_position(self.current.end as usize);
+            }
+            let (type_arguments, _, closed, _) =
+                self.parse_type_arguments_impl(self.options.semantic_errors)?;
+            if closed && self.class_super_type_arguments_are_standalone() {
+                self.context.commit(context);
+                return Ok((base, Some(type_arguments)));
+            }
+        } else if self.at_class_heritage_boundary() {
+            self.context.commit(context);
+            return Ok((base, None));
+        }
+
+        self.tape.rollback(tape)?;
+        self.context.rollback(context);
+        self.lexer.rollback(lexer);
+        self.current = current;
+        self.rollback_assignment_patterns(assignment_patterns);
+        self.last_node_tag = last_node_tag;
+        self.last_assignment_target = last_assignment_target;
+        Ok((self.parse_assignment_expression(true)?, None))
+    }
+
+    #[cold]
     #[inline(never)]
     fn node_typescript_generic_class(
         &mut self,
@@ -1673,6 +1732,46 @@ impl<'s> Parser<'s> {
             class_fields[2],
             implementations,
             type_parameters,
+        ];
+        if abstract_class {
+            return self.node_typescript_abstract_class(tag, span, &fields);
+        }
+        self.node(tag, span, &fields)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn node_typescript_super_type_arguments_class(
+        &mut self,
+        declaration: bool,
+        span: Span,
+        class_fields: [ValueRef; 4],
+        implementations: Option<&[ValueRef]>,
+        type_parameters: Option<ValueRef>,
+        abstract_class: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let implementations = if let Some(implementations) = implementations {
+            self.tape.push_list(implementations)?
+        } else {
+            self.tape.push_null()?
+        };
+        let type_parameters = if let Some(type_parameters) = type_parameters {
+            type_parameters
+        } else {
+            self.tape.push_null()?
+        };
+        let tag = if declaration {
+            NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION
+        } else {
+            NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_EXPRESSION
+        };
+        let fields = [
+            class_fields[0],
+            class_fields[1],
+            class_fields[2],
+            implementations,
+            type_parameters,
+            class_fields[3],
         ];
         if abstract_class {
             return self.node_typescript_abstract_class(tag, span, &fields);
@@ -7115,6 +7214,29 @@ impl<'s> Parser<'s> {
                     || !Self::is_expression_start(kind)
             }
         }
+    }
+
+    const fn at_class_heritage_boundary(&self) -> bool {
+        matches!(self.current.kind, TokenKind::LeftBrace | TokenKind::Eof)
+            || !self.current.flags.escaped()
+                && matches!(
+                    self.current.kind,
+                    TokenKind::Extends | TokenKind::Implements
+                )
+    }
+
+    const fn class_super_type_arguments_are_standalone(&self) -> bool {
+        // These continuations keep the instantiation inside the superclass expression.
+        !matches!(
+            self.current.kind,
+            TokenKind::Dot
+                | TokenKind::QuestionDot
+                | TokenKind::LeftParen
+                | TokenKind::NoSubstitutionTemplate
+                | TokenKind::TemplateHead
+                | TokenKind::As
+                | TokenKind::Satisfies
+        )
     }
 
     fn import_equals_type_only(&self, first: Token) -> Option<bool> {

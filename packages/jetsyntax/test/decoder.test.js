@@ -815,6 +815,8 @@ describe("decodeTape", () => {
         [568, 5, 4],
         [569, 4, 5],
         [570, 6, 5],
+        [582, 5, 6],
+        [583, 7, 6],
       ]
     ) {
       const tape = new HandcraftedTape();
@@ -822,7 +824,7 @@ describe("decodeTape", () => {
       const encoded = tape.finish(tape.node(tag, 0, 0, fields));
       const type = tag === 566
         ? "TSClassImplements"
-        : tag === 58 || tag === 568 || tag === 570
+        : tag === 58 || tag === 568 || tag === 570 || tag === 583
         ? "ClassExpression"
         : "ClassDeclaration";
 
@@ -830,6 +832,62 @@ describe("decodeTape", () => {
         expect(() => decode("", encoded)).toThrow(
           `invalid ${type} field count ${count}; expected ${expected}`,
         );
+      }
+    }
+  });
+
+  it("decodes TypeScript superclass type arguments", () => {
+    for (const [tag, type] of [[582, "ClassDeclaration"], [583, "ClassExpression"]]) {
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        const source = "class Derived extends Base<T> {}";
+        const tape = new HandcraftedTape();
+        const id = tape.node(2, 6, 13, [tape.string("Derived")]);
+        const superClass = tape.node(2, 22, 26, [tape.string("Base")]);
+        const body = tape.node(59, 30, source.length, [tape.list([])]);
+        const argument = tape.node(548, 27, 28, []);
+        const superTypeArguments = tape.node(542, 26, 29, [tape.list([argument])]);
+        const typeParameterName = tape.node(2, 6, 13, [tape.string("Type")]);
+        const typeParameter = tape.node(534, 6, 13, [
+          typeParameterName,
+          tape.boolean(false),
+          tape.boolean(false),
+          tape.boolean(false),
+          tape.null(),
+          tape.null(),
+        ]);
+        const typeParameters = tape.node(541, 6, 13, [tape.list([typeParameter])]);
+        const implementationName = tape.node(2, 22, 26, [tape.string("Impl")]);
+        const implementation = tape.node(566, 22, 26, [implementationName, tape.null()]);
+        const root = tape.node(tag, 0, source.length, [
+          id,
+          superClass,
+          body,
+          tag === 582 ? tape.list([implementation]) : tape.null(),
+          tag === 582 ? typeParameters : tape.null(),
+          superTypeArguments,
+        ], tag === 582 ? 1 : 0);
+        const decoded = decode(source, tape.finish(root));
+        expect(decoded).toMatchObject({
+          type,
+          id: { name: "Derived" },
+          superClass: { name: "Base" },
+          body: { type: "ClassBody", body: [] },
+          superTypeArguments: {
+            type: "TSTypeParameterInstantiation",
+            params: [{ type: "TSNumberKeyword" }],
+          },
+        });
+        if (tag === 582) {
+          expect(decoded).toMatchObject({
+            abstract: true,
+            implements: [{ type: "TSClassImplements" }],
+            typeParameters: { type: "TSTypeParameterDeclaration" },
+          });
+        } else {
+          expect(decoded).not.toHaveProperty("abstract");
+          expect(decoded).not.toHaveProperty("implements");
+          expect(decoded).not.toHaveProperty("typeParameters");
+        }
       }
     }
   });
@@ -981,10 +1039,26 @@ describe("decodeTape", () => {
   });
 
   it("rejects malformed TypeScript class flags", () => {
-    for (const [tag, flags] of [[57, 0x02], [57, 0x10], [57, 0xFF], [58, 0x01]]) {
+    for (
+      const [tag, flags] of [
+        [57, 0x02],
+        [57, 0x10],
+        [57, 0xFF],
+        [58, 0x01],
+        [582, 0x02],
+        [583, 0x01],
+      ]
+    ) {
       const tape = new HandcraftedTape();
+      const fieldCount = tag === 582 || tag === 583 ? 6 : 3;
       const encoded = tape.finish(
-        tape.node(tag, 0, 0, [tape.null(), tape.null(), tape.null()], flags),
+        tape.node(
+          tag,
+          0,
+          0,
+          Array.from({ length: fieldCount }, () => tape.null()),
+          flags,
+        ),
       );
       for (const decode of [decodeTape, decodeTrustedTape]) {
         expect(() => decode("", encoded)).toThrow(

@@ -198,6 +198,8 @@ for (
     [579, ["TSCallSignatureDeclaration", ["typeParameters", "params", "returnType"]]],
     [580, ["TSConstructSignatureDeclaration", ["typeParameters", "params", "returnType"]]],
     [581, ["TSIndexSignature", ["parameters", "typeAnnotation", "readonly", "static"]]],
+    [582, ["ClassDeclaration", ["id", "superClass", "body", "implements", "typeParameters", "superTypeArguments"]]],
+    [583, ["ClassExpression", ["id", "superClass", "body", "implements", "typeParameters", "superTypeArguments"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -1071,6 +1073,16 @@ function decodeTapeInternal(source, tape, options, trusted) {
         if (fields[3] !== null) node.implements = array(fields[3], tag);
         node.typeParameters = fields[4];
         return node;
+      case 582:
+      case 583:
+        if ((record & NODE_FLAGS_MASK) !== 0) decodeTypeScriptClassFlags(node, record, tag);
+        node.id = fields[0];
+        node.superClass = fields[1];
+        node.body = fields[2];
+        if (fields[3] !== null) node.implements = array(fields[3], tag);
+        if (fields[4] !== null) node.typeParameters = fields[4];
+        node.superTypeArguments = fields[5];
+        return node;
       case 571:
         node.id = fields[0];
         node.params = array(fields[1], tag);
@@ -1347,7 +1359,10 @@ function decodeQuotedString(raw) {
 
 function decodeTypeScriptClassFlags(node, record, tag) {
   const flags = (record & NODE_FLAGS_MASK) >>> 16;
-  if ((flags & ~0x01) !== 0 || (flags !== 0 && (tag === 58 || tag === 568 || tag === 570))) {
+  if (
+    (flags & ~0x01) !== 0
+    || (flags !== 0 && (tag === 58 || tag === 568 || tag === 570 || tag === 583))
+  ) {
     throw new Error(`invalid TypeScript class flags ${flags} for tag ${tag}`);
   }
   if ((flags & 0x01) !== 0) node.abstract = true;

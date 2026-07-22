@@ -1513,6 +1513,98 @@ describe("parse", () => {
     expect(empty.program.body[0].typeParameters.params).toEqual([]);
   });
 
+  it("materializes TypeScript superclass type arguments", () => {
+    const source = [
+      "class Derived extends Base<Input> {}",
+      "class Generic<Key> extends Namespace.Base<Map<Key, string>> implements Repository<Key> {}",
+      "const Anonymous = class extends Base<Result<number>> {};",
+      "abstract class AbstractDerived extends Base<unknown> {}",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const [derived, generic, anonymousDeclaration, abstractDerived] = result.program.body;
+    expect(derived).toMatchObject({
+      type: "ClassDeclaration",
+      superClass: { type: "Identifier", name: "Base" },
+      superTypeArguments: {
+        type: "TSTypeParameterInstantiation",
+        params: [{ typeName: { name: "Input" } }],
+      },
+    });
+    expect(derived).not.toHaveProperty("typeParameters");
+    expect(generic).toMatchObject({
+      type: "ClassDeclaration",
+      typeParameters: { params: [{ name: { name: "Key" } }] },
+      superClass: {
+        type: "MemberExpression",
+        object: { name: "Namespace" },
+        property: { name: "Base" },
+      },
+      superTypeArguments: {
+        params: [{
+          typeName: { name: "Map" },
+          typeArguments: { params: [{ typeName: { name: "Key" } }, { type: "TSStringKeyword" }] },
+        }],
+      },
+      implements: [{ expression: { name: "Repository" } }],
+    });
+    expect(anonymousDeclaration.declarations[0].init).toMatchObject({
+      type: "ClassExpression",
+      id: null,
+      superClass: { name: "Base" },
+      superTypeArguments: { params: [{ typeName: { name: "Result" } }] },
+    });
+    expect(abstractDerived).toMatchObject({
+      type: "ClassDeclaration",
+      abstract: true,
+      superTypeArguments: { params: [{ type: "TSUnknownKeyword" }] },
+    });
+    const genericSuperclasses = [
+      derived,
+      generic,
+      anonymousDeclaration.declarations[0].init,
+      abstractDerived,
+    ];
+    expect(genericSuperclasses.map(declaration => (
+      source.slice(declaration.superClass.start, declaration.superClass.end)
+    ))).toEqual(["Base", "Namespace.Base", "Base", "Base"]);
+    expect(genericSuperclasses.map(declaration => (
+      source.slice(declaration.superTypeArguments.start, declaration.superTypeArguments.end)
+    ))).toEqual(["<Input>", "<Map<Key, string>>", "<Result<number>>", "<unknown>"]);
+    for (const declaration of genericSuperclasses) {
+      expect(declaration.superTypeArguments.range).toEqual([
+        declaration.superTypeArguments.start,
+        declaration.superTypeArguments.end,
+      ]);
+    }
+
+    const legacy = parse(
+      "class Plain {} class Relational extends (left < middle > right) {}",
+      { lang: "ts" },
+    );
+    expect(legacy.diagnostics).toEqual([]);
+    expect(legacy.program.body[0]).not.toHaveProperty("superTypeArguments");
+    expect(legacy.program.body[1]).not.toHaveProperty("superTypeArguments");
+
+    for (const lang of ["ts", "tsx", "dts"]) {
+      const typed = parse("class Derived extends Base<Input> {}", { lang });
+      expect(typed.diagnostics, lang).toEqual([]);
+      expect(typed.program.body[0]).toHaveProperty("superTypeArguments");
+    }
+    const compatibility = parse("class Derived extends Base<Input> {}", {
+      typescriptJsCompatibility: true,
+    });
+    expect(compatibility.diagnostics).toEqual([]);
+    expect(compatibility.program.body[0]).toHaveProperty("superTypeArguments");
+
+    for (const lang of ["js", "jsx"]) {
+      const standard = parse("class Derived extends Base<Input> {}", { lang });
+      expect(standard.diagnostics, lang).not.toEqual([]);
+      expect(standard.program.body[0], lang).not.toHaveProperty("superTypeArguments");
+    }
+  });
+
   it("materializes optional TypeScript value parameters", () => {
     const source = [
       "function declared(required: Input, optional?: Output, inferred?) {}",
