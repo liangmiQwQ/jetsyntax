@@ -494,7 +494,80 @@ describe("decodeTape", () => {
     });
   });
 
-  it("rejects malformed class-implements field counts", () => {
+  it("decodes generic TypeScript class records", () => {
+    const tape = new HandcraftedTape();
+    const declarationId = tape.node(2, 0, 0, [tape.string("Generic")]);
+    const declarationParameterName = tape.node(2, 0, 0, [tape.string("T")]);
+    const declarationParameter = tape.node(534, 0, 0, [
+      declarationParameterName,
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.node(548, 0, 0, []),
+      tape.node(550, 0, 0, []),
+    ]);
+    const declarationParameters = tape.node(541, 0, 0, [tape.list([declarationParameter])]);
+    const declarationBody = tape.node(59, 0, 0, [tape.list([])]);
+    const declaration = tape.node(569, 0, 0, [
+      declarationId,
+      tape.null(),
+      declarationBody,
+      tape.null(),
+      declarationParameters,
+    ]);
+
+    const expressionParameterName = tape.node(2, 0, 0, [tape.string("Item")]);
+    const expressionParameter = tape.node(534, 0, 0, [
+      expressionParameterName,
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.boolean(false),
+      tape.null(),
+      tape.null(),
+    ]);
+    const expressionParameters = tape.node(541, 0, 0, [tape.list([expressionParameter])]);
+    const interfaceName = tape.node(2, 0, 0, [tape.string("Interface")]);
+    const implementation = tape.node(566, 0, 0, [interfaceName, tape.null()]);
+    const expressionBody = tape.node(59, 0, 0, [tape.list([])]);
+    const expression = tape.node(570, 0, 0, [
+      tape.null(),
+      tape.null(),
+      expressionBody,
+      tape.list([implementation]),
+      expressionParameters,
+    ]);
+    const statement = tape.node(5, 0, 0, [expression]);
+    const program = tape.node(1, 0, 0, [
+      tape.list([declaration, statement]),
+      tape.integer(1),
+    ]);
+
+    const decoded = decodeTape("", tape.finish(program));
+    expect(decoded.body[0]).toMatchObject({
+      type: "ClassDeclaration",
+      id: { name: "Generic" },
+      typeParameters: {
+        type: "TSTypeParameterDeclaration",
+        params: [{
+          name: { name: "T" },
+          constraint: { type: "TSNumberKeyword" },
+          default: { type: "TSStringKeyword" },
+        }],
+      },
+    });
+    expect(decoded.body[0]).not.toHaveProperty("implements");
+    expect(decoded.body[1].expression).toMatchObject({
+      type: "ClassExpression",
+      id: null,
+      typeParameters: { params: [{ name: { name: "Item" } }] },
+      implements: [{
+        type: "TSClassImplements",
+        expression: { name: "Interface" },
+      }],
+    });
+  });
+
+  it("rejects malformed class field counts", () => {
     for (
       const [tag, count, expected] of [
         [57, 4, 3],
@@ -503,6 +576,8 @@ describe("decodeTape", () => {
         [566, 3, 2],
         [567, 3, 4],
         [568, 5, 4],
+        [569, 4, 5],
+        [570, 6, 5],
       ]
     ) {
       const tape = new HandcraftedTape();
@@ -510,7 +585,7 @@ describe("decodeTape", () => {
       const encoded = tape.finish(tape.node(tag, 0, 0, fields));
       const type = tag === 566
         ? "TSClassImplements"
-        : tag === 58 || tag === 568
+        : tag === 58 || tag === 568 || tag === 570
         ? "ClassExpression"
         : "ClassDeclaration";
 

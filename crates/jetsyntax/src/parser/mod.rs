@@ -886,6 +886,11 @@ impl<'s> Parser<'s> {
             }
             self.tape.push_null()?
         };
+        let type_parameters = if self.current.kind == TokenKind::Lt {
+            Some(self.parse_type_parameters()?)
+        } else {
+            None
+        };
 
         // 2. Recover reordered and repeated clauses while retaining the first base and merging implementation lists.
         let mut super_class = None;
@@ -1012,7 +1017,16 @@ impl<'s> Parser<'s> {
         let _ = self.context.leave_scope();
         let elements = self.tape.push_list(&elements)?;
         let body = self.node(NodeTag::CLASS_BODY, Span::new(body_start, end), &[elements])?;
-        // 4. Keep classes without implementations on the legacy three-field wire tags.
+        // 4. Keep nongeneric classes on their existing wire tags.
+        if let Some(type_parameters) = type_parameters {
+            return self.node_typescript_generic_class(
+                declaration,
+                Span::new(start, end),
+                [id, super_class, body.value()],
+                saw_implements.then_some(implementations.as_slice()),
+                type_parameters,
+            );
+        }
         if saw_implements {
             let implementations = self.tape.push_list(&implementations)?;
             self.node(
@@ -1035,6 +1049,38 @@ impl<'s> Parser<'s> {
                 &[id, super_class, body.value()],
             )
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn node_typescript_generic_class(
+        &mut self,
+        declaration: bool,
+        span: Span,
+        class_fields: [ValueRef; 3],
+        implementations: Option<&[ValueRef]>,
+        type_parameters: ValueRef,
+    ) -> Result<ParsedNode, ParseError> {
+        let implementations = if let Some(implementations) = implementations {
+            self.tape.push_list(implementations)?
+        } else {
+            self.tape.push_null()?
+        };
+        self.node(
+            if declaration {
+                NodeTag::TS_GENERIC_CLASS_DECLARATION
+            } else {
+                NodeTag::TS_GENERIC_CLASS_EXPRESSION
+            },
+            span,
+            &[
+                class_fields[0],
+                class_fields[1],
+                class_fields[2],
+                implementations,
+                type_parameters,
+            ],
+        )
     }
 
     fn parse_class_element(&mut self) -> Result<ParsedNode, ParseError> {

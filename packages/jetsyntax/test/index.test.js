@@ -911,6 +911,75 @@ describe("parse", () => {
     }
   });
 
+  it("materializes TypeScript generic classes without widening standard classes", () => {
+    const source = [
+      "class Generic<T extends Constraint = Fallback> {}",
+      "class Derived<Key, Value = Key> extends Base implements Repository<Key, Value> {}",
+      "const Anonymous = class<Item> {};",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const [generic, derived, anonymousDeclaration] = result.program.body;
+    expect(generic).toMatchObject({
+      type: "ClassDeclaration",
+      id: { name: "Generic" },
+      typeParameters: {
+        type: "TSTypeParameterDeclaration",
+        params: [{
+          name: { name: "T" },
+          constraint: { typeName: { name: "Constraint" } },
+          default: { typeName: { name: "Fallback" } },
+        }],
+      },
+    });
+    expect(generic).not.toHaveProperty("implements");
+    expect(source.slice(generic.typeParameters.start, generic.typeParameters.end)).toBe(
+      "<T extends Constraint = Fallback>",
+    );
+    expect(generic.typeParameters.range).toEqual([
+      generic.typeParameters.start,
+      generic.typeParameters.end,
+    ]);
+    expect(derived).toMatchObject({
+      type: "ClassDeclaration",
+      superClass: { name: "Base" },
+      typeParameters: { params: [{ name: { name: "Key" } }, { name: { name: "Value" } }] },
+      implements: [{
+        expression: { name: "Repository" },
+        typeArguments: { params: [{ typeName: { name: "Key" } }, { typeName: { name: "Value" } }] },
+      }],
+    });
+    expect(anonymousDeclaration.declarations[0].init).toMatchObject({
+      type: "ClassExpression",
+      id: null,
+      typeParameters: { params: [{ name: { name: "Item" } }] },
+    });
+    expect(anonymousDeclaration.declarations[0].init).not.toHaveProperty("implements");
+
+    for (const lang of ["ts", "tsx", "dts"]) {
+      const typed = parse("class Generic<T> {}", { lang });
+      expect(typed.diagnostics, lang).toEqual([]);
+      expect(typed.program.body[0]).toHaveProperty("typeParameters");
+    }
+
+    const compatibility = parse("class Generic<T> {}", {
+      typescriptJsCompatibility: true,
+    });
+    expect(compatibility.diagnostics).toEqual([]);
+    expect(compatibility.program.body[0]).toHaveProperty("typeParameters");
+
+    for (const lang of ["js", "jsx"]) {
+      const standard = parse("class Generic<T> {}", { lang });
+      expect(standard.diagnostics, lang).not.toEqual([]);
+      expect(standard.program.body[0], lang).not.toHaveProperty("typeParameters");
+    }
+
+    const empty = parse("class Empty<> {}", { lang: "ts" });
+    expect(empty.diagnostics).not.toEqual([]);
+    expect(empty.program.body[0].typeParameters.params).toEqual([]);
+  });
+
   it("materializes optional TypeScript value parameters", () => {
     const source = [
       "function declared(required: Input, optional?: Output, inferred?) {}",

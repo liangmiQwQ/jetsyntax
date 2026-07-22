@@ -1254,6 +1254,138 @@ fn parses_typescript_class_implements_clauses_and_preserves_legacy_class_records
 }
 
 #[test]
+fn parses_typescript_generic_classes_without_widening_existing_class_records() {
+    let source = [
+        "class Plain {}",
+        "class Generic<T extends Constraint = Fallback> {}",
+        "class Derived<Key, Value = Key> extends Base implements Repository<Key, Value> {}",
+        "(class<Item> {});",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse generic classes");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid generic-class tape");
+
+    assert_eq!(NodeTag::TS_GENERIC_CLASS_DECLARATION.get(), 569);
+    assert_eq!(NodeTag::TS_GENERIC_CLASS_EXPRESSION.get(), 570);
+    assert_node_field_count(&parsed, NodeTag::CLASS_DECLARATION, 3);
+    assert!(
+        node_fields(&parsed, NodeTag::TS_GENERIC_CLASS_DECLARATION).all(|fields| fields.len() == 5)
+    );
+    assert_node_field_count(&parsed, NodeTag::TS_GENERIC_CLASS_EXPRESSION, 5);
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_GENERIC_CLASS_DECLARATION).count(),
+        2
+    );
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_TYPE_PARAMETER_DECLARATION).count(),
+        3
+    );
+
+    let generic_classes =
+        node_fields(&parsed, NodeTag::TS_GENERIC_CLASS_DECLARATION).collect::<Vec<_>>();
+    assert!(matches!(
+        parsed.tape.value_at(generic_classes[0][3]),
+        Ok(TapeValue::Null)
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(generic_classes[1][3]),
+        Ok(TapeValue::List { items, .. }) if items.len() == 1
+    ));
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_GENERIC_CLASS_DECLARATION,
+        4,
+        NodeTag::TS_TYPE_PARAMETER_DECLARATION,
+    );
+    assert_child_tag(
+        &parsed,
+        NodeTag::TS_GENERIC_CLASS_EXPRESSION,
+        4,
+        NodeTag::TS_TYPE_PARAMETER_DECLARATION,
+    );
+
+    let anonymous = first_node_fields(&parsed, NodeTag::TS_GENERIC_CLASS_EXPRESSION);
+    assert!(matches!(
+        parsed.tape.value_at(anonymous[0]),
+        Ok(TapeValue::Null)
+    ));
+}
+
+#[test]
+fn gates_and_recovers_typescript_generic_classes() {
+    for language in [
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+        Language::TypeScriptDefinition,
+    ] {
+        let parsed = parse(
+            "class Generic<T> {}",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse TypeScript-capable generic class");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:#?}",
+            parsed.diagnostics
+        );
+        assert_node_field_count(&parsed, NodeTag::TS_GENERIC_CLASS_DECLARATION, 5);
+    }
+
+    let compatibility = parse(
+        "class Generic<T> {}",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                typescript_js_compatibility: true,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse TypeScript JavaScript compatibility generic class");
+    assert!(
+        compatibility.diagnostics.is_empty(),
+        "{:#?}",
+        compatibility.diagnostics
+    );
+    assert_node_field_count(&compatibility, NodeTag::TS_GENERIC_CLASS_DECLARATION, 5);
+
+    for language in [Language::JavaScript, Language::JavaScriptJsx] {
+        let parsed = parse(
+            "class Generic<T> {}",
+            ParseOptions {
+                language,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover standard JavaScript class");
+        assert!(!parsed.diagnostics.is_empty(), "{language:?}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid JavaScript recovery tape");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::TS_GENERIC_CLASS_DECLARATION).count(),
+            0
+        );
+    }
+
+    let empty = parse("class Empty<> {}", typescript_options())
+        .expect("recover empty class type parameters");
+    assert!(!empty.diagnostics.is_empty());
+    empty.tape.validate().expect("valid empty-parameter tape");
+    assert_node_field_count(&empty, NodeTag::TS_GENERIC_CLASS_DECLARATION, 5);
+    let fields = first_node_fields(&empty, NodeTag::TS_TYPE_PARAMETER_DECLARATION);
+    assert!(matches!(
+        empty.tape.value_at(fields[0]),
+        Ok(TapeValue::List { items, .. }) if items.is_empty()
+    ));
+}
+
+#[test]
 fn recovers_typescript_class_heritage_ambiguities_by_semantic_mode() {
     let source = "class Empty implements {} class Generic implements Box<> {} class Repeat implements A implements B extends Base {}";
     let syntax_only = parse(source, typescript_options()).expect("syntax-only heritage parse");

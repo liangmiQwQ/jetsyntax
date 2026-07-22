@@ -185,6 +185,8 @@ for (
     [566, ["TSClassImplements", ["expression", "typeArguments"]]],
     [567, ["ClassDeclaration", ["id", "superClass", "body", "implements"]]],
     [568, ["ClassExpression", ["id", "superClass", "body", "implements"]]],
+    [569, ["ClassDeclaration", ["id", "superClass", "body", "implements", "typeParameters"]]],
+    [570, ["ClassExpression", ["id", "superClass", "body", "implements", "typeParameters"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -1030,6 +1032,14 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.superClass = fields[1];
         node.body = fields[2];
         node.implements = array(fields[3], tag);
+        return node;
+      case 569:
+      case 570:
+        node.id = fields[0];
+        node.superClass = fields[1];
+        node.body = fields[2];
+        if (fields[3] !== null) node.implements = array(fields[3], tag);
+        node.typeParameters = fields[4];
         return node;
       case 531:
         node.typeAnnotation = fields[0];
