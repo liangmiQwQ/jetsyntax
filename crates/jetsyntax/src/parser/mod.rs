@@ -905,7 +905,14 @@ impl<'s> Parser<'s> {
         asynchronous: bool,
     ) -> Result<ParsedNode, ParseError> {
         // Const specialization keeps explicit-only ambient handling out of ordinary functions.
-        self.parse_function_impl::<false>(declaration, asynchronous, 0)
+        self.parse_function_impl::<false>(declaration, asynchronous, false, 0)
+    }
+
+    fn parse_default_export_function(
+        &mut self,
+        asynchronous: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        self.parse_function_impl::<false>(true, asynchronous, true, 0)
     }
 
     #[cold]
@@ -918,7 +925,7 @@ impl<'s> Parser<'s> {
         let previous_grammar = self.context.grammar();
         self.context
             .set_grammar(previous_grammar.with_ambient(true).with_strict(false));
-        let declaration = self.parse_function_impl::<true>(true, asynchronous, start);
+        let declaration = self.parse_function_impl::<true>(true, asynchronous, false, start);
         self.context.set_grammar(previous_grammar);
         declaration
     }
@@ -928,6 +935,7 @@ impl<'s> Parser<'s> {
         &mut self,
         declaration: bool,
         asynchronous: bool,
+        allow_anonymous: bool,
         declaration_start: u32,
     ) -> Result<ParsedNode, ParseError> {
         let start = if asynchronous {
@@ -950,7 +958,7 @@ impl<'s> Parser<'s> {
                 self.parse_identifier()?
             })
         } else {
-            if declaration {
+            if declaration && !allow_anonymous {
                 self.error(self.current_span(), "function declaration requires a name");
             }
             None
@@ -1567,16 +1575,28 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_class(&mut self, declaration: bool) -> Result<ParsedNode, ParseError> {
+        self.parse_class_impl(declaration, false)
+    }
+
+    fn parse_default_export_class(&mut self) -> Result<ParsedNode, ParseError> {
+        self.parse_class_impl(true, true)
+    }
+
+    fn parse_class_impl(
+        &mut self,
+        declaration: bool,
+        allow_anonymous: bool,
+    ) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Class).start;
         if self.options.language.is_typescript()
             || self.options.syntax_extensions.typescript_js_compatibility
         {
-            return self.parse_typescript_class(start, declaration, false, false);
+            return self.parse_typescript_class(start, declaration, false, allow_anonymous);
         }
         let id = if Self::is_identifier_name(self.current.kind) {
             self.parse_binding_identifier(BindingKind::Lexical)?.value()
         } else {
-            if declaration {
+            if declaration && !allow_anonymous {
                 self.error(self.current_span(), "class declaration requires a name");
             }
             self.tape.push_null()?
@@ -3124,10 +3144,10 @@ impl<'s> Parser<'s> {
                 TokenKind::Async
                     if self.followed_by_token_without_line_break(TokenKind::Function) =>
                 {
-                    (self.parse_function(true, true)?, false)
+                    (self.parse_default_export_function(true)?, false)
                 }
-                TokenKind::Function => (self.parse_function(true, false)?, false),
-                TokenKind::Class => (self.parse_class(true)?, false),
+                TokenKind::Function => (self.parse_default_export_function(false)?, false),
+                TokenKind::Class => (self.parse_default_export_class()?, false),
                 _ => (self.parse_assignment_expression(true)?, true),
             };
             let _ = self.context.declare_export("default", declaration.span);

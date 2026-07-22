@@ -596,6 +596,50 @@ describe("parse", () => {
     ]);
   });
 
+  it("materializes anonymous default export declarations with null identifiers", () => {
+    const cases = [
+      ["export default function() {}", "FunctionDeclaration", false, false],
+      ["export default function*() { yield value; }", "FunctionDeclaration", true, false],
+      ["export default async function() { await value; }", "FunctionDeclaration", false, true],
+      ["export default async function*() { yield await value; }", "FunctionDeclaration", true, true],
+      ["export default class {}", "ClassDeclaration"],
+    ];
+
+    for (const [source, type, generator, asynchronous] of cases) {
+      const result = parse(source, { semanticErrors: true, sourceType: "module" });
+
+      expect(result.diagnostics, source).toEqual([]);
+      expect(result.program.body[0]).toMatchObject({
+        type: "ExportDefaultDeclaration",
+        declaration: {
+          type,
+          id: null,
+          ...(type === "FunctionDeclaration" ? { generator, async: asynchronous } : {}),
+        },
+      });
+    }
+
+    for (const source of ["export default function<T>() {}", "export default class<T> {}"]) {
+      const result = parse(source, { lang: "ts", semanticErrors: true, sourceType: "module" });
+      expect(result.diagnostics, source).toEqual([]);
+      expect(result.program.body[0].declaration.id).toBeNull();
+    }
+
+    for (
+      const source of ["function() {}", "class {}", "export function() {}", "export class {}"]
+    ) {
+      expect(parse(source, { semanticErrors: true, sourceType: "module" }).diagnostics, source).not
+        .toEqual([]);
+    }
+
+    const named = parse(
+      "export default function named() {}",
+      { semanticErrors: true, sourceType: "module" },
+    );
+    expect(named.diagnostics).toEqual([]);
+    expect(named.program.body[0].declaration.id).toMatchObject({ name: "named" });
+  });
+
   it("ends bare yield expressions at enclosing expression boundaries", () => {
     const source = [
       "function* sequence(value) {",

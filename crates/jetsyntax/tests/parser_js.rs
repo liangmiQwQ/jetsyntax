@@ -473,6 +473,101 @@ fn parser_should_accept_functions_classes_and_modules() {
     assert_clean_cases(&cases);
 }
 
+/// Default exports permit anonymous declaration forms without weakening ordinary declarations.
+#[test]
+fn parser_should_allow_anonymous_default_export_declarations() {
+    assert_clean_cases(&[
+        GrammarCase::module(
+            "anonymous default function",
+            "export default function() {}",
+            &[
+                NodeTag::EXPORT_DEFAULT_DECLARATION,
+                NodeTag::FUNCTION_DECLARATION,
+            ],
+        ),
+        GrammarCase::module(
+            "anonymous default generator",
+            "export default function*() { yield value; }",
+            &[
+                NodeTag::EXPORT_DEFAULT_DECLARATION,
+                NodeTag::FUNCTION_DECLARATION,
+                NodeTag::YIELD_EXPRESSION,
+            ],
+        ),
+        GrammarCase::module(
+            "anonymous default async function",
+            "export default async function() { await value; }",
+            &[
+                NodeTag::EXPORT_DEFAULT_DECLARATION,
+                NodeTag::FUNCTION_DECLARATION,
+                NodeTag::AWAIT_EXPRESSION,
+            ],
+        ),
+        GrammarCase::module(
+            "anonymous default class",
+            "export default class {}",
+            &[
+                NodeTag::EXPORT_DEFAULT_DECLARATION,
+                NodeTag::CLASS_DECLARATION,
+            ],
+        ),
+    ]);
+
+    for source in [
+        "export default function<T>() {}",
+        "export default class<T> {}",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                language: Language::TypeScript,
+                source_kind: SourceKind::Module,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse anonymous TypeScript default export");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect("valid default export tape");
+    }
+
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::module(
+                "anonymous ordinary function declaration",
+                "function() {}",
+                &[NodeTag::FUNCTION_DECLARATION],
+            ),
+            GrammarCase::module(
+                "anonymous ordinary class declaration",
+                "class {}",
+                &[NodeTag::CLASS_DECLARATION],
+            ),
+            GrammarCase::module(
+                "anonymous named function export",
+                "export function() {}",
+                &[
+                    NodeTag::EXPORT_NAMED_DECLARATION,
+                    NodeTag::FUNCTION_DECLARATION,
+                ],
+            ),
+            GrammarCase::module(
+                "anonymous named class export",
+                "export class {}",
+                &[
+                    NodeTag::EXPORT_NAMED_DECLARATION,
+                    NodeTag::CLASS_DECLARATION,
+                ],
+            ),
+        ],
+        true,
+    );
+}
+
 /// Empty arrow parameter lists accept either expression or block bodies in nested expression positions.
 #[test]
 fn parser_should_accept_zero_parameter_arrow_functions() {
