@@ -3217,6 +3217,131 @@ describe("parse", () => {
     expect(parse("label: value;", { lang: "js" }).diagnostics).toEqual([]);
   });
 
+  it("restricts declarations to statement-list positions", () => {
+    for (
+      const source of [
+        "if (condition) let value;",
+        "if (condition) class Value {}",
+        "if (condition) function* generated() {}",
+        "if (condition) async function asynchronous() {}",
+        "if (condition); else class Alternate {}",
+        "'use strict'; if (condition) function strict() {}",
+        "while (condition) function nested() {}",
+        "do class Nested {} while (condition);",
+        "for (;;) const value = 1;",
+        "for (key in object) let value;",
+        "for (value of values) class Nested {}",
+        "async function run() { for await (value of values) let nested; }",
+        "with (object) let value;",
+        "with (object) function nested() {}",
+        "label: const value = 1;",
+        "label: function* generated() {}",
+        "label: async function asynchronous() {}",
+        "if (condition) label: function nested() {}",
+        "while (condition) first: second: function nested() {}",
+        "if (condition) let\n[value] = values;",
+      ]
+    ) {
+      const result = parse(source, {
+        lang: "js",
+        semanticErrors: true,
+        sourceType: "script",
+      });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+
+    for (
+      const source of [
+        "for (;;) interface Contract {}",
+        "for (;;) type Value = number;",
+        "if (condition) declare class Ambient {}",
+        "while (condition) enum Choice {}",
+      ]
+    ) {
+      const result = parse(source, {
+        lang: "ts",
+        semanticErrors: true,
+        sourceType: "script",
+      });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+
+    for (
+      const source of [
+        "label: import value from 'package';",
+        "if (condition) export { value };",
+      ]
+    ) {
+      const result = parse(source, {
+        lang: "js",
+        semanticErrors: true,
+        sourceType: "module",
+      });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
+  it("preserves valid statements and sloppy Annex B functions", () => {
+    for (
+      const source of [
+        "if (condition) function annexB() {}",
+        "label: function annexB() {}",
+        "first: second: function annexB() {}",
+        "label: if (condition) function annexB() {}",
+        "while (condition) var value;",
+        "if (condition) { let value; class Nested {} }",
+        "for (;;) { const value = 1; function nested() {} }",
+        "if (condition) letValue;",
+        "if (condition) let\nvalue = 1;",
+        "if (condition) let\n{}",
+        "if (condition) let\n\\u0076alue = 1;",
+        "if (condition) async\nfunction separated() {}",
+        "label: import('package');",
+        "'use strict'; function topLevel() {}",
+      ]
+    ) {
+      const result = parse(source, {
+        lang: "js",
+        semanticErrors: true,
+        sourceType: "script",
+      });
+      expect(result.diagnostics, source).toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+
+    const asi = parse("if (condition) let\nvalue = 1;", {
+      lang: "js",
+      semanticErrors: true,
+      sourceType: "script",
+    });
+    expect(asi.program.body).toMatchObject([
+      {
+        type: "IfStatement",
+        consequent: { type: "ExpressionStatement", expression: { name: "let" } },
+      },
+      { type: "ExpressionStatement", expression: { type: "AssignmentExpression" } },
+    ]);
+
+    for (
+      const source of [
+        "while (condition) function nested() {}",
+        "if (condition) const value = 1;",
+        "if (condition) label: function nested() {}",
+      ]
+    ) {
+      const result = parse(source, {
+        lang: "js",
+        semanticErrors: false,
+        sourceType: "script",
+      });
+      expect(result.diagnostics, source).toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
   it("recovers ambient module heads and preserves scope-specific diagnostics", () => {
     const semanticLegacy = parse("declare module Legacy.Deep {}", {
       lang: "ts",

@@ -335,6 +335,136 @@ fn parser_should_accept_every_statement_family() {
     assert_clean_cases(&cases);
 }
 
+#[test]
+fn parser_should_restrict_declarations_to_statement_list_items() {
+    for source in [
+        "if (condition) let value;",
+        "if (condition) const value = 1;",
+        "if (condition) class Value {}",
+        "if (condition) function* generated() {}",
+        "if (condition) async function asynchronous() {}",
+        "if (condition); else class Alternate {}",
+        "'use strict'; if (condition) function strict() {}",
+        "while (condition) function nested() {}",
+        "do class Nested {} while (condition);",
+        "for (;;) const value = 1;",
+        "for (key in object) let value;",
+        "for (value of values) class Nested {}",
+        "async function run() { for await (value of values) let nested; }",
+        "with (object) let value;",
+        "with (object) function nested() {}",
+        "label: const value = 1;",
+        "label: function* generated() {}",
+        "label: async function asynchronous() {}",
+        "if (condition) label: function nested() {}",
+        "while (condition) first: second: function nested() {}",
+        "if (condition) let\n[value] = values;",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Script,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect(source);
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect(source);
+    }
+
+    for source in [
+        "label: import value from 'package';",
+        "if (condition) export { value };",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect(source);
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect(source);
+    }
+
+    for source in [
+        "for (;;) interface Contract {}",
+        "for (;;) type Value = number;",
+        "if (condition) declare class Ambient {}",
+        "while (condition) enum Choice {}",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                language: Language::TypeScript,
+                source_kind: SourceKind::Script,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect(source);
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect(source);
+    }
+}
+
+#[test]
+fn parser_should_preserve_valid_statement_and_annex_b_positions() {
+    for source in [
+        "if (condition) function annex_b() {}",
+        "label: function annex_b() {}",
+        "first: second: function annex_b() {}",
+        "label: if (condition) function annex_b() {}",
+        "while (condition) var value;",
+        "if (condition) { let value; class Nested {} }",
+        "for (;;) { const value = 1; function nested() {} }",
+        "if (condition) letValue;",
+        "if (condition) let\nvalue = 1;",
+        "if (condition) let\n{}",
+        "if (condition) let\n\\u0076alue = 1;",
+        "if (condition) async\nfunction separated() {}",
+        "label: import('package');",
+        "'use strict'; function top_level() {}",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Script,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect(source);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect(source);
+    }
+
+    for source in [
+        "while (condition) function nested() {}",
+        "if (condition) const value = 1;",
+        "if (condition) label: function nested() {}",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Script,
+                semantic_errors: false,
+                ..ParseOptions::default()
+            },
+        )
+        .expect(source);
+        assert!(parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect(source);
+    }
+}
+
 /// Lexical loop-head bindings are isolated from surrounding and sibling loop scopes.
 #[test]
 fn parser_should_isolate_lexical_for_head_bindings() {

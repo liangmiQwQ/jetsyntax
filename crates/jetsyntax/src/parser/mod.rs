@@ -205,6 +205,27 @@ struct FunctionContext {
     cover_arrow_parameter_yield: Option<Span>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StatementPosition {
+    ListItem,
+    Statement,
+    IfClause,
+    LabelledItem,
+}
+
+impl StatementPosition {
+    const fn allows_annex_b_function(self) -> bool {
+        matches!(self, Self::IfClause | Self::LabelledItem)
+    }
+
+    const fn labelled_body(self) -> Self {
+        match self {
+            Self::ListItem | Self::LabelledItem => Self::LabelledItem,
+            Self::Statement | Self::IfClause => Self::Statement,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum TypeScriptDeclareDeclarationKind {
     Variable,
@@ -529,7 +550,17 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_statement(&mut self) -> Result<ParsedNode, ParseError> {
+        self.parse_statement_at(StatementPosition::ListItem)
+    }
+
+    fn parse_statement_at(
+        &mut self,
+        position: StatementPosition,
+    ) -> Result<ParsedNode, ParseError> {
         let assignment_patterns = self.assignment_pattern_checkpoint();
+        if position != StatementPosition::ListItem && self.reports_ecmascript_early_errors() {
+            self.diagnose_declaration_statement_position(position);
+        }
         let statement = match self.current.kind {
             TokenKind::Semicolon => self.parse_empty_statement(),
             TokenKind::LeftBrace => self.parse_block_statement(),
@@ -543,7 +574,7 @@ impl<'s> Parser<'s> {
                 VariableDeclarationKind::from_token(self.current.kind),
                 false,
             ),
-            TokenKind::Let if self.starts_let_declaration() => {
+            TokenKind::Let if self.starts_let_declaration_at(position) => {
                 self.parse_variable_declaration(true, VariableDeclarationKind::Let, false)
             }
             TokenKind::Using if self.starts_using_declaration(false) => {
@@ -552,7 +583,7 @@ impl<'s> Parser<'s> {
             TokenKind::Await if self.starts_await_using_declaration(false) => {
                 self.parse_variable_declaration(true, VariableDeclarationKind::AwaitUsing, false)
             }
-            TokenKind::Declare => self.parse_typescript_declare_or_expression_statement(),
+            TokenKind::Declare => self.parse_typescript_declare_or_expression_statement(position),
             TokenKind::Type if self.options.language.is_typescript() => {
                 self.parse_type_alias_declaration()
             }
@@ -587,7 +618,7 @@ impl<'s> Parser<'s> {
             TokenKind::Try => self.parse_try_statement(),
             TokenKind::Class => self.parse_class(true),
             TokenKind::Import if self.import_starts_expression() => {
-                self.parse_expression_or_labeled_statement()
+                self.parse_expression_or_labeled_statement(position)
             }
             TokenKind::Import => self.parse_import_declaration(),
             TokenKind::Export => self.parse_export_declaration(),
@@ -595,10 +626,47 @@ impl<'s> Parser<'s> {
             TokenKind::Continue => self.parse_jump_statement(true),
             TokenKind::Debugger => self.parse_debugger_statement(),
             TokenKind::With => self.parse_with_statement(),
-            _ => self.parse_expression_or_labeled_statement(),
+            _ => self.parse_expression_or_labeled_statement(position),
         };
         self.rollback_assignment_patterns(assignment_patterns);
         statement
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn diagnose_declaration_statement_position(&mut self, position: StatementPosition) {
+        let declaration = match self.current.kind {
+            TokenKind::Function => {
+                let mut lookahead = Lexer::new(self.source);
+                lookahead.set_position(self.current.end as usize);
+                let ordinary = lookahead.next_token().kind != TokenKind::Star;
+                if ordinary
+                    && position.allows_annex_b_function()
+                    && !self.context.grammar().strict()
+                {
+                    return;
+                }
+                true
+            }
+            TokenKind::Async => self.followed_by_token_without_line_break(TokenKind::Function),
+            TokenKind::Class | TokenKind::Const | TokenKind::Export => true,
+            TokenKind::Let => self.starts_let_declaration_at(position),
+            TokenKind::Import => !self.import_starts_expression(),
+            TokenKind::Declare => self.typescript_declare_declaration_kind().is_some(),
+            TokenKind::Type | TokenKind::Interface | TokenKind::Enum => {
+                self.options.language.is_typescript()
+            }
+            TokenKind::Namespace | TokenKind::Module => self.starts_typescript_module_declaration(),
+            TokenKind::Identifier => self.starts_typescript_global_augmentation(),
+            TokenKind::Abstract => self.starts_typescript_abstract_class_declaration(),
+            _ => false,
+        };
+        if declaration {
+            self.error(
+                self.current_span(),
+                "declarations are not allowed in this statement position",
+            );
+        }
     }
 
     fn parse_empty_statement(&mut self) -> Result<ParsedNode, ParseError> {
@@ -619,8 +687,11 @@ impl<'s> Parser<'s> {
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
             let before = self.current.start;
             body.push(
-                self.parse_statement_with_using_declaration_allowed(true)?
-                    .value(),
+                self.parse_statement_with_using_declaration_allowed(
+                    true,
+                    StatementPosition::ListItem,
+                )?
+                .value(),
             );
             if self.current.start == before {
                 self.bump();
@@ -785,10 +856,11 @@ impl<'s> Parser<'s> {
     fn parse_statement_with_using_declaration_allowed(
         &mut self,
         allowed: bool,
+        position: StatementPosition,
     ) -> Result<ParsedNode, ParseError> {
         let previous = self.using_declaration_allowed;
         self.using_declaration_allowed = allowed;
-        let statement = self.parse_statement();
+        let statement = self.parse_statement_at(position);
         self.using_declaration_allowed = previous;
         statement
     }
@@ -917,9 +989,10 @@ impl<'s> Parser<'s> {
     #[inline(never)]
     fn parse_typescript_declare_or_expression_statement(
         &mut self,
+        position: StatementPosition,
     ) -> Result<ParsedNode, ParseError> {
         let Some(kind) = self.typescript_declare_declaration_kind() else {
-            return self.parse_expression_or_labeled_statement();
+            return self.parse_expression_or_labeled_statement(position);
         };
         self.parse_typescript_declare_declaration(kind)
     }
@@ -3592,9 +3665,10 @@ impl<'s> Parser<'s> {
         self.expect(TokenKind::LeftParen);
         let test = self.parse_expression(true)?;
         self.expect(TokenKind::RightParen);
-        let consequent = self.parse_statement_with_using_declaration_allowed(false)?;
+        let consequent = self
+            .parse_statement_with_using_declaration_allowed(false, StatementPosition::IfClause)?;
         let alternate = if self.eat(TokenKind::Else).is_some() {
-            self.parse_statement_with_using_declaration_allowed(false)?
+            self.parse_statement_with_using_declaration_allowed(false, StatementPosition::IfClause)?
                 .value()
         } else {
             self.tape.push_null()?
@@ -3614,7 +3688,8 @@ impl<'s> Parser<'s> {
         self.expect(TokenKind::RightParen);
         self.context
             .push_label(None, LabelKind::Loop, Span::new(start, start));
-        let body = self.parse_statement_with_using_declaration_allowed(false)?;
+        let body = self
+            .parse_statement_with_using_declaration_allowed(false, StatementPosition::Statement)?;
         let _ = self.context.pop_label();
         self.node(
             NodeTag::WHILE_STATEMENT,
@@ -3627,7 +3702,8 @@ impl<'s> Parser<'s> {
         let start = self.take().start;
         self.context
             .push_label(None, LabelKind::Loop, Span::new(start, start));
-        let body = self.parse_statement_with_using_declaration_allowed(false)?;
+        let body = self
+            .parse_statement_with_using_declaration_allowed(false, StatementPosition::Statement)?;
         let _ = self.context.pop_label();
         self.expect(TokenKind::While);
         self.expect(TokenKind::LeftParen);
@@ -3715,7 +3791,10 @@ impl<'s> Parser<'s> {
             self.expect(TokenKind::RightParen);
             self.context
                 .push_label(None, LabelKind::Loop, Span::new(start, start));
-            let body = self.parse_statement_with_using_declaration_allowed(false)?;
+            let body = self.parse_statement_with_using_declaration_allowed(
+                false,
+                StatementPosition::Statement,
+            )?;
             let _ = self.context.pop_label();
             let asynchronous = self.tape.push_bool(asynchronous)?;
             return self.node(
@@ -3751,7 +3830,8 @@ impl<'s> Parser<'s> {
         self.expect(TokenKind::RightParen);
         self.context
             .push_label(None, LabelKind::Loop, Span::new(start, start));
-        let body = self.parse_statement_with_using_declaration_allowed(false)?;
+        let body = self
+            .parse_statement_with_using_declaration_allowed(false, StatementPosition::Statement)?;
         let _ = self.context.pop_label();
         self.node(
             NodeTag::FOR_STATEMENT,
@@ -3787,8 +3867,11 @@ impl<'s> Parser<'s> {
                 TokenKind::Case | TokenKind::Default | TokenKind::RightBrace | TokenKind::Eof
             ) {
                 consequent.push(
-                    self.parse_statement_with_using_declaration_allowed(false)?
-                        .value(),
+                    self.parse_statement_with_using_declaration_allowed(
+                        false,
+                        StatementPosition::ListItem,
+                    )?
+                    .value(),
                 );
             }
             let end = self.previous_end(case_start);
@@ -3911,7 +3994,8 @@ impl<'s> Parser<'s> {
         self.expect(TokenKind::LeftParen);
         let object = self.parse_expression(true)?;
         self.expect(TokenKind::RightParen);
-        let body = self.parse_statement_with_using_declaration_allowed(false)?;
+        let body = self
+            .parse_statement_with_using_declaration_allowed(false, StatementPosition::Statement)?;
         self.node(
             NodeTag::WITH_STATEMENT,
             Span::new(start, body.span.end),
@@ -3919,7 +4003,10 @@ impl<'s> Parser<'s> {
         )
     }
 
-    fn parse_expression_or_labeled_statement(&mut self) -> Result<ParsedNode, ParseError> {
+    fn parse_expression_or_labeled_statement(
+        &mut self,
+        position: StatementPosition,
+    ) -> Result<ParsedNode, ParseError> {
         let starts_with_label_identifier =
             Self::is_identifier_name(self.current.kind) || self.current.kind == TokenKind::Yield;
         let expression = self.parse_expression(true)?;
@@ -3950,7 +4037,8 @@ impl<'s> Parser<'s> {
                 LabelKind::Statement
             };
             self.context.push_label(name, kind, expression.span);
-            let body = self.parse_statement_with_using_declaration_allowed(false)?;
+            let body = self
+                .parse_statement_with_using_declaration_allowed(false, position.labelled_body())?;
             let _ = self.context.pop_label();
             return self.node(
                 NodeTag::LABELED_STATEMENT,
@@ -7753,8 +7841,11 @@ impl<'s> Parser<'s> {
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
             let before = self.current.start;
             body.push(
-                self.parse_statement_with_using_declaration_allowed(true)?
-                    .value(),
+                self.parse_statement_with_using_declaration_allowed(
+                    true,
+                    StatementPosition::ListItem,
+                )?
+                .value(),
             );
             if self.current.start == before {
                 self.bump();
@@ -8221,6 +8312,20 @@ impl<'s> Parser<'s> {
         lookahead.set_position(self.current.end as usize);
         let binding = lookahead.next_token();
         binding.kind == TokenKind::LeftBracket || Self::starts_using_binding(binding)
+    }
+
+    fn starts_let_declaration_at(&self, position: StatementPosition) -> bool {
+        if position == StatementPosition::ListItem {
+            return self.starts_let_declaration();
+        }
+        if self.current.kind != TokenKind::Let || self.current.flags.escaped() {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let binding = lookahead.next_token();
+        binding.kind == TokenKind::LeftBracket
+            || !binding.flags.line_break_before() && Self::starts_using_binding(binding)
     }
 
     fn starts_using_declaration(&self, for_head: bool) -> bool {
