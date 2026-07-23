@@ -2247,6 +2247,79 @@ describe("parse", () => {
     });
   });
 
+  it("materializes TypeScript parameter properties", () => {
+    const source = [
+      "class Service extends Base {",
+      "  constructor(",
+      "    public readonly name?: string,",
+      "    protected count = 1,",
+      "    private override enabled: boolean,",
+      "  ) { super(); }",
+      "}",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true, semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[0].body.body[0].value.params).toMatchObject([
+      {
+        type: "TSParameterProperty",
+        accessibility: "public",
+        readonly: true,
+        parameter: {
+          type: "Identifier",
+          name: "name",
+          optional: true,
+          typeAnnotation: { type: "TSTypeAnnotation" },
+        },
+      },
+      {
+        type: "TSParameterProperty",
+        accessibility: "protected",
+        parameter: {
+          type: "AssignmentPattern",
+          left: { type: "Identifier", name: "count" },
+        },
+      },
+      {
+        type: "TSParameterProperty",
+        accessibility: "private",
+        override: true,
+        parameter: { type: "Identifier", name: "enabled" },
+      },
+    ]);
+    const property = result.program.body[0].body.body[0].value.params[0];
+    expect(source.slice(property.start, property.end)).toBe("public readonly name?: string");
+    expect(property.range).toEqual([property.start, property.end]);
+    expect(property.parameter.start).toBeGreaterThan(property.start);
+    expect(property.parameter.end).toBe(property.end);
+  });
+
+  it("recovers invalid TypeScript parameter-property contexts", () => {
+    for (
+      const source of [
+        "function ordinary(public value: string) {}",
+        "class C { method(readonly value: string) {} }",
+        "class C { constructor(public value: string); }",
+        "type Callback = (private value: string) => void;",
+        "class C { constructor(public { value }: Source) {} }",
+        "class C { constructor(public ...values: string[]) {} }",
+        "class C { constructor(readonly override value: string) {} }",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts", semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.panicked, source).toBe(false);
+      expect(JSON.stringify(result.program), source).toContain("TSParameterProperty");
+    }
+
+    const syntaxOnly = parse(
+      "function ordinary(public value: string) {} class C { constructor(readonly value: string); }",
+      { lang: "ts", semanticErrors: false },
+    );
+    expect(syntaxOnly.diagnostics).toEqual([]);
+    expect(JSON.stringify(syntaxOnly.program).match(/TSParameterProperty/g)).toHaveLength(2);
+  });
+
   it("keeps optional parameter syntax out of JavaScript", () => {
     const result = parse("function invalid(value?: Input) {}", { lang: "js" });
 

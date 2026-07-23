@@ -317,6 +317,7 @@ struct ParsedParameterList {
     has_rest: bool,
     has_trailing_comma: bool,
     simple: bool,
+    parameter_property_spans: Option<Vec<Span>>,
 }
 
 struct ParsedParameters {
@@ -324,6 +325,7 @@ struct ParsedParameters {
     has_rest: bool,
     has_trailing_comma: bool,
     simple: bool,
+    parameter_property_spans: Option<Vec<Span>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1149,7 +1151,7 @@ impl<'s> Parser<'s> {
                 .unwrap_or_default();
             let _ = self.declare_binding(name, BindingKind::Lexical, id.span);
         }
-        let params = self.parse_parameter_list()?;
+        let params = self.parse_parameter_list(false)?;
         self.context
             .set_grammar(self.context.grammar().with_parameters(false));
         let rest_trailing_comma_span =
@@ -1466,35 +1468,84 @@ impl<'s> Parser<'s> {
         }
     }
 
-    fn parse_parameter_list(&mut self) -> Result<ParsedParameterList, ParseError> {
-        let params = self.parse_parameters()?;
+    fn parse_parameter_list(
+        &mut self,
+        constructor_implementation_candidate: bool,
+    ) -> Result<ParsedParameterList, ParseError> {
+        let params = self.parse_parameters(constructor_implementation_candidate)?;
         Ok(ParsedParameterList {
             count: params.values.len(),
             value: self.tape.push_list(&params.values)?,
             has_rest: params.has_rest,
             has_trailing_comma: params.has_trailing_comma,
             simple: params.simple,
+            parameter_property_spans: params.parameter_property_spans,
         })
     }
 
-    fn parse_parameters(&mut self) -> Result<ParsedParameters, ParseError> {
+    fn parse_parameters(
+        &mut self,
+        constructor_implementation_candidate: bool,
+    ) -> Result<ParsedParameters, ParseError> {
         let mut values = Vec::new();
         let mut has_rest = false;
         let mut has_trailing_comma = false;
         let mut simple = true;
+        let mut parameter_property_spans = None;
         while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
-            let parameter = if self.eat(TokenKind::Ellipsis).is_some() {
+            let parameter_property = self.parse_typescript_parameter_property_modifiers();
+            let rest = self.eat(TokenKind::Ellipsis);
+            let binding_span =
+                Self::is_identifier_name(self.current.kind).then(|| Self::token_span(self.current));
+            let parameter = if rest.is_some() {
                 has_rest = true;
                 simple = false;
                 let argument = self.parse_binding_pattern(BindingKind::Parameter)?;
                 self.parse_binding_rest_element(argument)?
             } else {
                 let pattern = self.parse_parameter_binding()?;
+                let binding_pattern = self.last_node_tag != Some(NodeTag::IDENTIFIER);
                 if self.current.kind == TokenKind::Eq {
                     simple = false;
                 }
-                simple &= self.last_node_tag == Some(NodeTag::IDENTIFIER);
-                self.parse_binding_default(pattern)?
+                simple &= !binding_pattern;
+                let parameter = self.parse_binding_default(pattern)?;
+                if let Some((start, modifiers)) = parameter_property {
+                    self.diagnose_typescript_parameter_property_parameter(
+                        parameter.span,
+                        binding_span,
+                        binding_pattern,
+                        false,
+                    );
+                    self.finish_typescript_parameter_property(
+                        start,
+                        parameter,
+                        modifiers,
+                        constructor_implementation_candidate,
+                        &mut parameter_property_spans,
+                    )?
+                } else {
+                    parameter
+                }
+            };
+            let parameter = if let Some((start, modifiers)) = parameter_property
+                && rest.is_some()
+            {
+                self.diagnose_typescript_parameter_property_parameter(
+                    parameter.span,
+                    binding_span,
+                    false,
+                    true,
+                );
+                self.finish_typescript_parameter_property(
+                    start,
+                    parameter,
+                    modifiers,
+                    constructor_implementation_candidate,
+                    &mut parameter_property_spans,
+                )?
+            } else {
+                parameter
             };
             values.push(parameter.value());
             if self.eat(TokenKind::Comma).is_none() {
@@ -1511,7 +1562,205 @@ impl<'s> Parser<'s> {
             has_rest,
             has_trailing_comma,
             simple,
+            parameter_property_spans,
         })
+    }
+
+    fn parse_typescript_parameter_property_modifiers(
+        &mut self,
+    ) -> Option<(u32, TypeScriptModifiers)> {
+        if !(self.options.language.is_typescript()
+            || self.options.syntax_extensions.typescript_js_compatibility)
+        {
+            return None;
+        }
+        if !(matches!(
+            self.current.kind,
+            TokenKind::Public
+                | TokenKind::Protected
+                | TokenKind::Private
+                | TokenKind::Override
+                | TokenKind::Readonly
+                | TokenKind::Static
+                | TokenKind::Export
+                | TokenKind::Declare
+                | TokenKind::Abstract
+                | TokenKind::Async
+                | TokenKind::Const
+                | TokenKind::Default
+                | TokenKind::In
+                | TokenKind::Out
+                | TokenKind::Accessor
+        ) || self.current.kind == TokenKind::Identifier && self.current.flags.escaped())
+        {
+            return None;
+        }
+        let start = self.current.start;
+        let mut modifiers = TypeScriptModifiers::default();
+        loop {
+            if let Some(accessibility) = self.current_accessibility_modifier()
+                && self.typescript_modifier_has_class_member_follower(false)
+            {
+                let token = self.take();
+                self.diagnose_typescript_parameter_property_accessibility(
+                    modifiers,
+                    Self::token_span(token),
+                );
+                modifiers.accessibility.get_or_insert(accessibility);
+                continue;
+            }
+            if self.current_typescript_modifier_matches(TokenKind::Override, "override")
+                && self.typescript_modifier_has_class_member_follower(false)
+            {
+                let token = self.take();
+                self.diagnose_typescript_parameter_property_override(
+                    modifiers,
+                    Self::token_span(token),
+                );
+                modifiers.r#override = true;
+                continue;
+            }
+            if self.current_typescript_modifier_matches(TokenKind::Readonly, "readonly")
+                && self.typescript_modifier_has_class_member_follower(false)
+            {
+                let token = self.take();
+                if modifiers.readonly && self.options.semantic_errors {
+                    self.error(
+                        Self::token_span(token),
+                        "duplicate TypeScript parameter property modifier",
+                    );
+                }
+                modifiers.readonly = true;
+                continue;
+            }
+            if self.current_is_disallowed_typescript_parameter_modifier()
+                && self.typescript_modifier_has_class_member_follower(false)
+            {
+                let token = self.take();
+                if self.options.semantic_errors {
+                    self.error(
+                        Self::token_span(token),
+                        "modifier cannot appear on a parameter",
+                    );
+                }
+                continue;
+            }
+            break;
+        }
+        modifiers.wire_any().then_some((start, modifiers))
+    }
+
+    fn current_is_disallowed_typescript_parameter_modifier(&self) -> bool {
+        self.current_typescript_modifier_matches(TokenKind::Static, "static")
+            || self.current_typescript_modifier_matches(TokenKind::Export, "export")
+            || self.current_typescript_modifier_matches(TokenKind::Declare, "declare")
+            || self.current_typescript_modifier_matches(TokenKind::Abstract, "abstract")
+            || self.current_typescript_modifier_matches(TokenKind::Async, "async")
+            || self.current_typescript_modifier_matches(TokenKind::Const, "const")
+            || self.current_typescript_modifier_matches(TokenKind::Default, "default")
+            || self.current_typescript_modifier_matches(TokenKind::In, "in")
+            || self.current_typescript_modifier_matches(TokenKind::Out, "out")
+            || self.current_typescript_modifier_matches(TokenKind::Accessor, "accessor")
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn finish_typescript_parameter_property(
+        &mut self,
+        start: u32,
+        parameter: ParsedNode,
+        modifiers: TypeScriptModifiers,
+        constructor_implementation_candidate: bool,
+        constructor_parameter_property_spans: &mut Option<Vec<Span>>,
+    ) -> Result<ParsedNode, ParseError> {
+        let span = Span::new(start, parameter.span.end);
+        if self.options.semantic_errors {
+            if constructor_implementation_candidate {
+                constructor_parameter_property_spans
+                    .get_or_insert_with(Vec::new)
+                    .push(span);
+            } else {
+                self.error(
+                    span,
+                    "a parameter property is only allowed in a constructor implementation",
+                );
+            }
+        }
+        let tag = NodeTag::TS_PARAMETER_PROPERTY;
+        let node = self
+            .tape
+            .push_node(tag, span, modifiers.wire_flags(), &[parameter.value()])?;
+        self.last_node_tag = Some(tag);
+        self.last_assignment_target = AssignmentTargetType::Invalid;
+        Ok(ParsedNode { node, span })
+    }
+
+    fn diagnose_typescript_parameter_property_parameter(
+        &mut self,
+        span: Span,
+        binding_span: Option<Span>,
+        binding_pattern: bool,
+        rest: bool,
+    ) {
+        if !self.options.semantic_errors {
+            return;
+        }
+        if binding_pattern {
+            self.error(
+                span,
+                "a parameter property may not be declared using a binding pattern",
+            );
+        }
+        if rest {
+            self.error(
+                span,
+                "a parameter property cannot be declared using a rest parameter",
+            );
+        }
+        if binding_span.is_some_and(|span| self.static_property_name_matches(span, "constructor")) {
+            self.error(span, "a parameter property cannot be named constructor");
+        }
+    }
+
+    fn diagnose_typescript_parameter_property_accessibility(
+        &mut self,
+        modifiers: TypeScriptModifiers,
+        span: Span,
+    ) {
+        if !self.options.semantic_errors {
+            return;
+        }
+        if modifiers.accessibility.is_some() {
+            self.error(span, "duplicate TypeScript parameter property modifier");
+        }
+        if modifiers.r#override {
+            self.error(
+                span,
+                "accessibility modifier must precede override modifier",
+            );
+        }
+        if modifiers.readonly {
+            self.error(
+                span,
+                "accessibility modifier must precede readonly modifier",
+            );
+        }
+    }
+
+    fn diagnose_typescript_parameter_property_override(
+        &mut self,
+        modifiers: TypeScriptModifiers,
+        span: Span,
+    ) {
+        if !self.options.semantic_errors {
+            return;
+        }
+        if modifiers.r#override {
+            self.error(span, "duplicate TypeScript parameter property modifier");
+        }
+        if modifiers.readonly {
+            self.error(span, "override modifier must precede readonly modifier");
+        }
     }
 
     fn parse_parameter_binding(&mut self) -> Result<ParsedNode, ParseError> {
@@ -1575,7 +1824,7 @@ impl<'s> Parser<'s> {
                 .with_allow_super(true)
                 .with_parameters(true),
         );
-        let params = self.parse_parameter_list()?;
+        let params = self.parse_parameter_list(self.context.grammar().allow_super_call())?;
         self.context
             .set_grammar(self.context.grammar().with_parameters(false));
         self.diagnose_method_parameter_shape(accessor, &params, self.current_span());
@@ -1591,15 +1840,7 @@ impl<'s> Parser<'s> {
         let signature_end = return_type
             .as_ref()
             .map_or(right_paren_end, ParsedNode::end);
-        if return_type.is_some()
-            && accessor == Some(AccessorKind::Set)
-            && self.options.semantic_errors
-        {
-            self.error(
-                self.current_span(),
-                "setter cannot have a return type annotation",
-            );
-        }
+        self.diagnose_setter_return_type(accessor, return_type.is_some());
         let has_use_strict = self.current.kind == TokenKind::LeftBrace
             && has_use_strict_directive(self.source, self.current.end as usize);
         if has_use_strict && !params.simple {
@@ -1621,6 +1862,7 @@ impl<'s> Parser<'s> {
             && self.current.kind != TokenKind::LeftBrace
             && let Some(end) = self.consume_typescript_function_signature_terminator(signature_end)
         {
+            self.diagnose_bodyless_typescript_parameter_properties(&params);
             if !previous_grammar.grammar.ambient()
                 && let Some(span) = rest_trailing_comma_span
             {
@@ -1710,6 +1952,28 @@ impl<'s> Parser<'s> {
                 span,
                 "setter must have exactly one non-rest parameter without a trailing comma",
             );
+        }
+    }
+
+    fn diagnose_setter_return_type(&mut self, accessor: Option<AccessorKind>, annotated: bool) {
+        if annotated && accessor == Some(AccessorKind::Set) && self.options.semantic_errors {
+            self.error(
+                self.current_span(),
+                "setter cannot have a return type annotation",
+            );
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn diagnose_bodyless_typescript_parameter_properties(&mut self, params: &ParsedParameterList) {
+        if let Some(spans) = params.parameter_property_spans.as_deref() {
+            for &span in spans {
+                self.error(
+                    span,
+                    "a parameter property is only allowed in a constructor implementation",
+                );
+            }
         }
     }
 
@@ -4213,7 +4477,7 @@ impl<'s> Parser<'s> {
                 .with_async_function(inherited_async_parameters)
                 .with_generator(inherited_generator_parameters),
         );
-        let parameters = self.parse_parameters()?;
+        let parameters = self.parse_parameters(false)?;
         self.expect(TokenKind::RightParen);
         self.expect(TokenKind::Arrow);
         self.context.set_grammar(
@@ -4257,7 +4521,7 @@ impl<'s> Parser<'s> {
             .set_grammar(self.context.grammar().with_parameters(true));
         let parenthesized = self.eat(TokenKind::LeftParen).is_some();
         let (parameters, simple_parameters, invalid_rest_trailing_comma) = if parenthesized {
-            let parameters = self.parse_parameters()?;
+            let parameters = self.parse_parameters(false)?;
             let invalid_rest_trailing_comma = parameters.has_rest && parameters.has_trailing_comma;
             let simple = parameters.simple;
             let values = parameters.values;
@@ -6863,8 +7127,10 @@ impl<'s> Parser<'s> {
         self.expect(TokenKind::LeftParen);
         let mut parameters = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
+            let parameter_property = self.parse_typescript_parameter_property_modifiers();
             let rest = self.eat(TokenKind::Ellipsis);
-            let start = rest.map_or(self.current.start, |token| token.start);
+            let inner_start = rest.map_or(self.current.start, |token| token.start);
+            let parameter_start = parameter_property.map_or(inner_start, |(start, _)| start);
             let name_token = self.take();
             if !Self::is_identifier_name(name_token.kind) && name_token.kind != TokenKind::This {
                 self.error(Self::token_span(name_token), "expected a parameter name");
@@ -6908,15 +7174,34 @@ impl<'s> Parser<'s> {
             } else {
                 self.node(NodeTag::IDENTIFIER, Self::token_span(name_token), &[name])?
             };
-            let parameter = if rest.is_some() {
+            let mut parameter = if rest.is_some() {
                 self.node(
                     NodeTag::REST_ELEMENT,
-                    Span::new(start, identifier.span.end),
+                    Span::new(inner_start, identifier.span.end),
                     &[identifier.value()],
                 )?
             } else {
                 identifier
             };
+            if let Some((_, modifiers)) = parameter_property {
+                let binding_pattern = !Self::is_identifier_name(name_token.kind)
+                    && name_token.kind != TokenKind::This;
+                let binding_span = (!binding_pattern).then(|| Self::token_span(name_token));
+                self.diagnose_typescript_parameter_property_parameter(
+                    parameter.span,
+                    binding_span,
+                    binding_pattern,
+                    rest.is_some(),
+                );
+                let mut constructor_parameter_property_spans = None;
+                parameter = self.finish_typescript_parameter_property(
+                    parameter_start,
+                    parameter,
+                    modifiers,
+                    false,
+                    &mut constructor_parameter_property_spans,
+                )?;
+            }
             parameters.push(parameter.value());
             if self.eat(TokenKind::Comma).is_none() {
                 break;

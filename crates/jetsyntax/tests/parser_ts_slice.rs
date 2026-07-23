@@ -5773,6 +5773,189 @@ fn gates_class_implements_to_typescript_capable_dialects() {
 }
 
 #[test]
+fn parses_typescript_parameter_properties_with_compact_modifier_flags() {
+    let source = [
+        "class Example extends Base {",
+        "  constructor(",
+        "    public first: string,",
+        "    protected readonly second?: number,",
+        "    private override third = 1,",
+        "    readonly fourth: boolean,",
+        "    override fifth: unknown,",
+        "  ) {}",
+        "}",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            language: Language::TypeScript,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse parameter properties");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid parameter-property tape");
+
+    let properties = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_PARAMETER_PROPERTY,
+                flags,
+                span,
+                fields,
+                ..
+            } => Some((flags, span, fields[0])),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        properties
+            .iter()
+            .map(|(flags, _, _)| *flags)
+            .collect::<Vec<_>>(),
+        [1, 6, 11, 4, 8]
+    );
+    for (_, span, parameter) in properties {
+        assert!(
+            matches!(
+                parsed.tape.value_at(parameter),
+                Ok(TapeValue::Node {
+                    tag: NodeTag::IDENTIFIER | NodeTag::ASSIGNMENT_PATTERN,
+                    span: inner_span,
+                    ..
+                }) if span.start < inner_span.start && span.end == inner_span.end
+            ),
+            "parameter property must wrap the complete inner parameter"
+        );
+    }
+}
+
+#[test]
+fn preserves_modifier_shaped_typescript_parameter_names() {
+    let source = "class First { constructor(readonly: boolean) {} } class Second { constructor(override = 1) {} } class Third { constructor(public readonly: number) {} }";
+    let parsed = parse(source, typescript_options()).expect("parse contextual parameter names");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid contextual-name tape");
+    let spans = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_PARAMETER_PROPERTY,
+                flags,
+                span,
+                ..
+            } => Some((flags, &source[span.start as usize..span.end as usize])),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(spans, [(1, "public readonly: number")]);
+
+    let newline = parse(
+        "class Example { constructor(public\nvalue: string) {} }",
+        typescript_options(),
+    )
+    .expect("recover newline-separated parameter name");
+    assert!(!newline.diagnostics.is_empty());
+    assert_eq!(
+        node_fields(&newline, NodeTag::TS_PARAMETER_PROPERTY).count(),
+        0
+    );
+}
+
+#[test]
+fn diagnoses_invalid_typescript_parameter_property_contexts_and_shapes() {
+    for source in [
+        "function ordinary(public value: string) {}",
+        "class Example { method(readonly value: string) {} }",
+        "class Example { constructor(public value: string); }",
+        "type Callback = (private value: string) => void;",
+        "interface Factory { new (protected value: string): Factory; }",
+        "class Example { constructor(public { value }: Source) {} }",
+        "class Example { constructor(public ...values: string[]) {} }",
+        "class Example { constructor(readonly override value: string) {} }",
+        "class Example { constructor(override readonly public value: string) {} }",
+        "class Example { constructor(public private value: string) {} }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                language: Language::TypeScript,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover invalid parameter property");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid parameter-property recovery tape");
+        assert!(
+            node_fields(&parsed, NodeTag::TS_PARAMETER_PROPERTY)
+                .next()
+                .is_some(),
+            "{source}: expected recovered wrapper"
+        );
+    }
+
+    let syntax_only = parse(
+        "function ordinary(public value: string) {} class Example { constructor(readonly value: string); }",
+        typescript_options(),
+    )
+    .expect("parse parameter properties without semantic diagnostics");
+    assert!(
+        syntax_only.diagnostics.is_empty(),
+        "{:#?}",
+        syntax_only.diagnostics
+    );
+    assert_eq!(
+        node_fields(&syntax_only, NodeTag::TS_PARAMETER_PROPERTY).count(),
+        2
+    );
+
+    let disallowed_source = "class Invalid { constructor(static first: number, public static second: number, export third: number, declare fourth: number) {} }";
+    let disallowed_syntax = parse(disallowed_source, typescript_options())
+        .expect("parse disallowed parameter modifiers without semantic diagnostics");
+    assert!(
+        disallowed_syntax.diagnostics.is_empty(),
+        "{:#?}",
+        disallowed_syntax.diagnostics
+    );
+    let property_spans = disallowed_syntax
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::TS_PARAMETER_PROPERTY,
+                span,
+                ..
+            } => Some(&disallowed_source[span.start as usize..span.end as usize]),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(property_spans, ["public static second: number"]);
+
+    let disallowed_semantic = parse(
+        disallowed_source,
+        ParseOptions {
+            language: Language::TypeScript,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("diagnose disallowed parameter modifiers");
+    assert_eq!(disallowed_semantic.diagnostics.len(), 4);
+}
+
+#[test]
 fn emits_babel_8_typescript_schema_wrappers() {
     let source = "type Box<T> = Promise<T>; type Text = string; type Flags<S> = { readonly [K in keyof S]?: S[K] }; interface Repository<T> extends Base<T> {} enum Choice { First } namespace Library.Core {}";
     let parsed = parse(source, typescript_options()).expect("parse");

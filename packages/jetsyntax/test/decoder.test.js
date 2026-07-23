@@ -1320,6 +1320,39 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes compact TypeScript parameter-property modifier flags", () => {
+    const cases = [
+      [0x01, { accessibility: "public" }],
+      [0x06, { accessibility: "protected", readonly: true }],
+      [0x0F, { accessibility: "private", readonly: true, override: true }],
+    ];
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      for (const [flags, modifiers] of cases) {
+        const tape = new HandcraftedTape();
+        const property = tape.node(591, 0, 5, [
+          tape.node(2, 0, 5, [tape.string("value")]),
+        ], flags);
+        expect(decode("value", tape.finish(property))).toMatchObject({
+          type: "TSParameterProperty",
+          parameter: { type: "Identifier", start: 0, end: 5, name: "value" },
+          ...modifiers,
+        });
+      }
+    }
+  });
+
+  it("rejects malformed TypeScript parameter-property modifier flags", () => {
+    for (const flags of [0, 0x10, 0xFF]) {
+      const tape = new HandcraftedTape();
+      const encoded = tape.finish(tape.node(591, 0, 0, [tape.null()], flags));
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `invalid TypeScript parameter property modifier flags ${flags} for tag 591`,
+        );
+      }
+    }
+  });
+
   it("decodes abstract and declared TypeScript class records", () => {
     for (const decode of [decodeTape, decodeTrustedTape]) {
       const classTape = new HandcraftedTape();

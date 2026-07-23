@@ -207,6 +207,7 @@ for (
     [588, ["TemplateElement", ["raw", "tail"]]],
     [589, ["ExportSpecifier", ["local", "exported", "exportKind"]]],
     [590, ["ImportDeclaration", ["specifiers", "source", "attributes", "importKind", "phase"]]],
+    [591, ["TSParameterProperty", ["parameter"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -1123,6 +1124,10 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.exported = fields[1];
         node.exportKind = enumValue(IMPORT_EXPORT_KINDS, fields[2], tag);
         return node;
+      case 591:
+        decodeTypeScriptParameterPropertyModifiers(node, record, tag);
+        node.parameter = fields[0];
+        return node;
       case 571:
         node.id = fields[0];
         node.params = array(fields[1], tag);
@@ -1418,6 +1423,17 @@ function decodeTypeScriptClassMemberModifiers(node, record, tag, allowEmpty = fa
   const flags = (record & NODE_FLAGS_MASK) >>> 16;
   if ((!allowEmpty && flags === 0) || (flags & ~0x0F) !== 0) {
     throw new Error(`invalid TypeScript class member modifier flags ${flags} for tag ${tag}`);
+  }
+  const accessibility = flags & 0x03;
+  if (accessibility !== 0) node.accessibility = TS_CLASS_MEMBER_ACCESSIBILITIES[accessibility];
+  if ((flags & 0x04) !== 0) node.readonly = true;
+  if ((flags & 0x08) !== 0) node.override = true;
+}
+
+function decodeTypeScriptParameterPropertyModifiers(node, record, tag) {
+  const flags = (record & NODE_FLAGS_MASK) >>> 16;
+  if (flags === 0 || (flags & ~0x0F) !== 0) {
+    throw new Error(`invalid TypeScript parameter property modifier flags ${flags} for tag ${tag}`);
   }
   const accessibility = flags & 0x03;
   if (accessibility !== 0) node.accessibility = TS_CLASS_MEMBER_ACCESSIBILITIES[accessibility];
