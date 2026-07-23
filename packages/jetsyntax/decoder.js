@@ -1405,12 +1405,13 @@ function decodeQuotedString(raw) {
 function decodeTypeScriptClassFlags(node, record, tag) {
   const flags = (record & NODE_FLAGS_MASK) >>> 16;
   if (
-    (flags & ~0x01) !== 0
+    (flags & ~0x03) !== 0
     || (flags !== 0 && (tag === 58 || tag === 568 || tag === 570 || tag === 583))
   ) {
     throw new Error(`invalid TypeScript class flags ${flags} for tag ${tag}`);
   }
   if ((flags & 0x01) !== 0) node.abstract = true;
+  if ((flags & 0x02) !== 0) node.declare = true;
 }
 
 function decodeTypeScriptClassMemberModifiers(node, record, tag, allowEmpty = false) {

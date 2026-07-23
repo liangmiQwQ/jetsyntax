@@ -3577,6 +3577,144 @@ fn parses_abstract_classes_and_members_on_cold_tape_records() {
 }
 
 #[test]
+fn parses_explicit_ambient_classes_across_class_tape_layouts() {
+    let source = [
+        "declare class Plain {",
+        "  constructor(value: string);",
+        "  property: string;",
+        "  get value(): string;",
+        "  set value(next: string);",
+        "  method(): void;",
+        "}",
+        "declare class Implemented implements Contract {}",
+        "declare class Generic<T> {}",
+        "declare abstract class Derived<T> extends Base<T> implements Contract<T> {",
+        "  abstract method(): T;",
+        "}",
+    ]
+    .join("\n");
+    let parsed = parse(
+        &source,
+        ParseOptions {
+            language: Language::TypeScript,
+            semantic_errors: true,
+            source_kind: SourceKind::Module,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse explicit ambient classes");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid explicit ambient-class tape");
+
+    let classes: Vec<_> = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node {
+                tag:
+                    tag @ (NodeTag::CLASS_DECLARATION
+                    | NodeTag::TS_CLASS_DECLARATION
+                    | NodeTag::TS_GENERIC_CLASS_DECLARATION
+                    | NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION),
+                flags,
+                span,
+                ..
+            } if flags != 0 => Some((tag, flags, span)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        classes
+            .iter()
+            .map(|(tag, flags, _)| (*tag, *flags))
+            .collect::<Vec<_>>(),
+        [
+            (NodeTag::CLASS_DECLARATION, 2),
+            (NodeTag::TS_CLASS_DECLARATION, 2),
+            (NodeTag::TS_GENERIC_CLASS_DECLARATION, 2),
+            (NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION, 3),
+        ]
+    );
+    for (_, _, span) in classes {
+        assert!(source[span.start as usize..span.end as usize].starts_with("declare"));
+    }
+
+    for source in [
+        "declare class Callable {} function Callable() {}",
+        "declare class Overloaded {} declare function Overloaded(): void;",
+    ] {
+        let merged = parse(
+            source,
+            ParseOptions {
+                language: Language::TypeScript,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse ambient class merge");
+        assert!(
+            merged.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            merged.diagnostics
+        );
+    }
+}
+
+#[test]
+fn diagnoses_explicit_ambient_class_implementations_and_boundaries() {
+    for source in [
+        "declare class Invalid { method() {} }",
+        "declare class Invalid { field = 1; }",
+        "declare class Invalid { static {} }",
+        "declare class Duplicate {} declare class Duplicate {}",
+        "function nested() { declare class Nested {} }",
+        "class Outer { method() { declare class Nested {} } }",
+        "if (condition) { declare class Nested {} }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                language: Language::TypeScript,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover invalid explicit ambient class");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid explicit ambient-class recovery tape");
+    }
+
+    for source in [
+        "declare\nclass Ordinary {}",
+        r"declar\u0065 class Escaped {}",
+        "declare abstract\nclass Split {}",
+    ] {
+        let parsed =
+            parse(source, typescript_options()).expect("parse contextual declare boundary");
+        assert!(parsed.tape.validation().all(|record| {
+            !matches!(
+                record.expect("valid record").value,
+                TapeValue::Node {
+                    tag: NodeTag::CLASS_DECLARATION
+                        | NodeTag::TS_CLASS_DECLARATION
+                        | NodeTag::TS_GENERIC_CLASS_DECLARATION
+                        | NodeTag::TS_SUPER_TYPE_ARGUMENTS_CLASS_DECLARATION,
+                    flags: 2 | 3,
+                    ..
+                }
+            )
+        }));
+    }
+}
+
+#[test]
 fn parses_abstract_accessor_async_and_generator_signatures_without_swallowing_members() {
     let source = [
         "abstract class Signatures {",

@@ -209,10 +209,23 @@ struct FunctionContext {
 enum TypeScriptDeclareDeclarationKind {
     Variable,
     Function { asynchronous: bool },
+    Class { abstract_class: bool },
     Enum { is_const: bool },
     Namespace,
     ExternalModule,
     Global,
+}
+
+#[derive(Clone, Copy, Default)]
+struct TypeScriptClassModifiers {
+    abstract_class: bool,
+    declare_class: bool,
+}
+
+impl TypeScriptClassModifiers {
+    const fn wire_flags(self) -> u8 {
+        self.abstract_class as u8 | (self.declare_class as u8) << 1
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -780,11 +793,11 @@ impl<'s> Parser<'s> {
         statement
     }
 
-    fn in_ambient_declaration(&self) -> bool {
-        self.context.grammar().ambient() && self.context.in_type_scope()
+    const fn in_ambient_declaration(&self) -> bool {
+        self.context.grammar().ambient()
     }
 
-    fn reports_ambient_declaration_errors(&self) -> bool {
+    const fn reports_ambient_declaration_errors(&self) -> bool {
         self.options.semantic_errors && self.in_ambient_declaration()
     }
 
@@ -924,6 +937,9 @@ impl<'s> Parser<'s> {
             TypeScriptDeclareDeclarationKind::Function { asynchronous } => {
                 self.parse_typescript_declare_function(asynchronous)
             }
+            TypeScriptDeclareDeclarationKind::Class { abstract_class } => {
+                self.parse_typescript_declare_class(abstract_class)
+            }
             TypeScriptDeclareDeclarationKind::Enum { is_const } => {
                 self.parse_typescript_declare_enum(is_const)
             }
@@ -964,6 +980,39 @@ impl<'s> Parser<'s> {
         self.context
             .set_grammar(previous_grammar.with_ambient(true).with_strict(false));
         let declaration = self.parse_function_impl::<true>(true, asynchronous, false, start);
+        self.context.set_grammar(previous_grammar);
+        declaration
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_declare_class(
+        &mut self,
+        abstract_class: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Declare).start;
+        if self.options.semantic_errors && !self.context.allows_ambient_declaration() {
+            self.error(
+                Span::new(start, start.saturating_add(7)),
+                "ambient class declarations are only allowed at the top level of a namespace or module",
+            );
+        }
+        if abstract_class {
+            self.expect(TokenKind::Abstract);
+        }
+        self.expect(TokenKind::Class);
+        let previous_grammar = self.context.grammar();
+        self.context
+            .set_grammar(previous_grammar.with_ambient(true).with_strict(false));
+        let declaration = self.parse_typescript_class(
+            start,
+            true,
+            TypeScriptClassModifiers {
+                abstract_class,
+                declare_class: true,
+            },
+            false,
+        );
         self.context.set_grammar(previous_grammar);
         declaration
     }
@@ -1630,7 +1679,12 @@ impl<'s> Parser<'s> {
         if self.options.language.is_typescript()
             || self.options.syntax_extensions.typescript_js_compatibility
         {
-            return self.parse_typescript_class(start, declaration, false, allow_anonymous);
+            return self.parse_typescript_class(
+                start,
+                declaration,
+                TypeScriptClassModifiers::default(),
+                allow_anonymous,
+            );
         }
         let id = if Self::is_identifier_name(self.current.kind) {
             self.parse_binding_identifier(BindingKind::Lexical)?.value()
@@ -1691,7 +1745,15 @@ impl<'s> Parser<'s> {
     ) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Abstract).start;
         self.expect(TokenKind::Class);
-        self.parse_typescript_class(start, true, true, allow_anonymous)
+        self.parse_typescript_class(
+            start,
+            true,
+            TypeScriptClassModifiers {
+                abstract_class: true,
+                declare_class: false,
+            },
+            allow_anonymous,
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1699,7 +1761,7 @@ impl<'s> Parser<'s> {
         &mut self,
         start: u32,
         declaration: bool,
-        abstract_class: bool,
+        modifiers: TypeScriptClassModifiers,
         allow_anonymous: bool,
     ) -> Result<ParsedNode, ParseError> {
         // 1. Distinguish a class named `implements` from an anonymous implementation clause.
@@ -1844,7 +1906,7 @@ impl<'s> Parser<'s> {
                 continue;
             }
             elements.push(
-                self.parse_typescript_class_element(saw_extends, abstract_class)?
+                self.parse_typescript_class_element(saw_extends, modifiers.abstract_class)?
                     .value(),
             );
         }
@@ -1861,7 +1923,7 @@ impl<'s> Parser<'s> {
                 [id, super_class, body.value(), super_type_arguments],
                 saw_implements.then_some(implementations.as_slice()),
                 type_parameters,
-                abstract_class,
+                modifiers,
             );
         }
         if let Some(type_parameters) = type_parameters {
@@ -1871,7 +1933,7 @@ impl<'s> Parser<'s> {
                 [id, super_class, body.value()],
                 saw_implements.then_some(implementations.as_slice()),
                 type_parameters,
-                abstract_class,
+                modifiers,
             );
         }
         if saw_implements {
@@ -1883,8 +1945,8 @@ impl<'s> Parser<'s> {
             };
             let span = Span::new(start, end);
             let fields = [id, super_class, body.value(), implementations];
-            if abstract_class {
-                return self.node_typescript_abstract_class(tag, span, &fields);
+            if modifiers.wire_flags() != 0 {
+                return self.node_typescript_modified_class(tag, span, &fields, modifiers);
             }
             self.node(tag, span, &fields)
         } else {
@@ -1895,8 +1957,8 @@ impl<'s> Parser<'s> {
             };
             let span = Span::new(start, end);
             let fields = [id, super_class, body.value()];
-            if abstract_class {
-                return self.node_typescript_abstract_class(tag, span, &fields);
+            if modifiers.wire_flags() != 0 {
+                return self.node_typescript_modified_class(tag, span, &fields, modifiers);
             }
             self.node(tag, span, &fields)
         }
@@ -1957,7 +2019,7 @@ impl<'s> Parser<'s> {
         class_fields: [ValueRef; 3],
         implementations: Option<&[ValueRef]>,
         type_parameters: ValueRef,
-        abstract_class: bool,
+        modifiers: TypeScriptClassModifiers,
     ) -> Result<ParsedNode, ParseError> {
         let implementations = if let Some(implementations) = implementations {
             self.tape.push_list(implementations)?
@@ -1976,8 +2038,8 @@ impl<'s> Parser<'s> {
             implementations,
             type_parameters,
         ];
-        if abstract_class {
-            return self.node_typescript_abstract_class(tag, span, &fields);
+        if modifiers.wire_flags() != 0 {
+            return self.node_typescript_modified_class(tag, span, &fields, modifiers);
         }
         self.node(tag, span, &fields)
     }
@@ -1991,7 +2053,7 @@ impl<'s> Parser<'s> {
         class_fields: [ValueRef; 4],
         implementations: Option<&[ValueRef]>,
         type_parameters: Option<ValueRef>,
-        abstract_class: bool,
+        modifiers: TypeScriptClassModifiers,
     ) -> Result<ParsedNode, ParseError> {
         let implementations = if let Some(implementations) = implementations {
             self.tape.push_list(implementations)?
@@ -2016,21 +2078,24 @@ impl<'s> Parser<'s> {
             type_parameters,
             class_fields[3],
         ];
-        if abstract_class {
-            return self.node_typescript_abstract_class(tag, span, &fields);
+        if modifiers.wire_flags() != 0 {
+            return self.node_typescript_modified_class(tag, span, &fields, modifiers);
         }
         self.node(tag, span, &fields)
     }
 
     #[cold]
     #[inline(never)]
-    fn node_typescript_abstract_class(
+    fn node_typescript_modified_class(
         &mut self,
         tag: NodeTag,
         span: Span,
         fields: &[ValueRef],
+        modifiers: TypeScriptClassModifiers,
     ) -> Result<ParsedNode, ParseError> {
-        let node = self.tape.push_node(tag, span, 1, fields)?;
+        let node = self
+            .tape
+            .push_node(tag, span, modifiers.wire_flags(), fields)?;
         self.last_node_tag = Some(tag);
         self.last_assignment_target = AssignmentTargetType::Invalid;
         Ok(ParsedNode { node, span })
@@ -8507,6 +8572,18 @@ impl<'s> Parser<'s> {
             TokenKind::Function => Some(TypeScriptDeclareDeclarationKind::Function {
                 asynchronous: false,
             }),
+            TokenKind::Class => Some(TypeScriptDeclareDeclarationKind::Class {
+                abstract_class: false,
+            }),
+            TokenKind::Abstract => {
+                let class = lookahead.next_token();
+                (class.kind == TokenKind::Class
+                    && !class.flags.line_break_before()
+                    && !class.flags.escaped())
+                .then_some(TypeScriptDeclareDeclarationKind::Class {
+                    abstract_class: true,
+                })
+            }
             TokenKind::Using => {
                 let binding = lookahead.next_token();
                 (!binding.flags.line_break_before() && Self::starts_using_binding(binding))

@@ -1320,7 +1320,7 @@ describe("decodeTape", () => {
     }
   });
 
-  it("decodes abstract TypeScript class and member records", () => {
+  it("decodes abstract and declared TypeScript class records", () => {
     for (const decode of [decodeTape, decodeTrustedTape]) {
       const classTape = new HandcraftedTape();
       const body = classTape.node(59, 15, 17, [classTape.list([])]);
@@ -1328,6 +1328,22 @@ describe("decodeTape", () => {
       expect(decode("abstract class {}", classTape.finish(abstractClass))).toMatchObject({
         type: "ClassDeclaration",
         abstract: true,
+      });
+
+      const declaredTape = new HandcraftedTape();
+      const declaredSource = "declare abstract class {}";
+      const declaredBody = declaredTape.node(59, 23, declaredSource.length, [declaredTape.list([])]);
+      const declaredClass = declaredTape.node(
+        57,
+        0,
+        declaredSource.length,
+        [declaredTape.null(), declaredTape.null(), declaredBody],
+        3,
+      );
+      expect(decode(declaredSource, declaredTape.finish(declaredClass))).toMatchObject({
+        type: "ClassDeclaration",
+        abstract: true,
+        declare: true,
       });
 
       const methodTape = new HandcraftedTape();
@@ -1423,11 +1439,12 @@ describe("decodeTape", () => {
   it("rejects malformed TypeScript class flags", () => {
     for (
       const [tag, flags] of [
-        [57, 0x02],
+        [57, 0x04],
         [57, 0x10],
         [57, 0xFF],
         [58, 0x01],
-        [582, 0x02],
+        [58, 0x02],
+        [582, 0x04],
         [583, 0x01],
       ]
     ) {

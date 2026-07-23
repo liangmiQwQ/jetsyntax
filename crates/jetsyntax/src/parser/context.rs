@@ -722,8 +722,8 @@ impl<'s> ParserContext<'s> {
         }
     }
 
-    pub(crate) fn class_declaration_binding_kind(&self) -> BindingKind {
-        if self.grammar.ambient() && self.in_type_scope() {
+    pub(crate) const fn class_declaration_binding_kind(&self) -> BindingKind {
+        if self.grammar.ambient() {
             BindingKind::AmbientClass
         } else {
             BindingKind::Lexical

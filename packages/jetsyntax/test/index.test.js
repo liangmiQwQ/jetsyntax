@@ -2537,6 +2537,82 @@ describe("parse", () => {
     }
   });
 
+  it("materializes explicit ambient classes across TypeScript layouts", () => {
+    const source = [
+      "declare class Plain { constructor(value: string); method(): void; }",
+      "declare class Implemented implements Contract {}",
+      "declare class Generic<T> {}",
+      "declare abstract class Derived<T> extends Base<T> implements Contract<T> {",
+      "  abstract method(): T;",
+      "}",
+      "export declare class Exported {}",
+    ].join("\n");
+    const result = parse(source, {
+      lang: "ts",
+      range: true,
+      semanticErrors: true,
+      sourceType: "module",
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      { type: "ClassDeclaration", declare: true, id: { name: "Plain" } },
+      {
+        type: "ClassDeclaration",
+        declare: true,
+        id: { name: "Implemented" },
+        implements: [{ type: "TSClassImplements" }],
+      },
+      {
+        type: "ClassDeclaration",
+        declare: true,
+        id: { name: "Generic" },
+        typeParameters: { type: "TSTypeParameterDeclaration" },
+      },
+      {
+        type: "ClassDeclaration",
+        declare: true,
+        abstract: true,
+        id: { name: "Derived" },
+        superTypeArguments: { type: "TSTypeParameterInstantiation" },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        declaration: { type: "ClassDeclaration", declare: true, id: { name: "Exported" } },
+      },
+    ]);
+    for (const statement of result.program.body) {
+      const declaration = statement.declaration ?? statement;
+      expect(source.slice(declaration.start, declaration.start + 7)).toBe("declare");
+      expect(declaration.range).toEqual([declaration.start, declaration.end]);
+    }
+
+    const ordinary = parse("class Ordinary {} abstract class Abstract {}", { lang: "ts" });
+    expect(ordinary.diagnostics).toEqual([]);
+    expect(ordinary.program.body[0]).not.toHaveProperty("declare");
+    expect(ordinary.program.body[1]).toMatchObject({ abstract: true });
+    expect(ordinary.program.body[1]).not.toHaveProperty("declare");
+  });
+
+  it("diagnoses explicit ambient class implementations", () => {
+    for (
+      const source of [
+        "declare class Invalid { method() {} }",
+        "declare class Invalid { field = 1; }",
+        "declare class Invalid { static {} }",
+        "declare class Duplicate {} declare class Duplicate {}",
+        "function nested() { declare class Nested {} }",
+        "class Outer { method() { declare class Nested {} } }",
+        "if (condition) { declare class Nested {} }",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts", semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.type).toBe("Program");
+    }
+  });
+
   it("keeps abstract accessor and async-generator signatures separate from following members", () => {
     const result = parse(
       [
