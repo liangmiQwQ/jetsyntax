@@ -83,7 +83,7 @@ for (
       26,
       ["FunctionExpression", ["id", "params", "body", "generator", "async", "returnType", "typeParameters"]],
     ],
-    [27, ["ArrowFunctionExpression", ["params", "body", "async", "expression"]]],
+    [27, ["ArrowFunctionExpression", ["params", "body", "async", "expression", "returnType"]]],
     [28, ["VariableDeclaration", ["declarations", "kind"]]],
     [29, ["VariableDeclarator", ["id", "init"]]],
     [30, ["ThisExpression", []]],
@@ -244,6 +244,7 @@ for (
       "decorators",
     ]]],
     [594, ["TSAbstractAccessorProperty", ["key", "value", "computed", "static", "typeAnnotation"]]],
+    [595, ["TSTypePredicate", ["parameterName", "typeAnnotation", "asserts"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -624,15 +625,24 @@ function decodeTapeInternal(source, tape, options, trusted) {
     }
 
     const fieldCount = tape[offset + 4];
-    // TypeScript return and type-parameter annotations extend the five-field JavaScript shape.
+    // TypeScript annotations extend the compact JavaScript function and arrow shapes.
     const functionNode = tag === 25 || tag === 26;
+    const arrowNode = tag === 27;
     const validFieldCount = tag === 2
       ? fieldCount === 1 || fieldCount === 3
       : functionNode
       ? fieldCount === 5 || fieldCount === 6 || fieldCount === 7
+      : arrowNode
+      ? fieldCount === 4 || fieldCount === 5
       : fieldCount === schema[1].length;
     if (!validFieldCount) {
-      const expected = tag === 2 ? "1 or 3" : functionNode ? "5, 6, or 7" : schema[1].length;
+      const expected = tag === 2
+        ? "1 or 3"
+        : functionNode
+        ? "5, 6, or 7"
+        : arrowNode
+        ? "4 or 5"
+        : schema[1].length;
       throw new Error(
         `invalid ${schema[0]} field count ${fieldCount}; expected ${expected}`,
       );
@@ -761,6 +771,7 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.generator = false;
         node.async = boolean(fields[2], tag);
         node.expression = boolean(fields[3], tag);
+        if (fieldCount === 5) node.returnType = fields[4];
         return node;
       case 28:
         node.declarations = array(fields[0], tag);
@@ -1049,6 +1060,11 @@ function decodeTapeInternal(source, tape, options, trusted) {
       }
       case 512:
         node.typeAnnotation = fields[0];
+        return node;
+      case 595:
+        node.parameterName = fields[0];
+        node.typeAnnotation = fields[1];
+        node.asserts = boolean(fields[2], tag);
         return node;
       case 513:
         node.typeName = fields[0];

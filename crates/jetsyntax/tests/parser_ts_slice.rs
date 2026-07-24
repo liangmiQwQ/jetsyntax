@@ -3107,8 +3107,8 @@ fn does_not_apply_parameter_optionality_to_other_typescript_bindings() {
 }
 
 #[test]
-fn limits_function_return_annotations_to_supported_typescript_bodies() {
-    let cases = [
+fn parses_predicate_function_returns_and_recovers_missing_types() {
+    for (name, source) in [
         (
             "predicate",
             "function isText(value: unknown): value is string { return true; }",
@@ -3117,13 +3117,21 @@ fn limits_function_return_annotations_to_supported_typescript_bodies() {
             "assertion",
             "function assertText(value: unknown): asserts value { }",
         ),
-        ("missing type", "function missing(): ; {}"),
-    ];
-    for (name, source) in cases {
+    ] {
         let parsed = parse(source, typescript_options()).expect(name);
-        assert!(!parsed.diagnostics.is_empty(), "{name}");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{name}: {:?}",
+            parsed.diagnostics
+        );
         parsed.tape.validate().expect(name);
+        assert_eq!(node_fields(&parsed, NodeTag::TS_TYPE_PREDICATE).count(), 1);
     }
+
+    let missing = parse("function missing(): ; {}", typescript_options())
+        .expect("recover missing return type");
+    assert!(!missing.diagnostics.is_empty());
+    missing.tape.validate().expect("valid missing-type tape");
 
     for language in [Language::JavaScript, Language::JavaScriptJsx] {
         let parsed = parse(
@@ -3140,6 +3148,77 @@ fn limits_function_return_annotations_to_supported_typescript_bodies() {
             .validate()
             .expect("valid JavaScript recovery tape");
     }
+}
+
+#[test]
+fn materializes_type_predicates_across_callable_shapes() {
+    let source = [
+        "function guard(value: unknown): value is string { return true; }",
+        "function assertValue(value: unknown): asserts value {}",
+        "type Guard = (value: unknown) => value is string;",
+        "interface Checks {",
+        "  (value: unknown): asserts value;",
+        "  method(value: unknown): value is string;",
+        "}",
+        "const arrow = (value: unknown): value is string => true;",
+        "const choice = flag ? (value) : value => value;",
+        "const asyncChoice = flag ? async(value) : value;",
+        "class Box { isBox(): this is Box { return true; } assertBox(): asserts this {} }",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse callable predicates");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid predicate tape");
+    let predicates = parsed
+        .tape
+        .validation()
+        .filter_map(
+            |record| match record.expect("valid predicate record").value {
+                TapeValue::Node {
+                    tag: NodeTag::TS_TYPE_PREDICATE,
+                    span,
+                    fields,
+                    ..
+                } => Some((span, fields)),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(predicates.len(), 8);
+    assert_eq!(
+        predicates
+            .iter()
+            .filter(|(_, fields)| matches!(
+                parsed.tape.value_at(fields[2]),
+                Ok(TapeValue::Bool(true))
+            ))
+            .count(),
+        3
+    );
+    assert_eq!(
+        predicates
+            .iter()
+            .filter(|(_, fields)| matches!(parsed.tape.value_at(fields[1]), Ok(TapeValue::Null)))
+            .count(),
+        3
+    );
+    assert!(predicates.iter().any(|(_, fields)| matches!(
+        parsed.tape.value_at(fields[0]),
+        Ok(TapeValue::Node {
+            tag: NodeTag::TS_THIS_TYPE,
+            ..
+        })
+    )));
+    assert!(
+        predicates
+            .iter()
+            .map(|(span, _)| &source[span.start as usize..span.end as usize])
+            .any(|slice| slice == "value is string")
+    );
+    assert!(
+        node_fields(&parsed, NodeTag::ARROW_FUNCTION_EXPRESSION).any(|fields| fields.len() == 5)
+    );
 }
 
 #[test]
@@ -4078,15 +4157,19 @@ fn parses_newline_terminated_class_signatures() {
 }
 
 #[test]
-fn diagnoses_unsupported_method_return_forms_and_setter_semantics() {
+fn parses_method_return_forms_and_diagnoses_setter_semantics() {
     for source in [
         "class C { predicate(value): value is string {} }",
         "class C { assertion(value): asserts value {} }",
         "class C { constructor(): string {} }",
     ] {
-        let parsed = parse(source, typescript_options()).expect("recoverable method parse");
-        assert!(!parsed.diagnostics.is_empty(), "{source}");
-        parsed.tape.validate().expect("valid recovery tape");
+        let parsed = parse(source, typescript_options()).expect("method parse");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect("valid method tape");
     }
 
     for language in [Language::JavaScript, Language::JavaScriptJsx] {
@@ -4123,6 +4206,16 @@ fn diagnoses_unsupported_method_return_forms_and_setter_semantics() {
     .expect("semantic setter parse");
     assert_eq!(semantic.diagnostics.len(), 2, "{:#?}", semantic.diagnostics);
     assert!(node_fields(&semantic, NodeTag::FUNCTION_EXPRESSION).all(|fields| fields.len() == 6));
+
+    let constructor = parse(
+        "class C { constructor(): string {} }",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("semantic constructor parse");
+    assert_eq!(constructor.diagnostics.len(), 1);
 }
 
 #[test]

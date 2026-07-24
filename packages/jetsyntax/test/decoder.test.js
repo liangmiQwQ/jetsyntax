@@ -2250,6 +2250,67 @@ describe("decodeTape", () => {
     ]);
   });
 
+  it("decodes TypeScript type predicates and assertion signatures", () => {
+    const source = "value is string";
+    const predicateTape = new HandcraftedTape();
+    const parameter = predicateTape.node(2, 0, 5, [predicateTape.source(0, 5)]);
+    const keyword = predicateTape.node(550, 9, 15, []);
+    const annotation = predicateTape.node(512, 9, 15, [keyword]);
+    const predicate = predicateTape.node(595, 0, 15, [
+      parameter,
+      annotation,
+      predicateTape.boolean(false),
+    ]);
+    expect(decodeTape(source, predicateTape.finish(predicate))).toEqual({
+      type: "TSTypePredicate",
+      start: 0,
+      end: 15,
+      parameterName: { type: "Identifier", start: 0, end: 5, name: "value" },
+      typeAnnotation: {
+        type: "TSTypeAnnotation",
+        start: 9,
+        end: 15,
+        typeAnnotation: { type: "TSStringKeyword", start: 9, end: 15 },
+      },
+      asserts: false,
+    });
+
+    const assertionTape = new HandcraftedTape();
+    const target = assertionTape.node(552, 8, 12, []);
+    const assertion = assertionTape.node(595, 0, 12, [
+      target,
+      assertionTape.null(),
+      assertionTape.boolean(true),
+    ]);
+    expect(decodeTrustedTape("asserts this", assertionTape.finish(assertion))).toMatchObject({
+      type: "TSTypePredicate",
+      parameterName: { type: "TSThisType" },
+      typeAnnotation: null,
+      asserts: true,
+    });
+  });
+
+  it("rejects malformed TypeScript type-predicate records", () => {
+    for (const count of [2, 4]) {
+      const tape = new HandcraftedTape();
+      const fields = Array.from({ length: count }, () => tape.null());
+      const root = tape.node(595, 0, 0, fields);
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", tape.finish(root))).toThrow(
+          `invalid TSTypePredicate field count ${count}; expected 3`,
+        );
+      }
+    }
+
+    const tape = new HandcraftedTape();
+    const root = tape.node(595, 0, 0, [tape.null(), tape.null(), tape.integer(1)]);
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      expect(() => decode("", tape.finish(root))).toThrow(
+        "JetSyntax node tag 595 expected a Boolean field",
+      );
+    }
+  });
+
   it("decodes phased import expression records", () => {
     const source = "import.source('source'); import.defer('defer', options);";
     const tape = new HandcraftedTape();

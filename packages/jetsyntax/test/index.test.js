@@ -1135,6 +1135,84 @@ describe("parse", () => {
     expect(plain).not.toHaveProperty("returnType");
   });
 
+  it("materializes TypeScript predicates and assertion signatures", () => {
+    const source = [
+      "function guard(value: unknown): value is string { return true; }",
+      "function assertValue(value: unknown): asserts value {}",
+      "const arrow = (value: unknown): value is string => true;",
+      "class Box { isBox(): this is Box { return true; } assertBox(): asserts this {} }",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const [guard, assertion, arrowDeclaration, box] = result.program.body;
+    expect(guard.returnType.typeAnnotation).toMatchObject({
+      type: "TSTypePredicate",
+      parameterName: { type: "Identifier", name: "value" },
+      typeAnnotation: {
+        type: "TSTypeAnnotation",
+        typeAnnotation: { type: "TSStringKeyword" },
+      },
+      asserts: false,
+    });
+    expect(source.slice(guard.returnType.start, guard.returnType.end)).toBe(": value is string");
+    expect(source.slice(
+      guard.returnType.typeAnnotation.typeAnnotation.start,
+      guard.returnType.typeAnnotation.typeAnnotation.end,
+    )).toBe("string");
+    expect(assertion.returnType.typeAnnotation).toMatchObject({
+      type: "TSTypePredicate",
+      parameterName: { name: "value" },
+      typeAnnotation: null,
+      asserts: true,
+    });
+    expect(arrowDeclaration.declarations[0].init).toMatchObject({
+      type: "ArrowFunctionExpression",
+      returnType: {
+        typeAnnotation: {
+          type: "TSTypePredicate",
+          parameterName: { name: "value" },
+          asserts: false,
+        },
+      },
+    });
+    expect(box.body.body.map(method => method.value.returnType.typeAnnotation)).toMatchObject([
+      {
+        type: "TSTypePredicate",
+        parameterName: { type: "TSThisType" },
+        asserts: false,
+      },
+      {
+        type: "TSTypePredicate",
+        parameterName: { type: "TSThisType" },
+        typeAnnotation: null,
+        asserts: true,
+      },
+    ]);
+    expect(guard.returnType.typeAnnotation.range).toEqual([
+      guard.returnType.typeAnnotation.start,
+      guard.returnType.typeAnnotation.end,
+    ]);
+
+    const disambiguated = parse(
+      "declare function bare(): asserts;\ndeclare function checked(value):\nasserts value;",
+      { lang: "ts" },
+    );
+    expect(disambiguated.diagnostics).toEqual([]);
+    expect(disambiguated.program.body.map(node => node.returnType.typeAnnotation)).toMatchObject([
+      { type: "TSTypeReference", typeName: { name: "asserts" } },
+      { type: "TSTypePredicate", asserts: true, typeAnnotation: null },
+    ]);
+
+    const escaped = parse(String.raw`function checked(value): \u{61}sserts value {}`, { lang: "ts" });
+    expect(escaped.diagnostics).toHaveLength(1);
+    expect(escaped.program.body[0].returnType.typeAnnotation).toMatchObject({
+      type: "TSTypePredicate",
+      parameterName: { name: "value" },
+      asserts: true,
+    });
+  });
+
   it("materializes entity-name TypeScript type queries", () => {
     // The line break in Boundary leaves `<T>` for the following call signature.
     const source = [
@@ -2411,11 +2489,20 @@ describe("parse", () => {
     expect(result.program.type).toBe("Program");
   });
 
-  it("keeps unsupported function return forms diagnostic", () => {
+  it("parses predicate function returns and keeps invalid language forms diagnostic", () => {
+    for (
+      const source of [
+        "function predicate(value: unknown): value is string { return true; }",
+        "function assertion(value: unknown): asserts value {}",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts" });
+      expect(result.diagnostics, source).toEqual([]);
+      expect(result.program.body[0].returnType.typeAnnotation.type).toBe("TSTypePredicate");
+    }
+
     for (
       const [source, options] of [
-        ["function predicate(value: unknown): value is string { return true; }", { lang: "ts" }],
-        ["function assertion(value: unknown): asserts value {}", { lang: "ts" }],
         ["function missing(): ; {}", { lang: "ts" }],
         ["function javascript(): string {}", { lang: "js" }],
       ]
@@ -3931,12 +4018,20 @@ describe("parse", () => {
     }
   });
 
-  it("keeps unsupported method return forms diagnostic", () => {
+  it("parses TypeScript method return forms and rejects them in JavaScript", () => {
+    for (
+      const source of [
+        "class C { predicate(value): value is string {} }",
+        "class C { assertion(value): asserts value {} }",
+        "class C { constructor(): string {} }",
+      ]
+    ) {
+      const result = parse(source, { lang: "ts" });
+      expect(result.diagnostics, source).toEqual([]);
+    }
+
     for (
       const [source, options] of [
-        ["class C { predicate(value): value is string {} }", { lang: "ts" }],
-        ["class C { assertion(value): asserts value {} }", { lang: "ts" }],
-        ["class C { constructor(): string {} }", { lang: "ts" }],
         ["class C { method(): string {} }", { lang: "js" }],
         ["class C { method(): string {} }", { lang: "jsx" }],
       ]

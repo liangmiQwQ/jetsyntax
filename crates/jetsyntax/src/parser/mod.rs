@@ -474,6 +474,7 @@ struct Parser<'s> {
     class_static_block_function_depth: Option<u32>,
     class_arguments_function_depth: Option<u32>,
     cover_arrow_parameter_yield: Option<Span>,
+    parsing_conditional_consequent: bool,
     // Parentheses-transparent semantic tag for immediate grammar checks, without widening ParsedNode.
     last_node_tag: Option<NodeTag>,
     last_assignment_target: AssignmentTargetType,
@@ -522,6 +523,7 @@ impl<'s> Parser<'s> {
             class_static_block_function_depth: None,
             class_arguments_function_depth: None,
             cover_arrow_parameter_yield: None,
+            parsing_conditional_consequent: false,
             last_node_tag: None,
             last_assignment_target: AssignmentTargetType::Invalid,
             assignment_pattern_candidates: Vec::new(),
@@ -1461,12 +1463,7 @@ impl<'s> Parser<'s> {
         let Some(colon) = self.eat(TokenKind::Colon) else {
             return Ok(None);
         };
-        let annotation = self.parse_type()?;
-        Ok(Some(self.node(
-            NodeTag::TS_TYPE_ANNOTATION,
-            Span::new(colon.start, annotation.span.end),
-            &[annotation.value()],
-        )?))
+        Ok(Some(self.parse_return_type_annotation(colon)?))
     }
 
     fn diagnose_function_name(
@@ -1904,12 +1901,17 @@ impl<'s> Parser<'s> {
         let rest_trailing_comma_span =
             (params.has_rest && params.has_trailing_comma).then(|| self.current_span());
         let right_paren_end = self.expect(TokenKind::RightParen).end;
-        // Only canonical constructors enable direct super calls, and their return annotations remain unsupported.
-        let return_type = if self.context.grammar().allow_super_call() {
-            None
-        } else {
-            self.parse_function_return_type()?
-        };
+        let constructor = self.context.grammar().allow_super_call();
+        let return_type = self.parse_function_return_type()?;
+        if constructor
+            && self.options.semantic_errors
+            && let Some(return_type) = return_type
+        {
+            self.error(
+                return_type.span,
+                "constructor cannot have a return type annotation",
+            );
+        }
         let signature_end = return_type
             .as_ref()
             .map_or(right_paren_end, ParsedNode::end);
@@ -5474,7 +5476,7 @@ impl<'s> Parser<'s> {
             self.expect(TokenKind::RightParen);
             self.expect(TokenKind::Arrow);
             let previous_grammar = self.enter_function_context(false, false, false);
-            let arrow = self.parse_arrow_function(start, &[], false, allow_in);
+            let arrow = self.parse_arrow_function(start, &[], false, None, allow_in);
             self.leave_function_context(previous_grammar);
             self.rollback_assignment_patterns(assignment_patterns);
             return arrow;
@@ -5502,7 +5504,7 @@ impl<'s> Parser<'s> {
             }
             let previous_grammar = self.enter_function_context(false, false, false);
             let arrow =
-                self.parse_arrow_function(left.span.start, &[left.value()], false, allow_in);
+                self.parse_arrow_function(left.span.start, &[left.value()], false, None, allow_in);
             self.leave_function_context(previous_grammar);
             self.rollback_assignment_patterns(assignment_patterns);
             return arrow;
@@ -5590,6 +5592,7 @@ impl<'s> Parser<'s> {
         );
         let parameters = self.parse_parameters(false)?;
         self.expect(TokenKind::RightParen);
+        let return_type = self.parse_function_return_type()?;
         self.expect(TokenKind::Arrow);
         self.context.set_grammar(
             self.context
@@ -5617,7 +5620,13 @@ impl<'s> Parser<'s> {
                 "an arrow function with non-simple parameters cannot contain a use strict directive",
             );
         }
-        let arrow = self.parse_arrow_function(start, &parameters.values, false, allow_in);
+        let arrow = self.parse_arrow_function(
+            start,
+            &parameters.values,
+            false,
+            return_type.map(ParsedNode::value),
+            allow_in,
+        );
         self.leave_function_context(previous_grammar);
         arrow
     }
@@ -5650,6 +5659,11 @@ impl<'s> Parser<'s> {
         if parenthesized {
             self.expect(TokenKind::RightParen);
         }
+        let return_type = if parenthesized {
+            self.parse_function_return_type()?
+        } else {
+            None
+        };
         self.expect(TokenKind::Arrow);
         self.context
             .set_grammar(self.context.grammar().with_parameters(false));
@@ -5669,7 +5683,13 @@ impl<'s> Parser<'s> {
                 "an arrow function with non-simple parameters cannot contain a use strict directive",
             );
         }
-        let arrow = self.parse_arrow_function(start, &parameters, true, allow_in);
+        let arrow = self.parse_arrow_function(
+            start,
+            &parameters,
+            true,
+            return_type.map(ParsedNode::value),
+            allow_in,
+        );
         self.leave_function_context(previous_grammar);
         arrow
     }
@@ -5679,6 +5699,7 @@ impl<'s> Parser<'s> {
         start: u32,
         parameters: &[ValueRef],
         asynchronous: bool,
+        return_type: Option<ValueRef>,
         allow_in: bool,
     ) -> Result<ParsedNode, ParseError> {
         let expression_body = self.current.kind != TokenKind::LeftBrace;
@@ -5690,11 +5711,25 @@ impl<'s> Parser<'s> {
         let parameters = self.tape.push_list(parameters)?;
         let asynchronous = self.tape.push_bool(asynchronous)?;
         let expression = self.tape.push_bool(expression_body)?;
-        self.node(
-            NodeTag::ARROW_FUNCTION_EXPRESSION,
-            Span::new(start, body.span.end),
-            &[parameters, body.value(), asynchronous, expression],
-        )
+        if let Some(return_type) = return_type {
+            self.node(
+                NodeTag::ARROW_FUNCTION_EXPRESSION,
+                Span::new(start, body.span.end),
+                &[
+                    parameters,
+                    body.value(),
+                    asynchronous,
+                    expression,
+                    return_type,
+                ],
+            )
+        } else {
+            self.node(
+                NodeTag::ARROW_FUNCTION_EXPRESSION,
+                Span::new(start, body.span.end),
+                &[parameters, body.value(), asynchronous, expression],
+            )
+        }
     }
 
     const fn is_invalid_arrow_parameter_tag(tag: Option<NodeTag>) -> bool {
@@ -5716,7 +5751,11 @@ impl<'s> Parser<'s> {
         if self.eat(TokenKind::Question).is_none() {
             return Ok(test);
         }
-        let consequent = self.parse_assignment_expression(true)?;
+        let previous_conditional_consequent = self.parsing_conditional_consequent;
+        self.parsing_conditional_consequent = true;
+        let consequent = self.parse_assignment_expression(true);
+        self.parsing_conditional_consequent = previous_conditional_consequent;
+        let consequent = consequent?;
         self.expect(TokenKind::Colon);
         let alternate = self.parse_assignment_expression(allow_in)?;
         self.node(
@@ -7932,6 +7971,82 @@ impl<'s> Parser<'s> {
         )
     }
 
+    fn parse_return_type_annotation(&mut self, delimiter: Token) -> Result<ParsedNode, ParseError> {
+        let annotation = self.parse_type_or_type_predicate()?;
+        self.node(
+            NodeTag::TS_TYPE_ANNOTATION,
+            Span::new(delimiter.start, annotation.span.end),
+            &[annotation.value()],
+        )
+    }
+
+    fn parse_type_or_type_predicate(&mut self) -> Result<ParsedNode, ParseError> {
+        // Named and assertion predicates are contextual only at callable return boundaries.
+        if self.current_starts_named_type_predicate() {
+            return self.parse_named_type_predicate();
+        }
+        if self.current_starts_asserts_type_predicate() {
+            return self.parse_asserts_type_predicate();
+        }
+        self.parse_type()
+    }
+
+    fn parse_named_type_predicate(&mut self) -> Result<ParsedNode, ParseError> {
+        let parameter_token = self.take();
+        let start = parameter_token.start;
+        let parameter = self.type_predicate_parameter(parameter_token)?;
+        self.expect(TokenKind::Is);
+        let annotation = self.parse_type_annotation()?;
+        let asserts = self.tape.push_bool(false)?;
+        self.node(
+            NodeTag::TS_TYPE_PREDICATE,
+            Span::new(start, annotation.span.end),
+            &[parameter.value(), annotation.value(), asserts],
+        )
+    }
+
+    fn parse_asserts_type_predicate(&mut self) -> Result<ParsedNode, ParseError> {
+        let asserts_token = self.take();
+        if asserts_token.flags.escaped() {
+            self.error(
+                Self::token_span(asserts_token),
+                "escape sequence is not allowed in the `asserts` keyword",
+            );
+        }
+        let parameter_token = self.take();
+        let parameter = self.type_predicate_parameter(parameter_token)?;
+        let annotation = if self.eat(TokenKind::Is).is_some() {
+            Some(self.parse_type_annotation()?)
+        } else {
+            None
+        };
+        let end = annotation
+            .as_ref()
+            .map_or(parameter.span.end, ParsedNode::end);
+        let annotation = if let Some(annotation) = annotation {
+            annotation.value()
+        } else {
+            self.tape.push_null()?
+        };
+        let asserts = self.tape.push_bool(true)?;
+        self.node(
+            NodeTag::TS_TYPE_PREDICATE,
+            Span::new(asserts_token.start, end),
+            &[parameter.value(), annotation, asserts],
+        )
+    }
+
+    fn type_predicate_parameter(&mut self, token: Token) -> Result<ParsedNode, ParseError> {
+        let span = Self::token_span(token);
+        if token.kind == TokenKind::This {
+            return self.node(NodeTag::TS_THIS_TYPE, span, &[]);
+        }
+        if !Self::is_identifier_name(token.kind) && token.kind != TokenKind::Yield {
+            self.error(span, "expected a type predicate parameter name");
+        }
+        self.identifier_from_span(span)
+    }
+
     fn parse_type(&mut self) -> Result<ParsedNode, ParseError> {
         let check_type = self.parse_union_type()?;
         if self.eat(TokenKind::Extends).is_none() {
@@ -8041,6 +8156,9 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_type_primary(&mut self) -> Result<ParsedNode, ParseError> {
+        if self.current.kind == TokenKind::This && self.current_starts_named_type_predicate() {
+            return self.parse_named_type_predicate();
+        }
         if let Some(tag) = self.current_type_keyword_tag() {
             let token = self.take();
             return self.node(tag, Self::token_span(token), &[]);
@@ -8304,8 +8422,8 @@ impl<'s> Parser<'s> {
             self.tape.push_null()?
         };
         let (parameters, _) = self.parse_type_signature_parameters()?;
-        self.expect(TokenKind::Arrow);
-        let return_type = self.parse_type_annotation()?;
+        let arrow = self.expect(TokenKind::Arrow);
+        let return_type = self.parse_return_type_annotation(arrow)?;
         self.node(
             NodeTag::TS_FUNCTION_TYPE,
             Span::new(start, return_type.span.end),
@@ -8574,8 +8692,8 @@ impl<'s> Parser<'s> {
                 self.tape.push_null()?
             };
             let (parameters, parameters_end) = self.parse_type_signature_parameters()?;
-            let return_type = if self.eat(TokenKind::Colon).is_some() {
-                self.parse_type_annotation()?.value()
+            let return_type = if let Some(colon) = self.eat(TokenKind::Colon) {
+                self.parse_return_type_annotation(colon)?.value()
             } else {
                 self.tape.push_null()?
             };
@@ -8622,8 +8740,8 @@ impl<'s> Parser<'s> {
     ) -> Result<ParsedNode, ParseError> {
         let type_parameters = self.parse_type_parameters()?;
         let (parameters, parameters_end) = self.parse_type_signature_parameters()?;
-        let (return_type, end) = if self.eat(TokenKind::Colon).is_some() {
-            let annotation = self.parse_type_annotation()?;
+        let (return_type, end) = if let Some(colon) = self.eat(TokenKind::Colon) {
+            let annotation = self.parse_return_type_annotation(colon)?;
             (annotation.value(), annotation.span.end)
         } else {
             (self.tape.push_null()?, parameters_end)
@@ -10775,7 +10893,13 @@ impl<'s> Parser<'s> {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
                         let arrow = lookahead.next_token();
-                        return arrow.kind == TokenKind::Arrow && !arrow.flags.line_break_before();
+                        // The committed type parser, rather than lookahead, finds the outer arrow.
+                        return if arrow.kind == TokenKind::Colon {
+                            !self.parsing_conditional_consequent
+                                && self.type_annotation_is_followed_by_arrow(arrow)
+                        } else {
+                            arrow.kind == TokenKind::Arrow && !arrow.flags.line_break_before()
+                        };
                     }
                 }
                 TokenKind::Eof => return false,
@@ -10807,7 +10931,13 @@ impl<'s> Parser<'s> {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
                         let arrow = lookahead.next_token();
-                        return arrow.kind == TokenKind::Arrow && !arrow.flags.line_break_before();
+                        // Ternary separators share this shape, so confirm the later arrow.
+                        return if arrow.kind == TokenKind::Colon {
+                            !self.parsing_conditional_consequent
+                                && self.type_annotation_is_followed_by_arrow(arrow)
+                        } else {
+                            arrow.kind == TokenKind::Arrow && !arrow.flags.line_break_before()
+                        };
                     }
                 }
                 TokenKind::Eof => return false,
@@ -10830,6 +10960,67 @@ impl<'s> Parser<'s> {
                 return false;
             }
         }
+    }
+
+    fn type_annotation_is_followed_by_arrow(&self, colon: Token) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(colon.end as usize);
+        let mut delimiter_depth = 0_u32;
+        let mut angle_depth = 0_u32;
+        loop {
+            let token = lookahead.next_token();
+            match token.kind {
+                TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::LeftBrace => {
+                    delimiter_depth = delimiter_depth.saturating_add(1);
+                }
+                TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace => {
+                    if delimiter_depth == 0 {
+                        return false;
+                    }
+                    delimiter_depth = delimiter_depth.saturating_sub(1);
+                }
+                TokenKind::Lt => angle_depth = angle_depth.saturating_add(1),
+                TokenKind::Gt => angle_depth = angle_depth.saturating_sub(1),
+                TokenKind::ShiftRight => angle_depth = angle_depth.saturating_sub(2),
+                TokenKind::ShiftRightUnsigned => angle_depth = angle_depth.saturating_sub(3),
+                TokenKind::Arrow if delimiter_depth == 0 && angle_depth == 0 => return true,
+                TokenKind::Semicolon | TokenKind::Comma
+                    if delimiter_depth == 0 && angle_depth == 0 =>
+                {
+                    return false;
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+    }
+
+    fn current_starts_named_type_predicate(&self) -> bool {
+        if !Self::is_identifier_name(self.current.kind)
+            && !matches!(self.current.kind, TokenKind::This | TokenKind::Yield)
+        {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        matches!(
+            lookahead.next_token(),
+            token if token.kind == TokenKind::Is && !token.flags.line_break_before()
+        )
+    }
+
+    fn current_starts_asserts_type_predicate(&self) -> bool {
+        let escaped_asserts = self.current.kind == TokenKind::Identifier
+            && self.current.flags.escaped()
+            && self.identifier_name_matches(self.current_span(), "asserts", true);
+        if self.current.kind != TokenKind::Asserts && !escaped_asserts {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let target = lookahead.next_token();
+        !target.flags.line_break_before()
+            && (Self::is_member_identifier_name(target.kind) || target.kind == TokenKind::This)
     }
 
     const fn is_property_name_start(kind: TokenKind, allow_private: bool) -> bool {
