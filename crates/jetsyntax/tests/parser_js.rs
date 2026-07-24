@@ -2282,6 +2282,110 @@ fn parser_should_validate_regular_expression_modifier_groups() {
     );
 }
 
+/// Quantifiers require an atom, except for Annex B lookahead compatibility in legacy mode.
+///
+/// Spec: lookbehind is never quantifiable, and Unicode modes also forbid quantified lookahead
+/// and unescaped extended pattern braces.
+#[test]
+fn parser_should_validate_regular_expression_quantifier_targets() {
+    assert_clean_cases(&[
+        GrammarCase::script(
+            "ordinary quantifiers",
+            "/a*?b+c??d{2}e{2,}f{2,3}?/u;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "legacy quantified lookahead",
+            "/(?=a)*(?!b)+?(?=c)??(?=d){2}(?!e){2,}(?=f){2,3}?/;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "legacy extended pattern braces",
+            "/{/; /}/; /x{o}x/; /{x}/; /a{2,x}/;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "escaped and class-contained quantifiers",
+            r"/\?\*\+\{\}/u; /[?*+{}]/u;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "indirect assertion quantification",
+            "/(?:(?=a))*(?:(?<=b))?/u; /(?:(?!a))+(?:(?<!b)){2}/v;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "delimited escapes and nested unicode sets",
+            r"/\p{L}\u{10ffff}/u; /\p{ASCII}[\q{a|b}]/v; /^[[0-9]&&[0-9]]+$/v;",
+            &[NodeTag::LITERAL],
+        ),
+    ]);
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script("bare optional quantifier", "/?/;", &[NodeTag::LITERAL]),
+            GrammarCase::script("bare exact quantifier", "/{2}/;", &[NodeTag::LITERAL]),
+            GrammarCase::script("bare lower quantifier", "/{2,}/;", &[NodeTag::LITERAL]),
+            GrammarCase::script("bare range quantifier", "/{2,3}/;", &[NodeTag::LITERAL]),
+            GrammarCase::script("unicode extended brace", "/{/u;", &[NodeTag::LITERAL]),
+            GrammarCase::script("unicode closing brace", "/}/v;", &[NodeTag::LITERAL]),
+            GrammarCase::script("unicode closing bracket", "/]/u;", &[NodeTag::LITERAL]),
+            GrammarCase::script("bare plus quantifier", "/+/;", &[NodeTag::LITERAL]),
+            GrammarCase::script("quantified anchor", "/^?/;", &[NodeTag::LITERAL]),
+            GrammarCase::script("quantified word boundary", r"/\b*/;", &[NodeTag::LITERAL]),
+            GrammarCase::script("repeated quantifier", "/a**/;", &[NodeTag::LITERAL]),
+            GrammarCase::script(
+                "possessive-shaped quantifier",
+                "/a?+/;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script("third optional quantifier", "/a???/;", &[NodeTag::LITERAL]),
+            GrammarCase::script(
+                "successive braced quantifiers",
+                "/a{1}{2}/;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "reversed quantifier bounds",
+                "/a{2,1}/;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script("quantified lookbehind", "/(?<=a)?/;", &[NodeTag::LITERAL]),
+            GrammarCase::script(
+                "quantified negative lookbehind",
+                "/(?<!a){2,3}/v;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "unicode quantified lookahead",
+                "/(?=a)?/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "unicode quantified negative lookahead",
+                "/(?!a){2,3}/v;",
+                &[NodeTag::LITERAL],
+            ),
+        ],
+        true,
+    );
+
+    let typescript_scanner = parse(
+        r"/(?med-ium:bar)/; /{}{1,2}_{3}.{4,}?(foo){008}${32,16}\b{064,128}/; /[[]/v;",
+        ParseOptions {
+            language: Language::TypeScript,
+            source_kind: SourceKind::Script,
+            semantic_errors: false,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("TypeScript scanner compatibility");
+    assert!(
+        typescript_scanner.diagnostics.is_empty(),
+        "{:?}",
+        typescript_scanner.diagnostics
+    );
+}
+
 /// Optional member, element, and call chains must be wrapped once in a chain expression.
 #[test]
 fn parser_should_accept_optional_chaining() {

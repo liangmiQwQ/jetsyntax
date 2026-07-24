@@ -454,6 +454,7 @@ impl<'s> Lexer<'s> {
                 break;
             }
         }
+        let pattern_end = self.position.saturating_sub(1);
         if !terminated {
             self.error(
                 slash.start as usize,
@@ -462,7 +463,6 @@ impl<'s> Lexer<'s> {
             );
         } else if flag_errors {
             let pattern_start = slash.start as usize + 1;
-            let pattern_end = self.position - 1;
             if let Some(error) =
                 regexp::validate_modifier_groups(&self.bytes[pattern_start..pattern_end])
             {
@@ -508,11 +508,31 @@ impl<'s> Lexer<'s> {
             }
             flags |= bit;
         }
+        if terminated && flag_errors {
+            self.validate_regexp_pattern(slash.start as usize + 1, pattern_end, flags);
+        }
         Token {
             kind: TokenKind::RegExp,
             start: slash.start,
             end: wire_offset(self.position),
             flags: slash.flags,
+        }
+    }
+
+    fn validate_regexp_pattern(&mut self, start: usize, end: usize, flags: u8) {
+        let mode = if flags & (1 << 6) != 0 {
+            regexp::Mode::UnicodeSets
+        } else if flags & (1 << 5) != 0 {
+            regexp::Mode::Unicode
+        } else {
+            regexp::Mode::Legacy
+        };
+        if let Some(error) = regexp::validate_core_syntax(&self.bytes[start..end], mode) {
+            self.error(
+                start + error.start,
+                start + error.end,
+                "invalid regular expression pattern",
+            );
         }
     }
 

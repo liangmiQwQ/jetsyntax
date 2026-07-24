@@ -200,6 +200,55 @@ describe("parse", () => {
     }
   });
 
+  it("validates regular-expression quantifier targets", () => {
+    for (
+      const source of [
+        "/a*?b+c??d{2}e{2,}f{2,3}?/u;",
+        "/(?=a)*(?!b)+?(?=c)??(?=d){2}(?!e){2,}(?=f){2,3}?/;",
+        "/{/; /}/; /x{o}x/; /{x}/; /a{2,x}/;",
+        String.raw`/\?\*\+\{\}/u; /[?*+{}]/u;`,
+        "/(?:(?=a))*(?:(?<=b))?/u; /(?:(?!a))+(?:(?<!b)){2}/v;",
+        String.raw`/\p{L}\u{10ffff}/u; /\p{ASCII}[\q{a|b}]/v; /^[[0-9]&&[0-9]]+$/v;`,
+      ]
+    ) {
+      expect(parse(source, { semanticErrors: true }).diagnostics, source).toEqual([]);
+    }
+
+    for (
+      const source of [
+        "/?/;",
+        "/{2}/;",
+        "/{2,}/;",
+        "/{2,3}/;",
+        "/{/u;",
+        "/}/v;",
+        "/]/u;",
+        "/+/;",
+        "/^?/;",
+        String.raw`/\b*/;`,
+        "/a**/;",
+        "/a?+/;",
+        "/a???/;",
+        "/a{1}{2}/;",
+        "/a{2,1}/;",
+        "/(?<=a)?/;",
+        "/(?<!a){2,3}/v;",
+        "/(?=a)?/u;",
+        "/(?!a){2,3}/v;",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.body[0].expression.type).toBe("Literal");
+    }
+
+    const typescriptScanner = parse(
+      "/(?med-ium:bar)/; /{}{1,2}_{3}.{4,}?(foo){008}${32,16}\\b{064,128}/; /[[]/v;",
+      { lang: "ts", semanticErrors: false },
+    );
+    expect(typescriptScanner.diagnostics).toEqual([]);
+  });
+
   it("leaves regular-expression constructor validation to runtime", () => {
     const result = parse("new RegExp(\".\", \"uv\"); RegExp(\"\\\\p{Unknown}\", \"u\");");
 
