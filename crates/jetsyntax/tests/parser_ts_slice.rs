@@ -1217,6 +1217,139 @@ fn parses_named_typescript_declarations_and_nested_generics() {
 }
 
 #[test]
+fn disambiguates_contextual_typescript_declaration_heads() {
+    let expressions = parse(
+        "type; type.member; type = value; module.exports = value; namespace.member = value; const enumType = 1; const enumerationKeys = 2; type\nAcross = value; namespace\nseparated; module\nseparated; let module = 10; module in {}; type<T>(value); if (ok) type; while (ok) module; if (ok) namespace.member;",
+        typescript_options(),
+    )
+    .expect("parse contextual TypeScript expressions");
+    assert!(
+        expressions.diagnostics.is_empty(),
+        "{:#?}",
+        expressions.diagnostics
+    );
+    expressions
+        .tape
+        .validate()
+        .expect("valid contextual-expression tape");
+    assert_eq!(
+        node_fields(&expressions, NodeTag::EXPRESSION_STATEMENT).count(),
+        16
+    );
+    assert_eq!(
+        node_fields(&expressions, NodeTag::VARIABLE_DECLARATION).count(),
+        3
+    );
+    assert_eq!(
+        node_fields(&expressions, NodeTag::TS_TYPE_ALIAS_DECLARATION).count(),
+        0
+    );
+    assert_eq!(
+        node_fields(&expressions, NodeTag::TS_MODULE_DECLARATION).count(),
+        0
+    );
+    assert_eq!(
+        node_fields(&expressions, NodeTag::TS_ENUM_DECLARATION).count(),
+        0
+    );
+
+    let declarations = parse(
+        "type Alias = string; type type = string; type contextual = string; type \\u0054 = string; namespace Library {} namespace type {} module Runtime {} module \"pkg\" {} const enum Exact {} const /*\n*/ enum Commented {} const\nenum AcrossLine {} export type Exported = string; export const enumValue = 1; export const /*\n*/ enum ExportedCommented {}",
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            ..typescript_options()
+        },
+    )
+    .expect("parse contextual TypeScript declarations");
+    assert!(
+        declarations.diagnostics.is_empty(),
+        "{:#?}",
+        declarations.diagnostics
+    );
+    declarations
+        .tape
+        .validate()
+        .expect("valid contextual-declaration tape");
+    assert_eq!(
+        node_fields(&declarations, NodeTag::TS_TYPE_ALIAS_DECLARATION).count(),
+        5
+    );
+    assert_eq!(
+        node_fields(&declarations, NodeTag::TS_MODULE_DECLARATION).count(),
+        4
+    );
+    assert_eq!(
+        node_fields(&declarations, NodeTag::TS_ENUM_DECLARATION).count(),
+        4
+    );
+    assert_eq!(
+        node_fields(&declarations, NodeTag::VARIABLE_DECLARATION).count(),
+        1
+    );
+}
+
+#[test]
+fn validates_contextual_typescript_declaration_contexts() {
+    let ordinary_contextual = parse(
+        "type await = string; namespace await {} type yield = string; namespace yield {}",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            ..typescript_options()
+        },
+    )
+    .expect("parse ordinary contextual TypeScript names");
+    assert!(ordinary_contextual.diagnostics.is_empty());
+    assert_eq!(
+        node_fields(&ordinary_contextual, NodeTag::TS_TYPE_ALIAS_DECLARATION).count(),
+        2
+    );
+    assert_eq!(
+        node_fields(&ordinary_contextual, NodeTag::TS_MODULE_DECLARATION).count(),
+        2
+    );
+
+    let positioned = parse(
+        "if (ok) type Alias = string; if (ok) type; if (ok) namespace N {} if (ok) module.exports = value;",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("diagnose contextual declarations in statement positions");
+    assert_eq!(
+        positioned.diagnostics.len(),
+        2,
+        "{:#?}",
+        positioned.diagnostics
+    );
+    assert!(positioned.diagnostics.iter().all(|diagnostic| {
+        diagnostic.message == "declarations are not allowed in this statement position"
+    }));
+
+    let rejected = parse(
+        "export type\nAcross = number; namespace \"pkg\" {} async function f() { type await = string; namespace await {} } function* g() { type yield = string; module yield {} } class C { static { type await = string; namespace await {} } }",
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            ..typescript_options()
+        },
+    )
+    .expect("recover invalid contextual TypeScript declarations");
+    assert!(!rejected.diagnostics.is_empty());
+    rejected
+        .tape
+        .validate()
+        .expect("valid rejected contextual-declaration tape");
+    assert_eq!(
+        node_fields(&rejected, NodeTag::TS_TYPE_ALIAS_DECLARATION).count(),
+        0
+    );
+    assert_eq!(
+        node_fields(&rejected, NodeTag::TS_MODULE_DECLARATION).count(),
+        1
+    );
+}
+
+#[test]
 fn keeps_type_bindings_separate_from_parent_value_scopes() {
     let source = "function convert(value) { type value = number; } try {} catch (error) { type error = unknown; }";
     let parsed = parse(

@@ -602,9 +602,7 @@ impl<'s> Parser<'s> {
         let statement = match self.current.kind {
             TokenKind::Semicolon => self.parse_empty_statement(),
             TokenKind::LeftBrace => self.parse_block_statement(),
-            TokenKind::Const
-                if self.options.language.is_typescript() && self.followed_by_word("enum") =>
-            {
+            TokenKind::Const if self.starts_typescript_const_enum_declaration() => {
                 self.parse_enum_declaration(true)
             }
             TokenKind::Var | TokenKind::Const => self.parse_variable_declaration(
@@ -622,7 +620,7 @@ impl<'s> Parser<'s> {
                 self.parse_variable_declaration(true, VariableDeclarationKind::AwaitUsing, false)
             }
             TokenKind::Declare => self.parse_typescript_declare_or_expression_statement(position),
-            TokenKind::Type if self.options.language.is_typescript() => {
+            TokenKind::Type if self.starts_typescript_type_alias_declaration() => {
                 self.parse_type_alias_declaration()
             }
             TokenKind::Interface if self.options.language.is_typescript() => {
@@ -713,9 +711,8 @@ impl<'s> Parser<'s> {
             TokenKind::Let => self.starts_let_declaration_at(position),
             TokenKind::Import => !self.import_starts_expression(),
             TokenKind::Declare => self.typescript_declare_declaration_kind().is_some(),
-            TokenKind::Type | TokenKind::Interface | TokenKind::Enum => {
-                self.options.language.is_typescript()
-            }
+            TokenKind::Type => self.starts_typescript_type_alias_declaration(),
+            TokenKind::Interface | TokenKind::Enum => self.options.language.is_typescript(),
             TokenKind::Namespace | TokenKind::Module => self.starts_typescript_module_declaration(),
             TokenKind::Identifier => self.starts_typescript_global_augmentation(),
             TokenKind::Abstract => self.starts_typescript_abstract_class_declaration(),
@@ -4976,9 +4973,7 @@ impl<'s> Parser<'s> {
                     false,
                 )?
             }
-            TokenKind::Const
-                if self.options.language.is_typescript() && self.followed_by_word("enum") =>
-            {
+            TokenKind::Const if self.starts_typescript_const_enum_declaration() => {
                 self.parse_enum_declaration(true)?
             }
             TokenKind::Var | TokenKind::Let | TokenKind::Const => self
@@ -4987,7 +4982,7 @@ impl<'s> Parser<'s> {
                     VariableDeclarationKind::from_token(self.current.kind),
                     false,
                 )?,
-            TokenKind::Type if self.options.language.is_typescript() => {
+            TokenKind::Type if self.starts_typescript_type_alias_declaration() => {
                 self.parse_type_alias_declaration()?
             }
             TokenKind::Interface if self.options.language.is_typescript() => {
@@ -9644,6 +9639,12 @@ impl<'s> Parser<'s> {
             keyword.start
         };
         let string_name = self.current.kind == TokenKind::String;
+        if string_name && keyword.kind == TokenKind::Namespace {
+            self.error(
+                self.current_span(),
+                "a namespace name must be an identifier",
+            );
+        }
         let mut id = if string_name {
             self.parse_literal()?
         } else {
@@ -10131,12 +10132,6 @@ impl<'s> Parser<'s> {
         self.context.error(span, message);
     }
 
-    fn followed_by_word(&self, word: &str) -> bool {
-        self.source
-            .get(self.current.end as usize..)
-            .is_some_and(|rest| rest.trim_start().starts_with(word))
-    }
-
     fn current_variable_declaration_kind(&self, for_head: bool) -> Option<VariableDeclarationKind> {
         match self.current.kind {
             TokenKind::Var | TokenKind::Const => {
@@ -10620,7 +10615,34 @@ impl<'s> Parser<'s> {
         }
         let mut lookahead = Lexer::new(self.source);
         lookahead.set_position(self.current.end as usize);
-        !lookahead.next_token().flags.line_break_before()
+        let name = lookahead.next_token();
+        if name.flags.line_break_before() {
+            return false;
+        }
+        self.is_typescript_declaration_binding_identifier(name) || name.kind == TokenKind::String
+    }
+
+    fn starts_typescript_type_alias_declaration(&self) -> bool {
+        if !self.options.language.is_typescript()
+            || self.current.kind != TokenKind::Type
+            || self.current.flags.escaped()
+        {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let name = lookahead.next_token();
+        !name.flags.line_break_before() && self.is_typescript_declaration_binding_identifier(name)
+    }
+
+    fn starts_typescript_const_enum_declaration(&self) -> bool {
+        if !self.options.language.is_typescript() || self.current.kind != TokenKind::Const {
+            return false;
+        }
+        // A line break is valid here; token lookahead also excludes enum-prefixed bindings.
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        lookahead.next_token().kind == TokenKind::Enum
     }
 
     fn starts_typescript_global_augmentation(&self) -> bool {
@@ -10659,8 +10681,16 @@ impl<'s> Parser<'s> {
 
     fn is_typescript_namespace_binding_identifier_syntax(&self, token: Token) -> bool {
         token.kind != TokenKind::Enum
-            && Self::is_identifier_name(token.kind)
+            && (Self::is_identifier_name(token.kind) || token.kind == TokenKind::Yield)
             && !self.is_escaped_reserved_identifier(Self::token_span(token), token.flags.escaped())
+    }
+
+    fn is_typescript_declaration_binding_identifier(&self, token: Token) -> bool {
+        self.is_typescript_namespace_binding_identifier_syntax(token)
+            && !(token.kind == TokenKind::Await
+                && (self.context.grammar().async_function()
+                    || self.in_class_static_block_context()))
+            && !(token.kind == TokenKind::Yield && self.context.grammar().generator())
     }
 
     fn starts_typescript_abstract_class_declaration(&self) -> bool {

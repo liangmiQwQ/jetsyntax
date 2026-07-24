@@ -3403,6 +3403,143 @@ describe("parse", () => {
     expect(JSON.stringify(compatibility.program)).not.toContain("\"declare\":true");
   });
 
+  it("disambiguates contextual TypeScript declaration heads", () => {
+    const expressions = parse(
+      [
+        "type;",
+        "type.member;",
+        "type = value;",
+        "module.exports = value;",
+        "namespace.member = value;",
+        "const enumType = 1;",
+        "const enumerationKeys = 2;",
+        "type",
+        "Across = value;",
+        "namespace",
+        "separated;",
+        "module",
+        "separated;",
+        "let module = 10;",
+        "module in {};",
+        "type<T>(value);",
+        "if (ok) type;",
+        "while (ok) module;",
+        "if (ok) namespace.member;",
+      ].join("\n"),
+      { lang: "ts" },
+    );
+    expect(expressions.diagnostics).toEqual([]);
+    expect(expressions.program.body.map(statement => statement.type)).toEqual([
+      ...Array(5).fill("ExpressionStatement"),
+      "VariableDeclaration",
+      "VariableDeclaration",
+      ...Array(6).fill("ExpressionStatement"),
+      "VariableDeclaration",
+      "ExpressionStatement",
+      "ExpressionStatement",
+      "IfStatement",
+      "WhileStatement",
+      "IfStatement",
+    ]);
+
+    const declarations = parse(
+      [
+        "type Alias = string;",
+        "type type = string;",
+        "type contextual = string;",
+        "type \\u0054 = string;",
+        "namespace Library {}",
+        "namespace type {}",
+        "module Runtime {}",
+        "module \"pkg\" {}",
+        "const enum Exact {}",
+        "const /*",
+        "*/ enum Commented {}",
+        "const",
+        "enum AcrossLine {}",
+        "export type Exported = string;",
+        "export const enumValue = 1;",
+        "export const /*",
+        "*/ enum ExportedCommented {}",
+      ].join("\n"),
+      { lang: "ts", sourceType: "module" },
+    );
+    expect(declarations.diagnostics).toEqual([]);
+    expect(declarations.program.body).toMatchObject([
+      { type: "TSTypeAliasDeclaration", id: { name: "Alias" } },
+      { type: "TSTypeAliasDeclaration", id: { name: "type" } },
+      { type: "TSTypeAliasDeclaration", id: { name: "contextual" } },
+      { type: "TSTypeAliasDeclaration" },
+      { type: "TSModuleDeclaration", kind: "namespace", id: { name: "Library" } },
+      { type: "TSModuleDeclaration", kind: "namespace", id: { name: "type" } },
+      { type: "TSModuleDeclaration", kind: "module", id: { name: "Runtime" } },
+      { type: "TSModuleDeclaration", kind: "module", id: { value: "pkg" } },
+      { type: "TSEnumDeclaration", const: true, id: { name: "Exact" } },
+      { type: "TSEnumDeclaration", const: true, id: { name: "Commented" } },
+      { type: "TSEnumDeclaration", const: true, id: { name: "AcrossLine" } },
+      {
+        type: "ExportNamedDeclaration",
+        declaration: { type: "TSTypeAliasDeclaration", id: { name: "Exported" } },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        declaration: { type: "VariableDeclaration", declarations: [{ id: { name: "enumValue" } }] },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        declaration: {
+          type: "TSEnumDeclaration",
+          const: true,
+          id: { name: "ExportedCommented" },
+        },
+      },
+    ]);
+
+    const ordinaryContextual = parse(
+      "type await = string; namespace await {} type yield = string; namespace yield {}",
+      { lang: "ts", sourceType: "script" },
+    );
+    expect(ordinaryContextual.diagnostics).toEqual([]);
+    expect(ordinaryContextual.program.body).toMatchObject([
+      { type: "TSTypeAliasDeclaration", id: { name: "await" } },
+      { type: "TSModuleDeclaration", id: { name: "await" } },
+      { type: "TSTypeAliasDeclaration", id: { name: "yield" } },
+      { type: "TSModuleDeclaration", id: { name: "yield" } },
+    ]);
+
+    const positioned = parse(
+      "if (ok) type Alias = string; if (ok) type; if (ok) namespace N {} if (ok) module.exports = value;",
+      { lang: "ts", semanticErrors: true },
+    );
+    expect(positioned.diagnostics).toEqual([
+      "declarations are not allowed in this statement position",
+      "declarations are not allowed in this statement position",
+    ]);
+
+    const invalidExport = parse("export type\nAcross = number;", {
+      lang: "ts",
+      sourceType: "module",
+    });
+    expect(invalidExport.diagnostics).not.toEqual([]);
+    expect(JSON.stringify(invalidExport.program)).not.toContain("TSTypeAliasDeclaration");
+
+    const contextualReserved = parse(
+      "async function f() { type await = string; namespace await {} } function* g() { type yield = string; module yield {} } class C { static { type await = string; namespace await {} } }",
+      { lang: "ts" },
+    );
+    expect(contextualReserved.diagnostics).not.toEqual([]);
+    expect(JSON.stringify(contextualReserved.program)).not.toContain("TSTypeAliasDeclaration");
+    expect(JSON.stringify(contextualReserved.program)).not.toContain("TSModuleDeclaration");
+
+    const invalidNamespace = parse("namespace \"pkg\" {}", { lang: "ts" });
+    expect(invalidNamespace.diagnostics).not.toEqual([]);
+    expect(invalidNamespace.program.body[0]).toMatchObject({
+      type: "TSModuleDeclaration",
+      kind: "namespace",
+      id: { type: "Literal", value: "pkg" },
+    });
+  });
+
   it("materializes explicit TypeScript declared enums and type-only exports", () => {
     const source = [
       "declare enum Direction { Up, Down = 2 }",
