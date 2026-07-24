@@ -253,6 +253,7 @@ impl Diagnostic {
 pub enum ScopeKind {
     Program,
     Function,
+    StaticBlock,
     Block,
     Class,
     Catch,
@@ -264,6 +265,7 @@ pub enum ScopeKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingKind {
     Var,
+    VarDeclaredMarker,
     Function,
     BlockFunction,
     Parameter,
@@ -280,6 +282,10 @@ pub enum BindingKind {
 impl BindingKind {
     const fn is_var_scoped(self) -> bool {
         matches!(self, Self::Var | Self::Function | Self::Parameter)
+    }
+
+    const fn records_var_declared_name(self) -> bool {
+        matches!(self, Self::Var | Self::Function)
     }
 
     const fn is_type(self) -> bool {
@@ -515,6 +521,7 @@ impl<'s> ParserContext<'s> {
                         scope.kind,
                         ScopeKind::Program
                             | ScopeKind::Function
+                            | ScopeKind::StaticBlock
                             | ScopeKind::Type
                             | ScopeKind::ExternalModule
                     )
@@ -554,17 +561,24 @@ impl<'s> ParserContext<'s> {
                 .copied()
                 .filter(|binding| !kind.can_merge_with(binding.kind))
         } else if kind.is_var_scoped() {
-            self.scopes[target..]
-                .iter()
-                .enumerate()
-                .find_map(|(offset, scope)| {
-                    let binding = scope.value_bindings.get(name).copied()?;
-                    if offset == 0 && kind.can_merge_with(binding.kind) {
-                        None
-                    } else {
-                        Some(binding)
-                    }
+            self.grammar
+                .early_errors()
+                .then(|| {
+                    self.scopes[target..]
+                        .iter()
+                        .enumerate()
+                        .find_map(|(offset, scope)| {
+                            let binding = scope.value_bindings.get(name).copied()?;
+                            if binding.kind == BindingKind::VarDeclaredMarker
+                                || offset == 0 && kind.can_merge_with(binding.kind)
+                            {
+                                None
+                            } else {
+                                Some(binding)
+                            }
+                        })
                 })
+                .flatten()
         } else {
             self.scopes[target]
                 .value_bindings
@@ -589,20 +603,58 @@ impl<'s> ParserContext<'s> {
             return false;
         }
 
-        if self.merge_existing_binding(target, namespace, name, kind) {
-            return true;
-        }
-        let bindings = match namespace {
-            BindingNamespace::Value => &mut self.scopes[target].value_bindings,
-            BindingNamespace::Type => &mut self.scopes[target].type_bindings,
-        };
-        bindings.insert(name, Binding { kind, span });
-        self.record(Mutation::BindingInserted {
-            scope: target,
-            namespace,
-            name,
-        });
+        self.insert_or_merge_binding(target, namespace, name, kind, span);
         true
+    }
+
+    fn insert_or_merge_binding(
+        &mut self,
+        target: usize,
+        namespace: BindingNamespace,
+        name: &'s str,
+        kind: BindingKind,
+        span: Span,
+    ) {
+        if !self.merge_existing_binding(target, namespace, name, kind) {
+            let bindings = match namespace {
+                BindingNamespace::Value => &mut self.scopes[target].value_bindings,
+                BindingNamespace::Type => &mut self.scopes[target].type_bindings,
+            };
+            bindings.insert(name, Binding { kind, span });
+            self.record(Mutation::BindingInserted {
+                scope: target,
+                namespace,
+                name,
+            });
+        }
+        if kind.records_var_declared_name() {
+            self.record_var_declared_name(target, name, span);
+        }
+    }
+
+    fn record_var_declared_name(&mut self, target: usize, name: &'s str, span: Span) {
+        if !self.grammar.early_errors() {
+            return;
+        }
+        for scope in target + 1..self.scopes.len() {
+            if self.scopes[scope].kind != ScopeKind::Block
+                || self.scopes[scope].value_bindings.contains_key(name)
+            {
+                continue;
+            }
+            self.scopes[scope].value_bindings.insert(
+                name,
+                Binding {
+                    kind: BindingKind::VarDeclaredMarker,
+                    span,
+                },
+            );
+            self.record(Mutation::BindingInserted {
+                scope,
+                namespace: BindingNamespace::Value,
+                name,
+            });
+        }
     }
 
     fn merge_existing_binding(
@@ -715,7 +767,9 @@ impl<'s> ParserContext<'s> {
         let mut scopes = self.scopes.iter().rev();
         let current = scopes.next().map(|scope| scope.kind);
         let parent = scopes.next().map(|scope| scope.kind);
-        if current == Some(ScopeKind::Block) && parent != Some(ScopeKind::Function) {
+        if current == Some(ScopeKind::Block)
+            && !matches!(parent, Some(ScopeKind::Function | ScopeKind::StaticBlock))
+        {
             BindingKind::BlockFunction
         } else {
             BindingKind::Function
@@ -1006,7 +1060,7 @@ impl<'s> ParserContext<'s> {
     fn function_depth(&self) -> usize {
         self.scopes
             .iter()
-            .filter(|scope| scope.kind == ScopeKind::Function)
+            .filter(|scope| matches!(scope.kind, ScopeKind::Function | ScopeKind::StaticBlock))
             .count()
     }
 
@@ -1162,6 +1216,55 @@ mod tests {
         assert_eq!(context.diagnostics().len(), 2);
         assert_eq!(context.diagnostics()[0].related, Some(Span::new(0, 5)));
         assert_eq!(context.diagnostics()[1].related, Some(Span::new(15, 20)));
+    }
+
+    #[test]
+    fn block_scopes_track_var_declared_names_in_both_declaration_orders() {
+        let grammar = GrammarContext::new(false, false, true);
+
+        let mut var_first = ParserContext::new(grammar);
+        var_first.enter_scope(ScopeKind::Program);
+        var_first.enter_scope(ScopeKind::Block);
+        assert!(var_first.declare_binding("value", BindingKind::Var, Span::new(0, 5)));
+        assert!(var_first.declare_binding("value", BindingKind::Var, Span::new(7, 12)));
+        assert!(!var_first.declare_binding("value", BindingKind::Lexical, Span::new(14, 19)));
+        assert_eq!(var_first.diagnostics().len(), 1);
+
+        let mut lexical_first = ParserContext::new(grammar);
+        lexical_first.enter_scope(ScopeKind::Program);
+        lexical_first.enter_scope(ScopeKind::Block);
+        assert!(lexical_first.declare_binding("value", BindingKind::Lexical, Span::new(0, 5)));
+        assert!(!lexical_first.declare_binding("value", BindingKind::Var, Span::new(7, 12)));
+        assert_eq!(lexical_first.diagnostics().len(), 1);
+
+        let mut syntax_only = ParserContext::new(GrammarContext::new(false, false, false));
+        syntax_only.enter_scope(ScopeKind::Program);
+        syntax_only.enter_scope(ScopeKind::Block);
+        assert!(syntax_only.declare_binding("value", BindingKind::Var, Span::new(0, 5)));
+        assert!(syntax_only.declare_binding("value", BindingKind::Lexical, Span::new(7, 12)));
+        assert!(syntax_only.diagnostics().is_empty());
+
+        let mut syntax_only_reverse = ParserContext::new(GrammarContext::new(false, false, false));
+        syntax_only_reverse.enter_scope(ScopeKind::Program);
+        syntax_only_reverse.enter_scope(ScopeKind::Block);
+        assert!(syntax_only_reverse.declare_binding(
+            "value",
+            BindingKind::Lexical,
+            Span::new(0, 5)
+        ));
+        assert!(syntax_only_reverse.declare_binding("value", BindingKind::Var, Span::new(7, 12)));
+        assert!(syntax_only_reverse.diagnostics().is_empty());
+
+        let mut nested = ParserContext::new(grammar);
+        nested.enter_scope(ScopeKind::Program);
+        nested.enter_scope(ScopeKind::Block);
+        nested.enter_scope(ScopeKind::Block);
+        let checkpoint = nested.checkpoint();
+        assert!(nested.declare_binding("nested", BindingKind::Var, Span::new(0, 6)));
+        assert!(!nested.declare_binding("nested", BindingKind::Lexical, Span::new(8, 14)));
+        nested.rollback(checkpoint);
+        assert!(nested.declare_binding("nested", BindingKind::Lexical, Span::new(16, 22)));
+        assert!(nested.diagnostics().is_empty());
     }
 
     #[test]

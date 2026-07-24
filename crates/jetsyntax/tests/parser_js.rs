@@ -336,6 +336,71 @@ fn parser_should_accept_every_statement_family() {
 }
 
 #[test]
+fn parser_should_scope_switch_case_blocks_and_reject_duplicate_defaults() {
+    let allowed = parse(
+        "let outer; let shared; switch (0) { case 0: let outer; function same() {} default: function same() {} } switch (1) { case 1: let local; } switch (2) { default: let local; } function make() { var C = class C extends C {}; } class Static { static { var Static; var shared; var local; function local() {} function reversed() {} var reversed; } }",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse isolated switch case blocks");
+    assert!(allowed.diagnostics.is_empty(), "{:#?}", allowed.diagnostics);
+    allowed
+        .tape
+        .validate()
+        .expect("valid isolated switch case block tape");
+
+    for source in [
+        "switch (0) { case 0: let value; default: const value = 1; }",
+        "switch (0) { case 0: function value() {} default: var value; }",
+        "\"use strict\"; switch (0) { case 0: function value() {} default: function value() {} }",
+        "class C { static { var value; let value; } }",
+        "class C { static { let value; var value; } }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Script,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover duplicate switch case binding");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid duplicate switch binding recovery tape");
+    }
+
+    let duplicate_default = parse(
+        "switch (value) { default: first; default: second; }",
+        ParseOptions {
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("recover a duplicate switch default");
+    assert_eq!(duplicate_default.diagnostics.len(), 1);
+    duplicate_default
+        .tape
+        .validate()
+        .expect("valid duplicate switch default recovery tape");
+
+    let syntax_only = parse(
+        "let leaked; outer: while (value) { class C { static { var C; var leaked; break outer; } } } switch (value) { default: first; default: second; }",
+        ParseOptions {
+            semantic_errors: false,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse duplicate switch defaults without early errors");
+    assert!(syntax_only.diagnostics.is_empty());
+}
+
+#[test]
 fn parser_should_restrict_declarations_to_statement_list_items() {
     for source in [
         "if (condition) let value;",

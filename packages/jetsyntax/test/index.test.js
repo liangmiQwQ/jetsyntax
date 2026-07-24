@@ -415,6 +415,45 @@ describe("parse", () => {
     expect(method.value.body.body[0].argument.type).toBe("TemplateLiteral");
   });
 
+  it("isolates switch case bindings and diagnoses invalid case blocks", () => {
+    const allowed = parse(
+      "let outer; let shared; switch (0) { case 0: let outer; function same() {} "
+        + "default: function same() {} } "
+        + "switch (1) { case 1: let local; } switch (2) { default: let local; } "
+        + "function make() { var C = class C extends C {}; } "
+        + "class Static { static { var Static; var shared; var local; function local() {} "
+        + "function reversed() {} var reversed; } }",
+      { semanticErrors: true, sourceType: "script" },
+    );
+    expect(allowed.diagnostics).toEqual([]);
+
+    for (
+      const source of [
+        "switch (0) { case 0: let value; default: const value = 1; }",
+        "switch (0) { case 0: function value() {} default: var value; }",
+        "\"use strict\"; switch (0) { case 0: function value() {} "
+        + "default: function value() {} }",
+        "switch (value) { default: first; default: second; }",
+        "class C { static { var value; let value; } }",
+        "class C { static { let value; var value; } }",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true, sourceType: "script" });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.panicked, source).toBe(false);
+      expect(result.program.type, source).toBe("Program");
+    }
+
+    expect(
+      parse(
+        "let leaked; outer: while (value) { class C { "
+          + "static { var C; var leaked; break outer; } } } "
+          + "switch (value) { default: first; default: second; }",
+        { semanticErrors: false },
+      ).diagnostics,
+    ).toEqual([]);
+  });
+
   it("materializes invalid template escapes by tagged context", () => {
     const taggedSource =
       "tag`\\01`; tag`\\xg`; tag`\\u0`; tag`\\u{}`; tag`\\u{110000}`; tag`\\xg${value}\\u0${other}\\u{g}`;";

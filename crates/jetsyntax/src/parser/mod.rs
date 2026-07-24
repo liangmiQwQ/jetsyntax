@@ -2040,6 +2040,10 @@ impl<'s> Parser<'s> {
                 allow_anonymous,
             );
         }
+        let named_expression_scope = !declaration && Self::is_identifier_name(self.current.kind);
+        if named_expression_scope {
+            self.context.enter_scope(ScopeKind::Block);
+        }
         let id = if Self::is_identifier_name(self.current.kind) {
             self.parse_binding_identifier(BindingKind::Lexical)?.value()
         } else {
@@ -2057,6 +2061,9 @@ impl<'s> Parser<'s> {
         } else {
             self.tape.push_null()?
         };
+        if named_expression_scope {
+            let _ = self.context.leave_scope();
+        }
         let body_start = self.expect(TokenKind::LeftBrace).start;
         self.context.enter_scope(ScopeKind::Class);
         let previous_grammar = self.context.grammar();
@@ -2122,7 +2129,12 @@ impl<'s> Parser<'s> {
         let anonymous_implements_clause = self.current.kind == TokenKind::Implements
             && !self.current.flags.escaped()
             && !self.implements_is_followed_by_class_body();
-        let id = if Self::is_identifier_name(self.current.kind) && !anonymous_implements_clause {
+        let has_name = Self::is_identifier_name(self.current.kind) && !anonymous_implements_clause;
+        let named_expression_scope = !declaration && has_name;
+        if named_expression_scope {
+            self.context.enter_scope(ScopeKind::Block);
+        }
+        let id = if has_name {
             let binding = self.context.class_declaration_binding_kind();
             self.parse_binding_identifier(binding)?.value()
         } else {
@@ -2241,6 +2253,9 @@ impl<'s> Parser<'s> {
         } else {
             self.tape.push_null()?
         };
+        if named_expression_scope {
+            let _ = self.context.leave_scope();
+        }
 
         // 3. Parse the body under the same strict class grammar as the JavaScript path.
         let body_start = self.expect(TokenKind::LeftBrace).start;
@@ -2554,7 +2569,9 @@ impl<'s> Parser<'s> {
         let previous_arguments = self.class_arguments_function_depth;
         self.class_static_block_function_depth = Some(self.function_depth);
         self.class_arguments_function_depth = Some(self.ordinary_function_depth);
+        self.context.enter_scope(ScopeKind::StaticBlock);
         let block = self.parse_block_statement();
+        let _ = self.context.leave_scope();
         self.class_static_block_function_depth = previous;
         self.class_arguments_function_depth = previous_arguments;
         let block = block?;
@@ -4138,14 +4155,23 @@ impl<'s> Parser<'s> {
         let discriminant = self.parse_expression(true)?;
         self.expect(TokenKind::RightParen);
         self.expect(TokenKind::LeftBrace);
+        self.context.enter_scope(ScopeKind::Block);
         self.context
             .push_label(None, LabelKind::Switch, Span::new(start, start));
         let mut cases = Vec::new();
+        let mut has_default = false;
         while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
             let case_start = self.current.start;
             let test = if self.eat(TokenKind::Case).is_some() {
                 self.parse_expression(true)?.value()
-            } else if self.eat(TokenKind::Default).is_some() {
+            } else if let Some(default_token) = self.eat(TokenKind::Default) {
+                if has_default && self.reports_ecmascript_early_errors() {
+                    self.error(
+                        Self::token_span(default_token),
+                        "switch statement cannot contain multiple default clauses",
+                    );
+                }
+                has_default = true;
                 self.tape.push_null()?
             } else {
                 self.error(self.current_span(), "expected `case` or `default`");
@@ -4179,6 +4205,7 @@ impl<'s> Parser<'s> {
         }
         let end = self.expect(TokenKind::RightBrace).end;
         let _ = self.context.pop_label();
+        let _ = self.context.leave_scope();
         let cases = self.tape.push_list(&cases)?;
         self.node(
             NodeTag::SWITCH_STATEMENT,
@@ -4248,7 +4275,7 @@ impl<'s> Parser<'s> {
         } else {
             self.context.resolve_break(label_name)
         };
-        if !resolved {
+        if !resolved && self.reports_ecmascript_early_errors() {
             self.error(
                 Self::token_span(keyword),
                 if is_continue {
