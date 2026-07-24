@@ -2491,6 +2491,72 @@ fn parser_should_validate_regular_expression_escapes_and_class_ranges() {
     );
 }
 
+/// Named captures use identifier-name grammar and named references resolve across the whole
+/// pattern.
+///
+/// Spec: escaped and non-BMP group names compare by character value, references may point
+/// forward, and duplicate names remain valid in separate disjunction alternatives.
+#[test]
+fn parser_should_validate_regular_expression_named_groups() {
+    assert_clean_cases(&[
+        GrammarCase::script(
+            "named references and escapes",
+            r"/(?<name>a)\k<name>/u; /\k<later>(?<later>b)/; /(?<\u0061>a)\k<a>/u; /(?<\u{1D49C}>a)\k<𝒜>/; /(?<\uD835\uDC9C>a)\k<𝒜>/u; /(?<a\u{200C}>a)\k<a\u200C>/u; /(?<$>a)\k<$>/u; /(?<_>b)\k<_>/u;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "duplicate names in disjoint alternatives",
+            r"/(?<x>a)|(?<x>b)/; /(?:(?<x>a)|(?<x>b))\k<x>/u;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "legacy identity escape without named captures",
+            r"/\k<name>/; /\k/; /\k<name/;",
+            &[NodeTag::LITERAL],
+        ),
+    ]);
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script(
+                "missing named reference",
+                r"/(?<name>a)\k<other>/;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "missing forward named reference",
+                r"/\k<name>(?<other>a)/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "malformed named references",
+                r"/(?<name>a)\k/; /(?<name>a)\k<name/; /(?<name>a)\k<>/; /[\k](?<name>a)/;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "empty and numeric group names",
+                r"/(?<>a)/; /(?<42a>a)/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "punctuator and non-identifier group names",
+                r"/(?<a:>a)/; /(?<❤>a)/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "invalid escaped group names",
+                r"/(?<a\uD801>a)/u; /(?<a\u{110000}>a)/;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "unterminated group name",
+                r"/(?<name)/u;",
+                &[NodeTag::LITERAL],
+            ),
+        ],
+        true,
+    );
+}
+
 /// Optional member, element, and call chains must be wrapped once in a chain expression.
 #[test]
 fn parser_should_accept_optional_chaining() {

@@ -293,6 +293,35 @@ describe("parse", () => {
     }
   });
 
+  it("validates regular-expression named groups", () => {
+    for (
+      const source of [
+        String
+          .raw`/(?<name>a)\k<name>/u; /\k<later>(?<later>b)/; /(?<\u0061>a)\k<a>/u; /(?<\u{1D49C}>a)\k<𝒜>/; /(?<\uD835\uDC9C>a)\k<𝒜>/u; /(?<a\u{200C}>a)\k<a\u200C>/u; /(?<$>a)\k<$>/u; /(?<_>b)\k<_>/u;`,
+        String.raw`/(?<x>a)|(?<x>b)/; /(?:(?<x>a)|(?<x>b))\k<x>/u;`,
+        String.raw`/\k<name>/; /\k/; /\k<name/;`,
+      ]
+    ) {
+      expect(parse(source, { semanticErrors: true }).diagnostics, source).toEqual([]);
+    }
+
+    for (
+      const source of [
+        String.raw`/(?<name>a)\k<other>/;`,
+        String.raw`/\k<name>(?<other>a)/u;`,
+        String.raw`/(?<name>a)\k/; /(?<name>a)\k<name/; /(?<name>a)\k<>/; /[\k](?<name>a)/;`,
+        String.raw`/(?<>a)/; /(?<42a>a)/u;`,
+        String.raw`/(?<a:>a)/; /(?<❤>a)/u;`,
+        String.raw`/(?<a\uD801>a)/u; /(?<a\u{110000}>a)/;`,
+        String.raw`/(?<name)/u;`,
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.body[0].expression.type).toBe("Literal");
+    }
+  });
+
   it("leaves regular-expression constructor validation to runtime", () => {
     const result = parse("new RegExp(\".\", \"uv\"); RegExp(\"\\\\p{Unknown}\", \"u\");");
 
