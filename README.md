@@ -9,15 +9,15 @@ JetSyntax is an experimental, independently implemented JavaScript, TypeScript, 
 
 The repository has the required language modes, native API, NAPI transfer layer, ESTree decoder, conformance harnesses, and native/NAPI benchmark harnesses. Full grammar conformance and the performance target are still in progress.
 
-The latest complete, correctly wired official-suite baseline was captured at [`afc8ea6`](https://github.com/liangmiQwQ/jetsyntax/commit/afc8ea6) in [GitHub Actions run 30069563965](https://github.com/liangmiQwQ/jetsyntax/actions/runs/30069563965):
+The latest complete, correctly wired official-suite baseline was captured at [`1a19ce3`](https://github.com/liangmiQwQ/jetsyntax/commit/1a19ce3) in [GitHub Actions run 30083135022](https://github.com/liangmiQwQ/jetsyntax/actions/runs/30083135022):
 
 | Suite                 |  Passed | Failed | Unsupported | Executed | Skipped |
 | --------------------- | ------: | -----: | ----------: | -------: | ------: |
-| Test262               | 101,308 |  1,289 |           0 |  102,597 |       0 |
-| TypeScript            |  18,092 |  2,650 |           0 |   20,742 |       0 |
-| Babel parser fixtures |   3,995 |    897 |       1,044 |    5,936 |       0 |
+| Test262               | 101,316 |  1,281 |           0 |  102,597 |       0 |
+| TypeScript            |  18,192 |  2,550 |           0 |   20,742 |       0 |
+| Babel parser fixtures |   4,005 |    887 |       1,044 |    5,936 |       0 |
 
-These are development numbers, not a conformance claim. The table remains pinned to a reproducible full run until it is replaced by a newer complete run. CI enumerates every pinned case and rejects missing or skipped fixtures.
+Class auto-accessor support removed 118 official-suite failures from the preceding baseline—8 Test262, 100 TypeScript, and 10 Babel—with zero added failures. These are development numbers, not a conformance claim. The table remains pinned to a reproducible full run until it is replaced by a newer complete run. CI enumerates every pinned case and rejects missing or skipped fixtures.
 
 ## Architecture
 
