@@ -9,15 +9,15 @@ JetSyntax is an experimental, independently implemented JavaScript, TypeScript, 
 
 The repository has the required language modes, native API, NAPI transfer layer, ESTree decoder, conformance harnesses, and native/NAPI benchmark harnesses. Full grammar conformance and the performance target are still in progress.
 
-The latest complete, correctly wired official-suite baseline was captured at [`1a4741c`](https://github.com/liangmiQwQ/jetsyntax/commit/1a4741c) in [GitHub Actions run 30085031690](https://github.com/liangmiQwQ/jetsyntax/actions/runs/30085031690):
+The latest complete, correctly wired official-suite baseline was captured at [`e09fb9c`](https://github.com/liangmiQwQ/jetsyntax/commit/e09fb9c) in [GitHub Actions run 30087484923](https://github.com/liangmiQwQ/jetsyntax/actions/runs/30087484923):
 
 | Suite                 |  Passed | Failed | Unsupported | Executed | Skipped |
 | --------------------- | ------: | -----: | ----------: | -------: | ------: |
 | Test262               | 101,339 |  1,258 |           0 |  102,597 |       0 |
-| TypeScript            |  18,217 |  2,525 |           0 |   20,742 |       0 |
-| Babel parser fixtures |   4,008 |    884 |       1,044 |    5,936 |       0 |
+| TypeScript            |  18,431 |  2,311 |           0 |   20,742 |       0 |
+| Babel parser fixtures |   4,024 |    868 |       1,044 |    5,936 |       0 |
 
-Class auto-accessor support removed 118 official-suite failures—8 Test262, 100 TypeScript, and 10 Babel—with zero added failures. Private-brand checks then removed another 51—23 Test262, 25 TypeScript, and 3 Babel—again with zero added failures. These are development numbers, not a conformance claim. The table remains pinned to a reproducible full run until it is replaced by a newer complete run. CI enumerates every pinned case and rejects missing or skipped fixtures.
+Class auto-accessor support removed 118 official-suite failures—8 Test262, 100 TypeScript, and 10 Babel—with zero added failures. Private-brand checks then removed another 51—23 Test262, 25 TypeScript, and 3 Babel—again with zero added failures. Type predicates, assertion signatures, and typed arrow return annotations then removed another 230—214 TypeScript and 16 Babel—with zero added failures. These are development numbers, not a conformance claim. The table remains pinned to a reproducible full run until it is replaced by a newer complete run. CI enumerates every pinned case and rejects missing or skipped fixtures.
 
 ## Architecture
 
