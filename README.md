@@ -9,15 +9,15 @@ JetSyntax is an experimental, independently implemented JavaScript, TypeScript, 
 
 The repository has the required language modes, native API, NAPI transfer layer, ESTree decoder, conformance harnesses, and native/NAPI benchmark harnesses. Full grammar conformance and the performance target are still in progress.
 
-The latest complete, correctly wired official-suite baseline was captured at [`1b3839a`](https://github.com/liangmiQwQ/jetsyntax/commit/1b3839a) in [GitHub Actions run 30094326590](https://github.com/liangmiQwQ/jetsyntax/actions/runs/30094326590):
+The latest complete, correctly wired official-suite baseline was captured at [`f52b650`](https://github.com/liangmiQwQ/jetsyntax/commit/f52b650) in [GitHub Actions run 30096440940](https://github.com/liangmiQwQ/jetsyntax/actions/runs/30096440940):
 
 | Suite                 |  Passed | Failed | Unsupported | Executed | Skipped |
 | --------------------- | ------: | -----: | ----------: | -------: | ------: |
-| Test262               | 101,559 |  1,038 |           0 |  102,597 |       0 |
+| Test262               | 101,621 |    976 |           0 |  102,597 |       0 |
 | TypeScript            |  18,567 |  2,175 |           0 |   20,742 |       0 |
 | Babel parser fixtures |   4,040 |    852 |       1,044 |    5,936 |       0 |
 
-Class auto-accessor support removed 118 official-suite failures—8 Test262, 100 TypeScript, and 10 Babel—with zero added failures. Private-brand checks then removed another 51—23 Test262, 25 TypeScript, and 3 Babel—again with zero added failures. Type predicates, assertion signatures, and typed arrow return annotations then removed another 230—214 TypeScript and 16 Babel—with zero added failures. Typed and optional destructuring bindings, typed rest parameters, and their recovery rules removed another 152—136 TypeScript and 16 Babel—with zero added failures. Regular-expression modifier-group validation removed another 166 Test262 failures, and quantifier-target, assertion, brace, and group-balance validation removed another 54, both with zero added failures. These are development numbers, not a conformance claim. The table remains pinned to a reproducible full run until it is replaced by a newer complete run. CI enumerates every pinned case and rejects missing or skipped fixtures.
+Class auto-accessor support removed 118 official-suite failures—8 Test262, 100 TypeScript, and 10 Babel—with zero added failures. Private-brand checks then removed another 51—23 Test262, 25 TypeScript, and 3 Babel—again with zero added failures. Type predicates, assertion signatures, and typed arrow return annotations then removed another 230—214 TypeScript and 16 Babel—with zero added failures. Typed and optional destructuring bindings, typed rest parameters, and their recovery rules removed another 152—136 TypeScript and 16 Babel—with zero added failures. Regular-expression modifier-group validation removed another 166 Test262 failures, quantifier-target, assertion, brace, and group-balance validation removed another 54, and Unicode escape, reference, and character-range validation removed another 62, all with zero added failures. These are development numbers, not a conformance claim. The table remains pinned to a reproducible full run until it is replaced by a newer complete run. CI enumerates every pinned case and rejects missing or skipped fixtures.
 
 ## Architecture
 
