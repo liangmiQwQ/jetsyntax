@@ -2386,6 +2386,111 @@ fn parser_should_validate_regular_expression_quantifier_targets() {
     );
 }
 
+/// Unicode escapes and decimal references are context-sensitive, while legacy mode preserves
+/// Annex B fallbacks.
+///
+/// Spec: decimal references may point forward to any capture in the pattern, Unicode escape
+/// payloads have fixed forms and scalar bounds, and character-class ranges require characters
+/// at both endpoints.
+#[test]
+fn parser_should_validate_regular_expression_escapes_and_class_ranges() {
+    assert_clean_cases(&[
+        GrammarCase::script(
+            "unicode escapes and forward references",
+            r"/(a)\1/u; /\2(a)(b)/u; /\2(?:x)(?=x)(?!x)(?<=x)(?<!x)(?i:x)(a)(?<b>b)/u; /(a)(b)(c)(d)(e)(f)(g)(h)\8/v; /\0\x41\u0041\u{10ffff}\u{00000000000000000041}\^\//u;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "named forward reference",
+            r"/\k<name>(?<name>x)/u; /\k<name>(?<name>x)/;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "unicode character ranges",
+            r"/[a-z][\x41-\u{5A}][-a][a-][--a]/u; /[\uD834\uDF06-\uD834\uDF08a-z]/u; /[a-b-\d]/u; /[a-b-\p{ASCII}]/u;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "legacy escape and range fallbacks",
+            r"/\c0\M\1\8/; /\u{1,}/; /\u{110000}/; /\u{1F_639}/; /[\d-a]/; /[\s-\d]/; /[%-\d]/; /[--\d]/;",
+            &[NodeTag::LITERAL],
+        ),
+    ]);
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script("unicode control escape", r"/\c0/u;", &[NodeTag::LITERAL]),
+            GrammarCase::script("unicode identity escape", r"/\M/u;", &[NodeTag::LITERAL]),
+            GrammarCase::script("missing decimal capture", r"/\1/u;", &[NodeTag::LITERAL]),
+            GrammarCase::script(
+                "out-of-range decimal capture",
+                r"/\8/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script("decimal escape after zero", r"/\00/u;", &[NodeTag::LITERAL]),
+            GrammarCase::script(
+                "reference beyond capture count",
+                r"/(.)\2/u; /\3(?:x)(?=x)(?!x)(?<=x)(?<!x)(?i:x)(a)(?<b>b)/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "overflowing decimal reference",
+                r"/\999999999999999999999999(a)/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script("short hexadecimal escape", r"/\x4/u;", &[NodeTag::LITERAL]),
+            GrammarCase::script("short unicode escape", r"/\u123/u;", &[NodeTag::LITERAL]),
+            GrammarCase::script("empty braced escape", r"/\u{}/u;", &[NodeTag::LITERAL]),
+            GrammarCase::script(
+                "out-of-bounds braced escape",
+                r"/\u{110000}/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "non-hex braced escape",
+                r"/\u{1,}/u; /\u{1F_639}/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script("decimal escape in class", r"/[\1]/u;", &[NodeTag::LITERAL]),
+            GrammarCase::script(
+                "invalid class identity escape",
+                r"/[\B]/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "class escape range endpoints",
+                r"/[\d-a]/u; /[\s-\d]/u; /[%-\d]/u; /[--\d]/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "property escape range endpoints",
+                r"/[\p{ASCII}-\uFFFF]/u; /[\uFFFF-\p{ASCII}]/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "malformed property escapes",
+                r"/\p/u; /\p{/u; /[\P{}]/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "malformed named references",
+                r"/\k<name>/u; /(?<name>.)\k/u; /[\k<name>](?<name>.)/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "descending character range",
+                r"/[z-a]/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script(
+                "unicode-sets escape forms",
+                r"/\c0/v; /\M/v; /\1/v; /\u{110000}/v;",
+                &[NodeTag::LITERAL],
+            ),
+        ],
+        true,
+    );
+}
+
 /// Optional member, element, and call chains must be wrapped once in a chain expression.
 #[test]
 fn parser_should_accept_optional_chaining() {

@@ -50,6 +50,7 @@ pub(super) fn validate_modifier_groups(pattern: &[u8]) -> Option<Range<usize>> {
 }
 
 pub(super) fn validate_core_syntax(pattern: &[u8], mode: Mode) -> Option<Range<usize>> {
+    let captures = capture_summary(pattern, mode);
     let mut index = 0;
     let mut target = None;
     let mut groups = GroupStack::new();
@@ -57,17 +58,26 @@ pub(super) fn validate_core_syntax(pattern: &[u8], mode: Mode) -> Option<Range<u
     while let Some(&byte) = pattern.get(index) {
         match byte {
             b'\\' => {
-                let escaped = pattern.get(index + 1).copied();
-                target = Some(if matches!(escaped, Some(b'b' | b'B')) {
-                    QuantifierTarget::Assertion
-                } else {
-                    QuantifierTarget::Atom
+                let escaped = match validate_escape(pattern, index, mode, false, captures) {
+                    Ok(escaped) => escaped,
+                    Err(error) => return Some(error),
+                };
+                target = Some(match escaped.kind {
+                    EscapeKind::Assertion => QuantifierTarget::Assertion,
+                    EscapeKind::Singleton(_) | EscapeKind::Set => QuantifierTarget::Atom,
                 });
-                index = escape_end(pattern, index, mode);
+                index = escaped.end;
             }
             b'[' => {
                 target = Some(QuantifierTarget::Atom);
-                index = class_end(pattern, index, mode);
+                index = if matches!(mode, Mode::Unicode) {
+                    match validate_unicode_class(pattern, index, captures) {
+                        Ok(end) => end,
+                        Err(error) => return Some(error),
+                    }
+                } else {
+                    class_end(pattern, index, mode)
+                };
             }
             b'(' => {
                 let (kind, content) = group_prefix(pattern, index);
@@ -121,6 +131,316 @@ pub(super) fn validate_core_syntax(pattern: &[u8], mode: Mode) -> Option<Range<u
     }
 
     (!groups.is_empty()).then_some(pattern.len().saturating_sub(1)..pattern.len())
+}
+
+#[derive(Clone, Copy, Default)]
+struct CaptureSummary {
+    count: usize,
+    has_named: bool,
+}
+
+fn capture_summary(pattern: &[u8], mode: Mode) -> CaptureSummary {
+    if !mode.unicode() {
+        return CaptureSummary::default();
+    }
+
+    let mut summary = CaptureSummary::default();
+    let mut index = 0;
+    while let Some(&byte) = pattern.get(index) {
+        match byte {
+            b'\\' => index = escape_end(pattern, index, mode),
+            b'[' => index = class_end(pattern, index, mode),
+            b'(' if pattern.get(index + 1) != Some(&b'?') => {
+                summary.count += 1;
+                index += 1;
+            }
+            b'(' if pattern.get(index + 2) == Some(&b'<')
+                && !matches!(pattern.get(index + 3), Some(b'=' | b'!')) =>
+            {
+                summary.count += 1;
+                summary.has_named = true;
+                index = delimited_end(pattern, index + 3, b'>').unwrap_or(index + 3);
+            }
+            _ => index += utf8_width(byte),
+        }
+    }
+    summary
+}
+
+#[derive(Clone, Copy)]
+struct Escape {
+    end: usize,
+    kind: EscapeKind,
+}
+
+#[derive(Clone, Copy)]
+enum EscapeKind {
+    Assertion,
+    Singleton(u32),
+    Set,
+}
+
+fn validate_escape(
+    pattern: &[u8],
+    start: usize,
+    mode: Mode,
+    in_class: bool,
+    captures: CaptureSummary,
+) -> Result<Escape, Range<usize>> {
+    if !mode.unicode() {
+        let escaped = pattern.get(start + 1).copied();
+        return Ok(Escape {
+            end: escape_end(pattern, start, mode),
+            kind: if !in_class && matches!(escaped, Some(b'b' | b'B')) {
+                EscapeKind::Assertion
+            } else if matches!(escaped, Some(b'd' | b'D' | b's' | b'S' | b'w' | b'W')) {
+                EscapeKind::Set
+            } else {
+                EscapeKind::Singleton(escaped.unwrap_or_default().into())
+            },
+        });
+    }
+
+    let Some(&escaped) = pattern.get(start + 1) else {
+        return Err(start..pattern.len());
+    };
+    let payload = start + 2;
+    let invalid = || start..(payload + utf8_width(escaped)).min(pattern.len());
+    let singleton = |end, value| {
+        Ok(Escape {
+            end,
+            kind: EscapeKind::Singleton(value),
+        })
+    };
+
+    match escaped {
+        b'b' | b'B' if !in_class => Ok(Escape {
+            end: payload,
+            kind: EscapeKind::Assertion,
+        }),
+        b'b' => singleton(payload, 0x08),
+        b'd' | b'D' | b's' | b'S' | b'w' | b'W' => Ok(Escape {
+            end: payload,
+            kind: EscapeKind::Set,
+        }),
+        b'f' => singleton(payload, 0x0C),
+        b'n' => singleton(payload, 0x0A),
+        b'r' => singleton(payload, 0x0D),
+        b't' => singleton(payload, 0x09),
+        b'v' => singleton(payload, 0x0B),
+        b'c' if pattern.get(payload).is_some_and(u8::is_ascii_alphabetic) => {
+            singleton(payload + 1, u32::from(pattern[payload] & 0x1F))
+        }
+        b'0' if !pattern.get(payload).is_some_and(u8::is_ascii_digit) => singleton(payload, 0),
+        b'1'..=b'9' if !in_class => {
+            let end = decimal_end(pattern, start + 1);
+            if decimal_reference_within(&pattern[start + 1..end], captures.count) {
+                singleton(end, 0)
+            } else {
+                Err(start..end)
+            }
+        }
+        b'x' if has_hex_digits(pattern, payload, 2) => {
+            singleton(payload + 2, hex_value(&pattern[payload..payload + 2]))
+        }
+        b'u' if pattern.get(payload) == Some(&b'{') => {
+            let (end, value) = braced_unicode_escape(pattern, start)?;
+            singleton(end, value)
+        }
+        b'u' if has_hex_digits(pattern, payload, 4) => {
+            singleton(payload + 4, hex_value(&pattern[payload..payload + 4]))
+        }
+        b'p' | b'P' if pattern.get(payload) == Some(&b'{') => {
+            let Some(end) = delimited_end(pattern, payload + 1, b'}') else {
+                return Err(start..pattern.len());
+            };
+            if end == payload + 2 {
+                return Err(start..end);
+            }
+            Ok(Escape {
+                end,
+                kind: EscapeKind::Set,
+            })
+        }
+        b'k' if !in_class && captures.has_named && pattern.get(payload) == Some(&b'<') => {
+            let Some(end) = delimited_end(pattern, payload + 1, b'>') else {
+                return Err(start..pattern.len());
+            };
+            if end == payload + 2 {
+                return Err(start..end);
+            }
+            singleton(end, 0)
+        }
+        byte if is_syntax_character(byte) || byte == b'/' || in_class && byte == b'-' => {
+            singleton(payload, byte.into())
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn validate_unicode_class(
+    pattern: &[u8],
+    start: usize,
+    captures: CaptureSummary,
+) -> Result<usize, Range<usize>> {
+    let mut index = start + 1;
+    if pattern.get(index) == Some(&b'^') {
+        index += 1;
+    }
+
+    while let Some(&byte) = pattern.get(index) {
+        if byte == b']' {
+            return Ok(index + 1);
+        }
+
+        let left = unicode_class_atom(pattern, index, captures)?;
+        index = left.end;
+        if pattern.get(index) != Some(&b'-') || pattern.get(index + 1) == Some(&b']') {
+            continue;
+        }
+
+        let right = unicode_class_atom(pattern, index + 1, captures)?;
+        if matches!(left.kind, EscapeKind::Set) || matches!(right.kind, EscapeKind::Set) {
+            return Err(left.start..right.end);
+        }
+        if let (EscapeKind::Singleton(left_value), EscapeKind::Singleton(right_value)) =
+            (left.kind, right.kind)
+            && left_value > right_value
+        {
+            return Err(left.start..right.end);
+        }
+        index = right.end;
+    }
+
+    Err(start..pattern.len())
+}
+
+#[derive(Clone, Copy)]
+struct ClassAtom {
+    start: usize,
+    end: usize,
+    kind: EscapeKind,
+}
+
+fn unicode_class_atom(
+    pattern: &[u8],
+    start: usize,
+    captures: CaptureSummary,
+) -> Result<ClassAtom, Range<usize>> {
+    let Some(&byte) = pattern.get(start) else {
+        return Err(start..pattern.len());
+    };
+    if byte == b']' {
+        return Err(start..start + 1);
+    }
+    if byte == b'\\' {
+        let escape = validate_escape(pattern, start, Mode::Unicode, true, captures)?;
+        if let EscapeKind::Singleton(lead) = escape.kind
+            && (0xD800..=0xDBFF).contains(&lead)
+            && pattern.get(escape.end..escape.end + 2) == Some(b"\\u")
+            && has_hex_digits(pattern, escape.end + 2, 4)
+        {
+            let trail = hex_value(&pattern[escape.end + 2..escape.end + 6]);
+            if (0xDC00..=0xDFFF).contains(&trail) {
+                return Ok(ClassAtom {
+                    start,
+                    end: escape.end + 6,
+                    kind: EscapeKind::Singleton(
+                        0x1_0000 + ((lead - 0xD800) << 10) + trail - 0xDC00,
+                    ),
+                });
+            }
+        }
+        return Ok(ClassAtom {
+            start,
+            end: escape.end,
+            kind: escape.kind,
+        });
+    }
+
+    let (value, width) = scalar_value(pattern, start);
+    Ok(ClassAtom {
+        start,
+        end: (start + width).min(pattern.len()),
+        kind: EscapeKind::Singleton(value),
+    })
+}
+
+fn braced_unicode_escape(pattern: &[u8], start: usize) -> Result<(usize, u32), Range<usize>> {
+    let mut index = start + 3;
+    let digits = index;
+    let mut value = 0_u32;
+    while let Some(&byte) = pattern.get(index) {
+        if byte == b'}' {
+            return if index == digits || value > 0x10_FFFF {
+                Err(start..index + 1)
+            } else {
+                Ok((index + 1, value))
+            };
+        }
+        let Some(digit) = hex_digit_value(byte) else {
+            return Err(start..(index + utf8_width(byte)).min(pattern.len()));
+        };
+        value = value.saturating_mul(16).saturating_add(digit);
+        index += 1;
+    }
+    Err(start..pattern.len())
+}
+
+fn decimal_reference_within(digits: &[u8], captures: usize) -> bool {
+    let mut value = 0_usize;
+    for &digit in digits {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(usize::from(digit - b'0'));
+        if value > captures {
+            return false;
+        }
+    }
+    value != 0
+}
+
+fn hex_value(digits: &[u8]) -> u32 {
+    digits.iter().fold(0, |value, byte| {
+        value * 16 + hex_digit_value(*byte).unwrap_or(0)
+    })
+}
+
+const fn hex_digit_value(byte: u8) -> Option<u32> {
+    match byte {
+        b'0'..=b'9' => Some((byte - b'0') as u32),
+        b'a'..=b'f' => Some((byte - b'a' + 10) as u32),
+        b'A'..=b'F' => Some((byte - b'A' + 10) as u32),
+        _ => None,
+    }
+}
+
+const fn is_syntax_character(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'^' | b'$'
+            | b'\\'
+            | b'.'
+            | b'*'
+            | b'+'
+            | b'?'
+            | b'('
+            | b')'
+            | b'['
+            | b']'
+            | b'{'
+            | b'}'
+            | b'|'
+    )
+}
+
+fn scalar_value(pattern: &[u8], index: usize) -> (u32, usize) {
+    let width = utf8_width(pattern[index]).min(pattern.len() - index);
+    let value = std::str::from_utf8(&pattern[index..index + width])
+        .ok()
+        .and_then(|text| text.chars().next())
+        .map_or_else(|| u32::from(pattern[index]), u32::from);
+    (value, width)
 }
 
 #[derive(Clone, Copy)]

@@ -249,6 +249,50 @@ describe("parse", () => {
     expect(typescriptScanner.diagnostics).toEqual([]);
   });
 
+  it("validates regular-expression escapes and class ranges", () => {
+    for (
+      const source of [
+        String
+          .raw`/(a)\1/u; /\2(a)(b)/u; /\2(?:x)(?=x)(?!x)(?<=x)(?<!x)(?i:x)(a)(?<b>b)/u; /(a)(b)(c)(d)(e)(f)(g)(h)\8/v; /\0\x41\u0041\u{10ffff}\u{00000000000000000041}\^\//u;`,
+        String.raw`/\k<name>(?<name>x)/u; /\k<name>(?<name>x)/;`,
+        String
+          .raw`/[a-z][\x41-\u{5A}][-a][a-][--a]/u; /[\uD834\uDF06-\uD834\uDF08a-z]/u; /[a-b-\d]/u; /[a-b-\p{ASCII}]/u;`,
+        String.raw`/\c0\M\1\8/; /\u{1,}/; /\u{110000}/; /\u{1F_639}/; /[\d-a]/; /[\s-\d]/; /[%-\d]/; /[--\d]/;`,
+      ]
+    ) {
+      expect(parse(source, { semanticErrors: true }).diagnostics, source).toEqual([]);
+    }
+
+    for (
+      const source of [
+        String.raw`/\c0/u;`,
+        String.raw`/\M/u;`,
+        String.raw`/\1/u;`,
+        String.raw`/\8/u;`,
+        String.raw`/\00/u;`,
+        String.raw`/(.)\2/u; /\3(?:x)(?=x)(?!x)(?<=x)(?<!x)(?i:x)(a)(?<b>b)/u;`,
+        String.raw`/\999999999999999999999999(a)/u;`,
+        String.raw`/\x4/u;`,
+        String.raw`/\u123/u;`,
+        String.raw`/\u{}/u;`,
+        String.raw`/\u{110000}/u;`,
+        String.raw`/\u{1,}/u; /\u{1F_639}/u;`,
+        String.raw`/[\1]/u;`,
+        String.raw`/[\B]/u;`,
+        String.raw`/[\d-a]/u; /[\s-\d]/u; /[%-\d]/u; /[--\d]/u;`,
+        String.raw`/[\p{ASCII}-\uFFFF]/u; /[\uFFFF-\p{ASCII}]/u;`,
+        String.raw`/\p/u; /\p{/u; /[\P{}]/u;`,
+        String.raw`/\k<name>/u; /(?<name>.)\k/u; /[\k<name>](?<name>.)/u;`,
+        String.raw`/[z-a]/u;`,
+        String.raw`/\c0/v; /\M/v; /\1/v; /\u{110000}/v;`,
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.body[0].expression.type).toBe("Literal");
+    }
+  });
+
   it("leaves regular-expression constructor validation to runtime", () => {
     const result = parse("new RegExp(\".\", \"uv\"); RegExp(\"\\\\p{Unknown}\", \"u\");");
 
