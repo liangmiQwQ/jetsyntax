@@ -762,6 +762,33 @@ fn parses_typescript_class_index_signatures_and_modifiers() {
 }
 
 #[test]
+fn typescript_class_fields_apply_arguments_early_errors_to_initializers() {
+    let invalid = parse(
+        "class C { field: unknown = () => arguments; }",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("recover forbidden arguments in a TypeScript class field");
+    assert!(!invalid.diagnostics.is_empty());
+    invalid
+        .tape
+        .validate()
+        .expect("valid TypeScript class field recovery tape");
+
+    let allowed = parse(
+        "class C { field: unknown = function(value: unknown = arguments) { return arguments; }; }",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("parse arguments beyond a TypeScript function boundary");
+    assert!(allowed.diagnostics.is_empty(), "{:#?}", allowed.diagnostics);
+}
+
+#[test]
 fn recovers_invalid_class_index_modifiers_by_semantic_mode() {
     let invalid = [
         "class Invalid extends Base {",

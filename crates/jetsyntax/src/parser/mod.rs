@@ -203,6 +203,7 @@ struct FunctionFlags {
 struct FunctionContext {
     grammar: GrammarContext,
     cover_arrow_parameter_yield: Option<Span>,
+    arguments_boundary: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -448,8 +449,10 @@ struct Parser<'s> {
     context: ParserContext<'s>,
     options: ParseOptions,
     function_depth: u32,
+    ordinary_function_depth: u32,
     using_declaration_allowed: bool,
     class_static_block_function_depth: Option<u32>,
+    class_arguments_function_depth: Option<u32>,
     cover_arrow_parameter_yield: Option<Span>,
     // Parentheses-transparent semantic tag for immediate grammar checks, without widening ParsedNode.
     last_node_tag: Option<NodeTag>,
@@ -491,11 +494,13 @@ impl<'s> Parser<'s> {
             context: ParserContext::new(grammar),
             options,
             function_depth: 0,
+            ordinary_function_depth: 0,
             using_declaration_allowed: matches!(
                 options.source_kind,
                 SourceKind::Module | SourceKind::Unambiguous | SourceKind::CommonJs
             ),
             class_static_block_function_depth: None,
+            class_arguments_function_depth: None,
             cover_arrow_parameter_yield: None,
             last_node_tag: None,
             last_assignment_target: AssignmentTargetType::Invalid,
@@ -1136,7 +1141,7 @@ impl<'s> Parser<'s> {
                 None
             };
         self.expect(TokenKind::LeftParen);
-        let previous_grammar = self.enter_function_context(generator, asynchronous);
+        let previous_grammar = self.enter_function_context(generator, asynchronous, true);
         self.context.set_grammar(
             self.context
                 .grammar()
@@ -1771,12 +1776,21 @@ impl<'s> Parser<'s> {
         }
     }
 
-    fn enter_function_context(&mut self, generator: bool, asynchronous: bool) -> FunctionContext {
+    fn enter_function_context(
+        &mut self,
+        generator: bool,
+        asynchronous: bool,
+        arguments_boundary: bool,
+    ) -> FunctionContext {
         self.function_depth = self.function_depth.saturating_add(1);
+        if arguments_boundary {
+            self.ordinary_function_depth = self.ordinary_function_depth.saturating_add(1);
+        }
         self.context.enter_scope(ScopeKind::Function);
         let previous = FunctionContext {
             grammar: self.context.grammar(),
             cover_arrow_parameter_yield: self.cover_arrow_parameter_yield.take(),
+            arguments_boundary,
         };
         self.context.set_grammar(
             previous
@@ -1804,6 +1818,9 @@ impl<'s> Parser<'s> {
         self.cover_arrow_parameter_yield = previous.cover_arrow_parameter_yield;
         let _ = self.context.leave_scope();
         self.function_depth = self.function_depth.saturating_sub(1);
+        if previous.arguments_boundary {
+            self.ordinary_function_depth = self.ordinary_function_depth.saturating_sub(1);
+        }
     }
 
     fn parse_method_function(
@@ -1816,7 +1833,7 @@ impl<'s> Parser<'s> {
     ) -> Result<ParsedNode, ParseError> {
         let signature_start = self.current.start;
         self.expect(TokenKind::LeftParen);
-        let previous_grammar = self.enter_function_context(generator, asynchronous);
+        let previous_grammar = self.enter_function_context(generator, asynchronous, true);
         self.context.set_grammar(
             self.context
                 .grammar()
@@ -2512,7 +2529,7 @@ impl<'s> Parser<'s> {
 
         let type_annotation = self.tape.push_null()?;
         let value = if self.eat(TokenKind::Eq).is_some() {
-            self.parse_assignment_expression(true)?.value()
+            self.parse_class_field_initializer()?.value()
         } else {
             self.tape.push_null()?
         };
@@ -2534,15 +2551,26 @@ impl<'s> Parser<'s> {
 
     fn parse_class_static_block(&mut self, start: u32) -> Result<ParsedNode, ParseError> {
         let previous = self.class_static_block_function_depth;
+        let previous_arguments = self.class_arguments_function_depth;
         self.class_static_block_function_depth = Some(self.function_depth);
+        self.class_arguments_function_depth = Some(self.ordinary_function_depth);
         let block = self.parse_block_statement();
         self.class_static_block_function_depth = previous;
+        self.class_arguments_function_depth = previous_arguments;
         let block = block?;
         self.node(
             NodeTag::STATIC_BLOCK,
             Span::new(start, block.span.end),
             &[block.value()],
         )
+    }
+
+    fn parse_class_field_initializer(&mut self) -> Result<ParsedNode, ParseError> {
+        let previous = self.class_arguments_function_depth;
+        self.class_arguments_function_depth = Some(self.ordinary_function_depth);
+        let initializer = self.parse_assignment_expression(true);
+        self.class_arguments_function_depth = previous;
+        initializer
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2796,14 +2824,14 @@ impl<'s> Parser<'s> {
             let assignment_patterns = self.assignment_pattern_checkpoint();
             let last_node_tag = self.last_node_tag;
             let last_assignment_target = self.last_assignment_target;
-            self.parse_assignment_expression(true)?;
+            self.parse_class_field_initializer()?;
             self.tape.rollback(tape)?;
             self.rollback_assignment_patterns(assignment_patterns);
             self.last_node_tag = last_node_tag;
             self.last_assignment_target = last_assignment_target;
             self.tape.push_null()?
         } else if has_initializer {
-            self.parse_assignment_expression(true)?.value()
+            self.parse_class_field_initializer()?.value()
         } else {
             self.tape.push_null()?
         };
@@ -4364,7 +4392,7 @@ impl<'s> Parser<'s> {
             let start = self.take().start;
             self.expect(TokenKind::RightParen);
             self.expect(TokenKind::Arrow);
-            let previous_grammar = self.enter_function_context(false, false);
+            let previous_grammar = self.enter_function_context(false, false, false);
             let arrow = self.parse_arrow_function(start, &[], false, allow_in);
             self.leave_function_context(previous_grammar);
             self.rollback_assignment_patterns(assignment_patterns);
@@ -4391,7 +4419,7 @@ impl<'s> Parser<'s> {
                     | AssignmentTargetType::Invalid => {}
                 }
             }
-            let previous_grammar = self.enter_function_context(false, false);
+            let previous_grammar = self.enter_function_context(false, false, false);
             let arrow =
                 self.parse_arrow_function(left.span.start, &[left.value()], false, allow_in);
             self.leave_function_context(previous_grammar);
@@ -4469,7 +4497,7 @@ impl<'s> Parser<'s> {
             outer_grammar.parameters() && outer_grammar.async_function();
         let inherited_generator_parameters =
             outer_grammar.parameters() && outer_grammar.generator();
-        let previous_grammar = self.enter_function_context(false, false);
+        let previous_grammar = self.enter_function_context(false, false, false);
         self.context.set_grammar(
             self.context
                 .grammar()
@@ -4516,7 +4544,7 @@ impl<'s> Parser<'s> {
         start: u32,
         allow_in: bool,
     ) -> Result<ParsedNode, ParseError> {
-        let previous_grammar = self.enter_function_context(false, true);
+        let previous_grammar = self.enter_function_context(false, true, false);
         self.context
             .set_grammar(self.context.grammar().with_parameters(true));
         let parenthesized = self.eat(TokenKind::LeftParen).is_some();
@@ -6258,6 +6286,14 @@ impl<'s> Parser<'s> {
             self.error(
                 span,
                 "strict mode reserved word cannot be used as an identifier",
+            );
+        }
+        if self.in_class_arguments_context()
+            && self.identifier_name_matches(span, "arguments", escaped)
+        {
+            self.error(
+                span,
+                "arguments is not allowed in class field initializers or static blocks",
             );
         }
     }
@@ -8587,6 +8623,13 @@ impl<'s> Parser<'s> {
 
     const fn in_class_static_block_context(&self) -> bool {
         matches!(self.class_static_block_function_depth, Some(depth) if depth == self.function_depth)
+    }
+
+    const fn in_class_arguments_context(&self) -> bool {
+        matches!(
+            self.class_arguments_function_depth,
+            Some(depth) if depth == self.ordinary_function_depth
+        )
     }
 
     fn starts_let_declaration(&self) -> bool {

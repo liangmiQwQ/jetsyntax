@@ -4465,6 +4465,52 @@ describe("parse", () => {
     ]);
   });
 
+  it("rejects arguments in class initializers until an ordinary function boundary", () => {
+    for (
+      const source of [
+        "class C { field = arguments; }",
+        "class C { field = () => ({ arguments }); }",
+        "class C { field = async () => arguments; }",
+        "class C { #field = () => () => argument\\u0073; }",
+        "class C { field = ({ [arguments]() {} }); }",
+        "class C { static field = typeof arguments; }",
+        "class C { static { arguments; } }",
+        "class C { static { class Nested { [arguments]() {} } } }",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true, sourceType: "script" });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.panicked, source).toBe(false);
+      expect(result.program.type, source).toBe("Program");
+    }
+
+    const typescript = parse("class C { field: unknown = () => arguments; }", {
+      lang: "ts",
+      semanticErrors: true,
+    });
+    expect(typescript.diagnostics).not.toEqual([]);
+    expect(typescript.panicked).toBe(false);
+
+    const allowed = parse(
+      "function outer() { class C { [arguments] = 1; "
+        + "member = object.arguments; named = ({ arguments: 1, arguments() {} }); "
+        + "field = function(value = arguments) { return arguments; }; "
+        + "generator = function*(value = arguments) { return arguments; }; "
+        + "asynchronous = async function(value = arguments) { return arguments; }; "
+        + "arrow = () => function() { return arguments; }; "
+        + "static { function nested() { return arguments; } "
+        + "class Nested { method() { return arguments; } } } } }",
+      { semanticErrors: true, sourceType: "script" },
+    );
+    expect(allowed.diagnostics).toEqual([]);
+
+    expect(
+      parse("class C { field = arguments; static { arguments; } }", {
+        semanticErrors: false,
+      }).diagnostics,
+    ).toEqual([]);
+  });
+
   it("separates declaration initializers from binding defaults", () => {
     const source = [
       "const value = source, second = other;",

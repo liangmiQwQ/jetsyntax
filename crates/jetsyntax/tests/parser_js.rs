@@ -2522,6 +2522,64 @@ fn parser_should_respect_async_method_introducer_boundaries() {
     assert_diagnostic_cases(&cases, true);
 }
 
+#[test]
+fn parser_should_reject_arguments_in_class_initializers_but_stop_at_function_boundaries() {
+    for source in [
+        "function outer() { class C { field = arguments; } }",
+        "class C { field = () => arguments; }",
+        "class C { field = async () => ({ arguments }); }",
+        "class C { #field = () => { const nested = () => arguments; }; }",
+        "class C { field = ({ [arguments]() {} }); }",
+        "class C { static field = typeof arguments; }",
+        "class C { static { arguments; } }",
+        r"class C { static { class Nested { [argument\u0073]() {} } } }",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Script,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("recover forbidden class arguments reference");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed
+            .tape
+            .validate()
+            .expect("valid class arguments recovery tape");
+    }
+
+    let allowed = parse(
+        "function outer() { class C { [arguments] = 1; member = object.arguments; named = ({ arguments: 1, arguments() {} }); field = function(value = arguments) { return arguments; }; generator = function*(value = arguments) { return arguments; }; asynchronous = async function(value = arguments) { return arguments; }; arrow = () => function() { return arguments; }; static { function nested(value = arguments) { return arguments; } class Nested { method() { return arguments; } } } } }",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse arguments beyond class initializer boundaries");
+    assert!(allowed.diagnostics.is_empty(), "{:#?}", allowed.diagnostics);
+    allowed
+        .tape
+        .validate()
+        .expect("valid class arguments boundary tape");
+
+    let syntax_only = parse(
+        "class C { field = arguments; static { arguments; } }",
+        ParseOptions {
+            semantic_errors: false,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse class arguments references without semantic errors");
+    assert!(
+        syntax_only.diagnostics.is_empty(),
+        "{:#?}",
+        syntax_only.diagnostics
+    );
+}
+
 /// Async methods retain contextual, parameter-list, and nested-function early errors.
 #[test]
 fn parser_should_diagnose_async_method_early_errors() {
