@@ -2237,6 +2237,51 @@ fn parser_should_validate_regular_expression_literal_flags() {
     ]);
 }
 
+/// Modifier groups accept only unique `i`, `m`, and `s` changes around a required colon.
+///
+/// Spec: `RegExp` modifier groups reject empty, duplicate, overlapping, escaped, and unsupported
+/// modifier lists while preserving ordinary assertion and noncapturing groups.
+#[test]
+fn parser_should_validate_regular_expression_modifier_groups() {
+    assert_clean_cases(&[
+        GrammarCase::script(
+            "valid modifier groups",
+            "/(?i:a)(?-m:b)(?im-s:c)(?i-:d)(?i:(?-i:e))(?:f)(?=g)(?!h)(?<=i)(?<!j)/;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "escaped and class-contained prefixes",
+            r"/\(\?ii:a\)/; /[(?ii:a)]/;",
+            &[NodeTag::LITERAL],
+        ),
+        GrammarCase::script(
+            "named and lookbehind prefixes",
+            "/(?<name>a)(?<=b)(?i:c)/;",
+            &[NodeTag::LITERAL],
+        ),
+    ]);
+    assert_diagnostic_cases(
+        &[
+            GrammarCase::script("duplicate modifier", "/(?ii:a)/;", &[NodeTag::LITERAL]),
+            GrammarCase::script(
+                "later duplicate modifier",
+                r"/\é(?:ok)(?ii:bad)/;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script("overlapping modifiers", "/(?i-i:a)/;", &[NodeTag::LITERAL]),
+            GrammarCase::script("empty modifiers", "/(?-:a)/;", &[NodeTag::LITERAL]),
+            GrammarCase::script("unsupported modifier", "/(?u:a)/;", &[NodeTag::LITERAL]),
+            GrammarCase::script(
+                "escaped modifier",
+                r"/(?\u{0073}:a)/u;",
+                &[NodeTag::LITERAL],
+            ),
+            GrammarCase::script("missing modifier colon", "/(?i)/;", &[NodeTag::LITERAL]),
+        ],
+        true,
+    );
+}
+
 /// Optional member, element, and call chains must be wrapped once in a chain expression.
 #[test]
 fn parser_should_accept_optional_chaining() {

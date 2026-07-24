@@ -159,6 +159,47 @@ describe("parse", () => {
     }
   });
 
+  it("validates regular-expression modifier groups", () => {
+    const valid = parse(
+      "/(?i:a)(?-m:b)(?im-s:c)(?i-:d)(?i:(?-i:e))(?:f)(?=g)(?!h)(?<=i)(?<!j)/;",
+      { semanticErrors: true },
+    );
+    expect(valid.diagnostics).toEqual([]);
+    expect(valid.program.body[0].expression).toMatchObject({
+      type: "Literal",
+      regex: {
+        pattern: "(?i:a)(?-m:b)(?im-s:c)(?i-:d)(?i:(?-i:e))(?:f)(?=g)(?!h)(?<=i)(?<!j)",
+        flags: "",
+      },
+    });
+
+    for (
+      const source of [
+        String.raw`/\(\?ii:a\)/;`,
+        "/[(?ii:a)]/;",
+        "/(?<name>a)(?<=b)(?i:c)/;",
+      ]
+    ) {
+      expect(parse(source, { semanticErrors: true }).diagnostics, source).toEqual([]);
+    }
+
+    for (
+      const source of [
+        "/(?ii:a)/;",
+        String.raw`/\é(?:ok)(?ii:bad)/;`,
+        "/(?i-i:a)/;",
+        "/(?-:a)/;",
+        "/(?u:a)/;",
+        String.raw`/(?\u{0073}:a)/u;`,
+        "/(?i)/;",
+      ]
+    ) {
+      const result = parse(source, { semanticErrors: true });
+      expect(result.diagnostics, source).not.toEqual([]);
+      expect(result.program.body[0].expression.type).toBe("Literal");
+    }
+  });
+
   it("leaves regular-expression constructor validation to runtime", () => {
     const result = parse("new RegExp(\".\", \"uv\"); RegExp(\"\\\\p{Unknown}\", \"u\");");
 

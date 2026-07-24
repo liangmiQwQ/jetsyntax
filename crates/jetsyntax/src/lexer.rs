@@ -4,6 +4,8 @@
 //! another only when it commits to a grammar branch. Regular expressions and template continuations
 //! are explicitly rescanned because their meaning depends on parser context.
 
+mod regexp;
+
 /// A lexical token with byte offsets into the original UTF-8 source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Token {
@@ -458,6 +460,18 @@ impl<'s> Lexer<'s> {
                 self.position,
                 "unterminated regular expression",
             );
+        } else if flag_errors {
+            let pattern_start = slash.start as usize + 1;
+            let pattern_end = self.position - 1;
+            if let Some(error) =
+                regexp::validate_modifier_groups(&self.bytes[pattern_start..pattern_end])
+            {
+                self.error(
+                    pattern_start + error.start,
+                    pattern_start + error.end,
+                    "invalid regular expression modifier group",
+                );
+            }
         }
         let mut flags = 0_u8;
         while self.current_identifier_continue() {
