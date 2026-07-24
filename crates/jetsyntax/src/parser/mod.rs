@@ -3440,9 +3440,14 @@ impl<'s> Parser<'s> {
             );
         }
         let source = self.parse_literal()?;
+        let attributes = self.parse_import_attributes(true)?;
         let end = self.consume_semicolon();
         let specifiers = self.tape.push_list(&specifiers)?;
-        let attributes = self.tape.push_list(&[])?;
+        let attributes = if let Some(attributes) = attributes {
+            attributes
+        } else {
+            self.tape.push_list(&[])?
+        };
         let import_kind = self.tape.push_u32(u32::from(declaration_type_only))?;
         if deferred {
             let phase = self.tape.push_u32(ImportPhase::Defer.wire_value())?;
@@ -3457,6 +3462,119 @@ impl<'s> Parser<'s> {
             Span::new(start, end),
             &[specifiers, source.value(), attributes, import_kind],
         )
+    }
+
+    fn parse_import_attributes(
+        &mut self,
+        allow_line_break: bool,
+    ) -> Result<Option<ValueRef>, ParseError> {
+        if !self.starts_import_attributes_clause(allow_line_break) {
+            return Ok(None);
+        }
+
+        self.bump();
+        if self.eat(TokenKind::LeftBrace).is_none() {
+            self.error(
+                self.current_span(),
+                "expected a left brace after the import attributes keyword",
+            );
+            return Ok(Some(self.tape.push_list(&[])?));
+        }
+
+        let mut attributes = Vec::new();
+        let mut names = self
+            .reports_ecmascript_early_errors()
+            .then(Vec::<Vec<u16>>::new);
+        while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
+            let key_is_string = self.current.kind == TokenKind::String;
+            let key = if key_is_string {
+                self.parse_literal()?
+            } else {
+                self.parse_identifier_name()?
+            };
+            if let Some(names) = &mut names {
+                let name = self.cooked_import_attribute_key(key, key_is_string);
+                if names.contains(&name) {
+                    self.error(key.span, "duplicate import attribute key");
+                } else {
+                    names.push(name);
+                }
+            }
+
+            let has_colon = self.eat(TokenKind::Colon).is_some();
+            if !has_colon {
+                self.error(
+                    self.current_span(),
+                    "expected a colon after the import attribute key",
+                );
+            }
+            let value = if matches!(
+                self.current.kind,
+                TokenKind::Comma | TokenKind::RightBrace | TokenKind::Eof
+            ) {
+                self.error(self.current_span(), "expected an import attribute value");
+                self.missing_identifier(self.current.start)?
+            } else if self.current.kind == TokenKind::String {
+                self.parse_literal()?
+            } else {
+                let value = self.parse_assignment_expression(true)?;
+                if !self.options.language.is_typescript() || self.options.semantic_errors {
+                    self.error(
+                        value.span,
+                        "import attribute values must be string literals",
+                    );
+                }
+                value
+            };
+            attributes.push(
+                self.node(
+                    NodeTag::IMPORT_ATTRIBUTE,
+                    Span::new(key.span.start, value.span.end),
+                    &[key.value(), value.value()],
+                )?
+                .value(),
+            );
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(TokenKind::RightBrace);
+        Ok(Some(self.tape.push_list(&attributes)?))
+    }
+
+    fn starts_import_attributes_clause(&self, allow_line_break: bool) -> bool {
+        let line_break = self.current.flags.line_break_before();
+        let standard = self.current.kind == TokenKind::With
+            && !self.current.flags.escaped()
+            && (allow_line_break || !line_break);
+        let legacy_typescript = self.options.language.is_typescript()
+            && self.current.kind == TokenKind::Identifier
+            && !self.current.flags.escaped()
+            && !line_break
+            && self.source_text(self.current_span()) == "assert";
+        if !standard && !legacy_typescript {
+            return false;
+        }
+
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let next = lookahead.next_token();
+        next.kind == TokenKind::LeftBrace || !line_break
+    }
+
+    fn cooked_import_attribute_key(&self, key: ParsedNode, string_literal: bool) -> Vec<u16> {
+        let raw = self.source_text(key.span);
+        if string_literal {
+            decode_string_literal_code_units(raw)
+                .unwrap_or_else(|| raw.encode_utf16().collect::<Vec<_>>())
+        } else if raw.contains('\\') {
+            decode_static_property_name(raw)
+                .unwrap_or_else(|| raw.to_owned())
+                .encode_utf16()
+                .collect()
+        } else {
+            raw.encode_utf16().collect()
+        }
     }
 
     fn parse_import_equals_declaration(
@@ -3761,8 +3879,14 @@ impl<'s> Parser<'s> {
             };
             self.expect(TokenKind::From);
             let source = self.parse_literal()?;
+            let attributes =
+                self.parse_import_attributes(!self.options.language.is_typescript())?;
             let end = self.consume_semicolon();
-            let attributes = self.tape.push_list(&[])?;
+            let attributes = if let Some(attributes) = attributes {
+                attributes
+            } else {
+                self.tape.push_list(&[])?
+            };
             let export_kind = self.tape.push_u32(u32::from(declaration_type_only))?;
             return self.node(
                 NodeTag::EXPORT_ALL_DECLARATION,
@@ -3840,10 +3964,19 @@ impl<'s> Parser<'s> {
                     }
                 }
             }
+            let attributes = if has_source {
+                self.parse_import_attributes(!self.options.language.is_typescript())?
+            } else {
+                None
+            };
             let end = self.consume_semicolon();
             let declaration = self.tape.push_null()?;
             let specifiers = self.tape.push_list(&specifiers)?;
-            let attributes = self.tape.push_list(&[])?;
+            let attributes = if let Some(attributes) = attributes {
+                attributes
+            } else {
+                self.tape.push_list(&[])?
+            };
             let export_kind = self.tape.push_u32(u32::from(declaration_type_only))?;
             return self.node(
                 NodeTag::EXPORT_NAMED_DECLARATION,
@@ -9777,6 +9910,10 @@ fn has_use_strict_directive(source: &str, position: usize) -> bool {
 }
 
 fn decode_well_formed_string_literal(raw: &str) -> Option<String> {
+    String::from_utf16(&decode_string_literal_code_units(raw)?).ok()
+}
+
+fn decode_string_literal_code_units(raw: &str) -> Option<Vec<u16>> {
     if raw.len() < 2
         || !raw.starts_with(['\'', '"'])
         || raw.as_bytes().last() != raw.as_bytes().first()
@@ -9815,7 +9952,7 @@ fn decode_well_formed_string_literal(raw: &str) -> Option<String> {
             escaped => code_units.extend(escaped.encode_utf16(&mut [0; 2]).iter().copied()),
         }
     }
-    String::from_utf16(&code_units).ok()
+    Some(code_units)
 }
 
 fn decode_static_property_name(raw: &str) -> Option<String> {

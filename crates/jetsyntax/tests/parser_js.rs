@@ -1145,6 +1145,152 @@ fn parser_should_parse_statement_leading_dynamic_import_continuations() {
     );
 }
 
+#[test]
+fn parser_should_emit_static_import_attributes_for_imports_and_reexports() {
+    let source = concat!(
+        "import 'empty' with {};\n",
+        "import primary from 'default' with { type: 'json' };\n",
+        "import { value as renamed } from 'named' with { 'type': 'json', mode: 'strict', };\n",
+        "import * as namespace from 'namespace' with { type: 'json' };\n",
+        "import defer * as lazy from 'deferred' with { type: 'json' };\n",
+        "import 'newline'\nwith { type: 'json' };\n",
+        "export { value } from 'named-export' with { type: 'json' };\n",
+        "export * from 'star-export'\nwith { type: 'json' };\n",
+        "export * as bundle from 'namespace-export' with { type: 'json' };\n",
+    );
+    let parsed = parse(
+        source,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse static import attributes");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    inspect_tape("static import attributes", &parsed).expect("valid import-attribute tape");
+    assert_eq!(NodeTag::IMPORT_ATTRIBUTE.get(), 73);
+
+    let attributes = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node {
+                tag: NodeTag::IMPORT_ATTRIBUTE,
+                fields,
+                ..
+            } => Some(fields),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(attributes.len(), 9);
+    assert!(attributes.iter().all(|fields| {
+        fields.len() == 2
+            && matches!(
+                parsed.tape.value_at(fields[1]),
+                Ok(TapeValue::Node {
+                    tag: NodeTag::LITERAL,
+                    ..
+                })
+            )
+    }));
+    assert!(attributes.iter().any(|fields| {
+        matches!(
+            parsed.tape.value_at(fields[0]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::IDENTIFIER,
+                ..
+            })
+        )
+    }));
+    assert!(attributes.iter().any(|fields| {
+        matches!(
+            parsed.tape.value_at(fields[0]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::LITERAL,
+                ..
+            })
+        )
+    }));
+}
+
+#[test]
+fn parser_should_validate_and_recover_static_import_attributes() {
+    for source in [
+        r#"import "data" with { type: "json", "typ\u0065": "json" };"#,
+        r#"import "data" with { "\uD800": "json", "\ud800": "json" };"#,
+        r#"import "data" with { type: true };"#,
+        r#"import "data" with { type, "json" };"#,
+        r#"import "data" with;"#,
+        r#"export { value } with { type: "json" };"#,
+        r#"import "data" assert { type: "json" };"#,
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid recovered tape");
+    }
+
+    let lone_surrogate = parse(
+        r#"import "data" with { "\uD800": "json" };"#,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse a lone-surrogate attribute key");
+    assert!(
+        lone_surrogate.diagnostics.is_empty(),
+        "{:#?}",
+        lone_surrogate.diagnostics
+    );
+    lone_surrogate
+        .tape
+        .validate()
+        .expect("valid lone-surrogate key tape");
+
+    let separate_with = parse(
+        "import 'data'\nwith (attributes) statement;",
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: false,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse a separate with statement");
+    assert_eq!(separate_with.diagnostics.len(), 1);
+    assert_eq!(
+        separate_with.diagnostics[0].message,
+        "with is forbidden in strict mode"
+    );
+    let tags = inspect_tape("separate with statement", &separate_with).expect("valid tape");
+    assert!(tags.contains(&NodeTag::WITH_STATEMENT));
+    assert!(!tags.contains(&NodeTag::IMPORT_ATTRIBUTE));
+
+    let syntax_only_duplicate = parse(
+        r#"import "data" with { type: "json", "typ\u0065": "json" };"#,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: false,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse duplicate attributes without early errors");
+    assert!(
+        syntax_only_duplicate.diagnostics.is_empty(),
+        "{:#?}",
+        syntax_only_duplicate.diagnostics
+    );
+}
+
 /// Import calls accept the optional trailing comma after either grammar argument.
 #[test]
 fn parser_should_accept_dynamic_import_trailing_commas() {

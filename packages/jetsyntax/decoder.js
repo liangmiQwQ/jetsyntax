@@ -118,6 +118,7 @@ for (
     [70, ["ExportSpecifier", ["local", "exported"]]],
     [71, ["Super", []]],
     [72, ["ParenthesizedExpression", ["expression"]]],
+    [73, ["ImportAttribute", ["key", "value"]]],
     [74, ["ImportExpression", ["source", "options", "phase"]]],
     [256, ["JSXIdentifier", ["name"]]],
     [259, ["JSXElement", ["openingElement", "closingElement", "children"]]],
@@ -214,7 +215,6 @@ for (
 const UNSUPPORTED_NODE_TAGS = [];
 for (
   const [tag, name] of [
-    [73, "ImportAttribute"],
     [257, "JSXMemberExpression"],
     [258, "JSXNamespacedName"],
     [260, "JSXFragment"],
@@ -932,6 +932,10 @@ function decodeTapeInternal(source, tape, options, trusted) {
         return node;
       case 72:
         node.expression = fields[0];
+        return node;
+      case 73:
+        node.key = fields[0];
+        node.value = fields[1];
         return node;
       case 256:
         node.name = string(fields[0], tag);

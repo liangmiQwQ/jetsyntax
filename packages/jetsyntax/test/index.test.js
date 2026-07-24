@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { parseToTape } from "../binding.js";
+import { decodeTape, decodeTrustedTape } from "../decoder.js";
 import { parse } from "../index.js";
 
 describe("parse", () => {
@@ -413,6 +414,50 @@ describe("parse", () => {
     ]);
     const method = result.program.body[1].declaration.body.body[0];
     expect(method.value.body.body[0].argument.type).toBe("TemplateLiteral");
+  });
+
+  it("materializes static import attributes through safe and trusted decoding", () => {
+    const source = [
+      "import data from \"./data.json\" with { type: \"json\", \"resolution-mode\": \"import\" };",
+      "export { data as payload } from \"./data.json\" with { type: \"json\" };",
+      "export * from \"./styles.css\" with { type: \"css\" };",
+    ].join("\n");
+    const options = { range: true, semanticErrors: true, sourceType: "module" };
+    const result = parseToTape(source, options);
+
+    expect(result.diagnostics).toEqual([]);
+    const safe = decodeTape(source, result.tape, options);
+    const trusted = decodeTrustedTape(source, result.tape, options);
+    expect(safe).toEqual(trusted);
+    expect(trusted.body.map(node => node.type)).toEqual([
+      "ImportDeclaration",
+      "ExportNamedDeclaration",
+      "ExportAllDeclaration",
+    ]);
+    expect(trusted.body[0].attributes).toMatchObject([
+      {
+        type: "ImportAttribute",
+        key: { type: "Identifier", name: "type" },
+        value: { type: "Literal", value: "json" },
+      },
+      {
+        type: "ImportAttribute",
+        key: { type: "Literal", value: "resolution-mode" },
+        value: { type: "Literal", value: "import" },
+      },
+    ]);
+    expect(trusted.body.slice(1).map(node => node.attributes[0])).toMatchObject([
+      {
+        type: "ImportAttribute",
+        key: { type: "Identifier", name: "type" },
+        value: { type: "Literal", value: "json" },
+      },
+      {
+        type: "ImportAttribute",
+        key: { type: "Identifier", name: "type" },
+        value: { type: "Literal", value: "css" },
+      },
+    ]);
   });
 
   it("isolates switch case bindings and diagnoses invalid case blocks", () => {

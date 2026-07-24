@@ -3739,6 +3739,21 @@ fn diagnoses_explicit_ambient_class_implementations_and_boundaries() {
             )
         }));
     }
+
+    let semantic = parse(
+        "import value from 'value' with { type: true };",
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("diagnose a non-string TypeScript import attribute");
+    assert_eq!(semantic.diagnostics.len(), 1);
+    semantic
+        .tape
+        .validate()
+        .expect("valid semantic import-attribute tape");
 }
 
 #[test]
@@ -4372,6 +4387,84 @@ fn keeps_angle_bracket_type_assertions_out_of_tsx() {
             )
         });
     assert!(!has_type_assertion);
+}
+
+#[test]
+fn parses_typescript_import_attributes_and_legacy_assertions() {
+    let source = concat!(
+        "import value from 'value' assert { type: 'json', lazy: true, order: 1 + 2 };\n",
+        "import type { Model } from 'types' with { type: 'json' };\n",
+        "export { value as renamed } from 'named' assert { type: 'json' };\n",
+        "export * from 'star' with { type: 'json' };\n",
+        "import * as values from 'expressions' with { number: 0, template: `a`, regexp: /a/g, array: ['a'], object: { a: 0 }, call: 0..toString() };\n",
+    );
+    for language in [
+        Language::TypeScript,
+        Language::TypeScriptJsx,
+        Language::TypeScriptDefinition,
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                language,
+                source_kind: SourceKind::Module,
+                semantic_errors: false,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse TypeScript import attributes");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{language:?}: {:#?}",
+            parsed.diagnostics
+        );
+        parsed
+            .tape
+            .validate()
+            .expect("valid TypeScript import-attribute tape");
+        let attributes = node_fields(&parsed, NodeTag::IMPORT_ATTRIBUTE).collect::<Vec<_>>();
+        assert_eq!(attributes.len(), 12, "{language:?}");
+        assert!(
+            attributes.iter().all(|fields| fields.len() == 2),
+            "{language:?}"
+        );
+        assert!(attributes.iter().any(|fields| {
+            matches!(
+                parsed.tape.value_at(fields[1]),
+                Ok(TapeValue::Node {
+                    tag: NodeTag::BINARY_EXPRESSION,
+                    ..
+                })
+            )
+        }));
+    }
+}
+
+#[test]
+fn keeps_typescript_import_attribute_line_break_boundaries() {
+    for source in [
+        "import value from 'value'\nassert { type: 'json' };",
+        "export * from 'value'\nwith { type: 'json' };",
+        "export * from 'value'\nassert { type: 'json' };",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                ..typescript_options()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
+        parsed
+            .tape
+            .validate()
+            .expect("valid line-break recovery tape");
+        assert_eq!(
+            node_fields(&parsed, NodeTag::IMPORT_ATTRIBUTE).count(),
+            0,
+            "{source}"
+        );
+    }
 }
 
 #[test]
