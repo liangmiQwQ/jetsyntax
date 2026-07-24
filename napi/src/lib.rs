@@ -1,4 +1,4 @@
-use jetsyntax::{Language, ParseOptions, SourceKind, SyntaxExtensions, parse};
+use jetsyntax::{DecoratorMode, Language, ParseOptions, SourceKind, SyntaxExtensions, parse};
 use mimalloc_safe::MiMalloc;
 use napi::bindgen_prelude::Uint32Array;
 use napi_derive::napi;
@@ -19,6 +19,8 @@ pub struct BindingOptions {
     pub semantic_errors: Option<bool>,
     pub typescript_js_compatibility: Option<bool>,
     pub optional_chaining_assign: Option<bool>,
+    pub decorators: Option<bool>,
+    pub decorator_mode: Option<String>,
 }
 
 #[napi(object)]
@@ -49,6 +51,8 @@ pub fn parse_to_tape(
         syntax_extensions: SyntaxExtensions {
             typescript_js_compatibility: options.typescript_js_compatibility.unwrap_or(false),
             optional_chaining_assign: options.optional_chaining_assign.unwrap_or(false),
+            decorators: options.decorators.unwrap_or(true),
+            decorator_mode: parse_decorator_mode(options.decorator_mode.as_deref())?,
         },
     };
     let result = parse(&source, parse_options).map_err(|error| {
@@ -63,6 +67,17 @@ pub fn parse_to_tape(
             .map(|diagnostic| diagnostic.message)
             .collect(),
     })
+}
+
+fn parse_decorator_mode(value: Option<&str>) -> napi::Result<DecoratorMode> {
+    match value.unwrap_or("auto") {
+        "auto" => Ok(DecoratorMode::Auto),
+        "standard" => Ok(DecoratorMode::Standard),
+        "typescript" => Ok(DecoratorMode::TypeScript),
+        value => Err(napi::Error::from_reason(format!(
+            "unsupported decorator mode `{value}`; expected auto, standard, or typescript"
+        ))),
+    }
 }
 
 fn parse_language(value: Option<&str>) -> napi::Result<Language> {

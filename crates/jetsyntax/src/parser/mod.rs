@@ -7,7 +7,7 @@ pub use context::{Diagnostic, Severity};
 use std::{borrow::Cow, collections::HashSet, error::Error, fmt, iter::Peekable, str::Chars};
 
 use crate::{
-    Language, ParseOptions, SourceKind,
+    DecoratorMode, Language, ParseOptions, SourceKind,
     lexer::{Lexer, Token, TokenFlags, TokenKind},
     operator::{
         AssignmentOperator, UnaryOperator, UpdateOperator, assignment_operator, binary_binding,
@@ -141,6 +141,18 @@ struct ParsedPropertyName {
     shorthand: bool,
 }
 
+struct ParsedDecorators {
+    start: u32,
+    items: Vec<ParsedDecorator>,
+}
+
+#[derive(Clone, Copy)]
+struct ParsedDecorator {
+    start: u32,
+    end: u32,
+    expression: ParsedNode,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum AccessorKind {
     Get,
@@ -173,6 +185,7 @@ enum MethodBodyPolicy {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PostfixPolicy {
     Ordinary,
+    Decorator,
     NewCallee,
     ClassHeritage,
 }
@@ -624,6 +637,9 @@ impl<'s> Parser<'s> {
             TokenKind::Switch => self.parse_switch_statement(),
             TokenKind::Try => self.parse_try_statement(),
             TokenKind::Class => self.parse_class(true),
+            TokenKind::At if self.options.syntax_extensions.decorators => {
+                self.parse_decorated_statement(position)
+            }
             TokenKind::Import if self.import_starts_expression() => {
                 self.parse_expression_or_labeled_statement(position)
             }
@@ -1092,6 +1108,7 @@ impl<'s> Parser<'s> {
                 declare_class: true,
             },
             false,
+            None,
         );
         self.context.set_grammar(previous_grammar);
         declaration
@@ -1117,10 +1134,17 @@ impl<'s> Parser<'s> {
         if self.options.semantic_errors && self.context.grammar().ambient() {
             self.diagnose_ambient_function_modifiers(start, asynchronous, generator_token);
         }
-        let id = if Self::is_identifier_name(self.current.kind) {
+        let id = if Self::is_identifier_name(self.current.kind)
+            || self.current.kind == TokenKind::Yield
+        {
             Some(if declaration {
                 let declaration_binding = self.context.function_declaration_binding_kind();
                 self.parse_binding_identifier(declaration_binding)?
+            } else if self.current.kind == TokenKind::Yield {
+                let token = self.take();
+                let span = Self::token_span(token);
+                self.validate_binding_identifier_token(token.kind, span, token.flags.escaped());
+                self.identifier_from_span(span)?
             } else {
                 self.parse_identifier()?
             })
@@ -1172,6 +1196,12 @@ impl<'s> Parser<'s> {
         if has_use_strict {
             self.context
                 .set_grammar(self.context.grammar().with_strict(true));
+            if self.reports_ecmascript_early_errors()
+                && let Some(id) = id
+                && self.static_property_name_matches(id.span, "yield")
+            {
+                self.error(id.span, "function name cannot be `yield` in strict mode");
+            }
         }
         // Checking for a block first keeps the ordinary function path to one token comparison.
         if self.current.kind != TokenKind::LeftBrace
@@ -2016,20 +2046,366 @@ impl<'s> Parser<'s> {
         function
     }
 
-    fn parse_class(&mut self, declaration: bool) -> Result<ParsedNode, ParseError> {
-        self.parse_class_impl(declaration, false)
+    fn parse_decorated_statement(
+        &mut self,
+        position: StatementPosition,
+    ) -> Result<ParsedNode, ParseError> {
+        let tape_checkpoint = self.tape.checkpoint();
+        let context_checkpoint = self.context.checkpoint();
+        let last_node_tag = self.last_node_tag;
+        let last_assignment_target = self.last_assignment_target;
+        let decorators = self.parse_decorator_list()?;
+        if position != StatementPosition::ListItem
+            && self.reports_ecmascript_early_errors()
+            && matches!(
+                self.current.kind,
+                TokenKind::Class | TokenKind::Export | TokenKind::Abstract
+            )
+        {
+            self.diagnose_declaration_statement_position(position);
+        }
+        let statement = match self.current.kind {
+            TokenKind::Class => self.parse_class_impl(true, false, Some(decorators)),
+            TokenKind::Abstract if self.starts_typescript_abstract_class_declaration() => self
+                .parse_typescript_abstract_class_declaration_with_decorators(
+                    false,
+                    Some(decorators),
+                ),
+            TokenKind::Export => self.parse_export_declaration_with_decorators(Some(decorators)),
+            _ => {
+                let declaration_recovery = matches!(
+                    self.current.kind,
+                    TokenKind::Function
+                        | TokenKind::Var
+                        | TokenKind::Let
+                        | TokenKind::Const
+                        | TokenKind::Declare
+                        | TokenKind::Type
+                        | TokenKind::Interface
+                        | TokenKind::Enum
+                        | TokenKind::Namespace
+                        | TokenKind::Module
+                ) || self.current.kind == TokenKind::Async
+                    && self.followed_by_token_without_line_break(TokenKind::Function)
+                    || self.current.kind == TokenKind::Import
+                        && !self.import_starts_meta_expression();
+                if declaration_recovery {
+                    let diagnostic_span =
+                        Span::new(decorators.start, self.previous_end(decorators.start));
+                    self.tape.rollback(tape_checkpoint)?;
+                    self.context.rollback(context_checkpoint);
+                    self.last_node_tag = last_node_tag;
+                    self.last_assignment_target = last_assignment_target;
+                    if self.reports_decorator_placement_errors() {
+                        self.error(diagnostic_span, "decorators are only valid on classes");
+                    }
+                    return self.parse_statement_at(position);
+                }
+                self.error(
+                    Span::new(decorators.start, self.previous_end(decorators.start)),
+                    "decorators are only valid on classes",
+                );
+                let expression = self.decorator_recovery_expression(&decorators)?;
+                let end = self.consume_semicolon();
+                self.node(
+                    NodeTag::EXPRESSION_STATEMENT,
+                    Span::new(expression.span.start, end),
+                    &[expression.value()],
+                )
+            }
+        };
+        self.context.commit(context_checkpoint);
+        statement
     }
 
-    fn parse_default_export_class(&mut self) -> Result<ParsedNode, ParseError> {
-        self.parse_class_impl(true, true)
+    fn parse_decorated_class_expression(&mut self) -> Result<ParsedNode, ParseError> {
+        let decorators = self.parse_decorator_list()?;
+        if self.current.kind == TokenKind::Class {
+            return self.parse_class_impl(false, false, Some(decorators));
+        }
+        self.error(
+            Span::new(decorators.start, self.previous_end(decorators.start)),
+            "decorators are only valid on class expressions",
+        );
+        self.decorator_recovery_expression(&decorators)
+    }
+
+    fn parse_decorator_list(&mut self) -> Result<ParsedDecorators, ParseError> {
+        let start = self.current.start;
+        let mut items = Vec::new();
+        while self.current.kind == TokenKind::At {
+            let decorator_start = self.take().start;
+            let (expression, decorator_end) = if self.current.kind == TokenKind::LeftParen {
+                let (parenthesized, parenthesized_end) =
+                    self.parse_parenthesized_expression_with_end()?;
+                let parenthesized_node = parenthesized.node;
+                let typescript_decorators = self.parses_typescript_decorator_expressions();
+                let policy = if typescript_decorators {
+                    PostfixPolicy::Decorator
+                } else {
+                    PostfixPolicy::Ordinary
+                };
+                let expression = self.parse_postfix_continuations(parenthesized, policy)?;
+                let has_continuation = expression.node != parenthesized_node;
+                if has_continuation && (!typescript_decorators || self.options.semantic_errors) {
+                    self.error(
+                        expression.span,
+                        "a parenthesized decorator expression cannot be followed by a postfix operation",
+                    );
+                }
+                let end = if has_continuation {
+                    expression.span.end
+                } else {
+                    parenthesized_end
+                };
+                (expression, end)
+            } else {
+                let expression = self.parse_decorator_expression()?;
+                (expression, expression.span.end)
+            };
+            items.push(ParsedDecorator {
+                start: decorator_start,
+                end: decorator_end,
+                expression,
+            });
+        }
+        Ok(ParsedDecorators { start, items })
+    }
+
+    fn parse_decorator_expression(&mut self) -> Result<ParsedNode, ParseError> {
+        if self.parses_typescript_decorator_expressions() {
+            if self.current.kind == TokenKind::Await
+                && (self.context.grammar().async_function()
+                    || self.context.grammar().module()
+                    || self.context.grammar().class() && !self.context.grammar().function())
+            {
+                self.error(
+                    self.current_span(),
+                    "await cannot be used as a decorator expression in this context",
+                );
+            }
+            let expression = self.parse_postfix_expression_with_policy(PostfixPolicy::Decorator)?;
+            if self.options.semantic_errors
+                && !self.typescript_decorator_expression_is_valid(expression.node, true)
+            {
+                self.error(
+                    expression.span,
+                    "decorator expression must be parenthesized",
+                );
+            }
+            return Ok(expression);
+        }
+        if !Self::is_identifier_name(self.current.kind) && self.current.kind != TokenKind::Yield {
+            return self.invalid_expression();
+        }
+
+        let mut expression = self.parse_identifier_reference()?;
+        while self.eat(TokenKind::Dot).is_some() {
+            let property = self.parse_member_property()?;
+            let computed = self.tape.push_bool(false)?;
+            let optional = self.tape.push_bool(false)?;
+            expression = self.node(
+                NodeTag::MEMBER_EXPRESSION,
+                Span::new(expression.span.start, property.span.end),
+                &[expression.value(), property.value(), computed, optional],
+            )?;
+        }
+
+        if self.options.language.is_typescript()
+            && matches!(self.current.kind, TokenKind::Lt | TokenKind::ShiftLeft)
+        {
+            if self.current.kind == TokenKind::ShiftLeft {
+                self.current.kind = TokenKind::Lt;
+                self.current.end = self.current.start + 1;
+                self.lexer.set_position(self.current.end as usize);
+            }
+            let (type_arguments, type_arguments_end, _, _) =
+                self.parse_type_arguments_impl(self.options.semantic_errors)?;
+            if self.eat(TokenKind::LeftParen).is_none() {
+                self.error(
+                    self.current_span(),
+                    "decorator type arguments must be followed by a call",
+                );
+                return self.node(
+                    NodeTag::TS_INSTANTIATION_EXPRESSION,
+                    Span::new(expression.span.start, type_arguments_end),
+                    &[expression.value(), type_arguments],
+                );
+            }
+            let arguments = self.parse_argument_list()?;
+            let end = self.expect(TokenKind::RightParen).end;
+            let optional = self.tape.push_bool(false)?;
+            return self.node(
+                NodeTag::TS_CALL_EXPRESSION,
+                Span::new(expression.span.start, end),
+                &[expression.value(), arguments, optional, type_arguments],
+            );
+        }
+
+        if self.eat(TokenKind::LeftParen).is_some() {
+            let arguments = self.parse_argument_list()?;
+            let end = self.expect(TokenKind::RightParen).end;
+            let optional = self.tape.push_bool(false)?;
+            expression = self.node(
+                NodeTag::CALL_EXPRESSION,
+                Span::new(expression.span.start, end),
+                &[expression.value(), arguments, optional],
+            )?;
+        }
+        Ok(expression)
+    }
+
+    const fn parses_typescript_decorator_expressions(&self) -> bool {
+        match self.options.syntax_extensions.decorator_mode {
+            DecoratorMode::Auto => {
+                self.options.language.is_typescript()
+                    || self.options.syntax_extensions.typescript_js_compatibility
+            }
+            DecoratorMode::Standard => false,
+            DecoratorMode::TypeScript => true,
+        }
+    }
+
+    fn typescript_decorator_expression_is_valid(&self, node: NodeRef, can_have_call: bool) -> bool {
+        if self
+            .tape
+            .parser_node_fields(node.offset())
+            .is_some_and(|(tag, _)| tag == NodeTag::PARENTHESIZED_EXPRESSION)
+        {
+            return true;
+        }
+        self.typescript_decorator_node_is_valid(node.offset(), can_have_call)
+    }
+
+    fn typescript_decorator_node_is_valid(&self, offset: u32, can_have_call: bool) -> bool {
+        let mut offset = offset;
+        let mut can_have_call = can_have_call;
+        loop {
+            let Some((tag, fields)) = self.tape.parser_node_fields(offset) else {
+                return false;
+            };
+            match tag {
+                NodeTag::IDENTIFIER => return true,
+                NodeTag::TS_INSTANTIATION_EXPRESSION | NodeTag::TS_NON_NULL_EXPRESSION => {
+                    let Some(&expression) = fields.first() else {
+                        return false;
+                    };
+                    offset = expression;
+                }
+                NodeTag::CALL_EXPRESSION | NodeTag::TS_CALL_EXPRESSION => {
+                    if !can_have_call
+                        || fields
+                            .get(2)
+                            .is_none_or(|&optional| self.tape.parser_bool(optional) != Some(false))
+                    {
+                        return false;
+                    }
+                    let Some(&callee) = fields.first() else {
+                        return false;
+                    };
+                    offset = callee;
+                    can_have_call = false;
+                }
+                NodeTag::MEMBER_EXPRESSION => {
+                    if fields
+                        .get(2)
+                        .is_none_or(|&computed| self.tape.parser_bool(computed) != Some(false))
+                        || fields
+                            .get(3)
+                            .is_none_or(|&optional| self.tape.parser_bool(optional) != Some(false))
+                    {
+                        return false;
+                    }
+                    let Some(&object) = fields.first() else {
+                        return false;
+                    };
+                    offset = object;
+                    can_have_call = false;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    fn decorator_recovery_expression(
+        &mut self,
+        decorators: &ParsedDecorators,
+    ) -> Result<ParsedNode, ParseError> {
+        let Some(last) = decorators.items.last().copied() else {
+            return self.invalid_expression();
+        };
+        if decorators.items.len() == 1 {
+            return Ok(last.expression);
+        }
+        let values = decorators
+            .items
+            .iter()
+            .map(|decorator| decorator.expression.value())
+            .collect::<Vec<_>>();
+        let values = self.tape.push_list(&values)?;
+        self.node(
+            NodeTag::SEQUENCE_EXPRESSION,
+            Span::new(decorators.start, last.end),
+            &[values],
+        )
+    }
+
+    fn push_decorator_list(
+        &mut self,
+        decorators: &ParsedDecorators,
+    ) -> Result<ValueRef, ParseError> {
+        let mut values = Vec::with_capacity(decorators.items.len());
+        for decorator in &decorators.items {
+            values.push(
+                self.node(
+                    NodeTag::DECORATOR,
+                    Span::new(decorator.start, decorator.end),
+                    &[decorator.expression.value()],
+                )?
+                .value(),
+            );
+        }
+        Ok(self.tape.push_list(&values)?)
+    }
+
+    fn append_decorators(
+        decorators: &mut Option<ParsedDecorators>,
+        mut trailing: ParsedDecorators,
+    ) {
+        if let Some(decorators) = decorators {
+            decorators.items.append(&mut trailing.items);
+        } else {
+            *decorators = Some(trailing);
+        }
+    }
+
+    const fn reports_decorator_placement_errors(&self) -> bool {
+        match self.options.syntax_extensions.decorator_mode {
+            DecoratorMode::TypeScript => self.options.semantic_errors,
+            DecoratorMode::Auto
+                if self.options.language.is_typescript()
+                    || self.options.syntax_extensions.typescript_js_compatibility =>
+            {
+                self.options.semantic_errors
+            }
+            DecoratorMode::Standard | DecoratorMode::Auto => true,
+        }
+    }
+
+    fn parse_class(&mut self, declaration: bool) -> Result<ParsedNode, ParseError> {
+        self.parse_class_impl(declaration, false, None)
     }
 
     fn parse_class_impl(
         &mut self,
         declaration: bool,
         allow_anonymous: bool,
+        decorators: Option<ParsedDecorators>,
     ) -> Result<ParsedNode, ParseError> {
-        let start = self.expect(TokenKind::Class).start;
+        let class_start = self.expect(TokenKind::Class).start;
+        let start = decorators
+            .as_ref()
+            .map_or(class_start, |decorators| decorators.start);
         if self.options.language.is_typescript()
             || self.options.syntax_extensions.typescript_js_compatibility
         {
@@ -2038,6 +2414,7 @@ impl<'s> Parser<'s> {
                 declaration,
                 TypeScriptClassModifiers::default(),
                 allow_anonymous,
+                decorators,
             );
         }
         let named_expression_scope = !declaration && Self::is_identifier_name(self.current.kind);
@@ -2087,15 +2464,28 @@ impl<'s> Parser<'s> {
         let _ = self.context.leave_scope();
         let elements = self.tape.push_list(&elements)?;
         let body = self.node(NodeTag::CLASS_BODY, Span::new(body_start, end), &[elements])?;
-        self.node(
-            if declaration {
-                NodeTag::CLASS_DECLARATION
-            } else {
-                NodeTag::CLASS_EXPRESSION
-            },
-            Span::new(start, end),
-            &[id, super_class, body.value()],
-        )
+        if let Some(decorators) = decorators {
+            let decorators = self.push_decorator_list(&decorators)?;
+            self.node(
+                if declaration {
+                    NodeTag::DECORATED_CLASS_DECLARATION
+                } else {
+                    NodeTag::DECORATED_CLASS_EXPRESSION
+                },
+                Span::new(start, end),
+                &[id, super_class, body.value(), decorators],
+            )
+        } else {
+            self.node(
+                if declaration {
+                    NodeTag::CLASS_DECLARATION
+                } else {
+                    NodeTag::CLASS_EXPRESSION
+                },
+                Span::new(start, end),
+                &[id, super_class, body.value()],
+            )
+        }
     }
 
     #[cold]
@@ -2104,8 +2494,21 @@ impl<'s> Parser<'s> {
         &mut self,
         allow_anonymous: bool,
     ) -> Result<ParsedNode, ParseError> {
+        self.parse_typescript_abstract_class_declaration_with_decorators(allow_anonymous, None)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_abstract_class_declaration_with_decorators(
+        &mut self,
+        allow_anonymous: bool,
+        decorators: Option<ParsedDecorators>,
+    ) -> Result<ParsedNode, ParseError> {
         let start = self.expect(TokenKind::Abstract).start;
         self.expect(TokenKind::Class);
+        let start = decorators
+            .as_ref()
+            .map_or(start, |decorators| decorators.start);
         self.parse_typescript_class(
             start,
             true,
@@ -2114,6 +2517,7 @@ impl<'s> Parser<'s> {
                 declare_class: false,
             },
             allow_anonymous,
+            decorators,
         )
     }
 
@@ -2124,6 +2528,7 @@ impl<'s> Parser<'s> {
         declaration: bool,
         modifiers: TypeScriptClassModifiers,
         allow_anonymous: bool,
+        decorators: Option<ParsedDecorators>,
     ) -> Result<ParsedNode, ParseError> {
         // 1. Distinguish a class named `implements` from an anonymous implementation clause.
         let anonymous_implements_clause = self.current.kind == TokenKind::Implements
@@ -2284,6 +2689,43 @@ impl<'s> Parser<'s> {
         let _ = self.context.leave_scope();
         let elements = self.tape.push_list(&elements)?;
         let body = self.node(NodeTag::CLASS_BODY, Span::new(body_start, end), &[elements])?;
+        if let Some(decorators) = decorators {
+            let implementations = if saw_implements {
+                self.tape.push_list(&implementations)?
+            } else {
+                self.tape.push_null()?
+            };
+            let type_parameters = if let Some(type_parameters) = type_parameters {
+                type_parameters
+            } else {
+                self.tape.push_null()?
+            };
+            let super_type_arguments = if let Some(super_type_arguments) = super_type_arguments {
+                super_type_arguments
+            } else {
+                self.tape.push_null()?
+            };
+            let decorators = self.push_decorator_list(&decorators)?;
+            let tag = if declaration {
+                NodeTag::TS_DECORATED_CLASS_DECLARATION
+            } else {
+                NodeTag::TS_DECORATED_CLASS_EXPRESSION
+            };
+            let span = Span::new(start, end);
+            let fields = [
+                id,
+                super_class,
+                body.value(),
+                implementations,
+                type_parameters,
+                super_type_arguments,
+                decorators,
+            ];
+            if modifiers.wire_flags() != 0 {
+                return self.node_typescript_modified_class(tag, span, &fields, modifiers);
+            }
+            return self.node(tag, span, &fields);
+        }
         // 4. Keep classes without superclass type arguments on their existing wire tags.
         if let Some(super_type_arguments) = super_type_arguments {
             return self.node_typescript_super_type_arguments_class(
@@ -3736,13 +4178,80 @@ impl<'s> Parser<'s> {
 
     // Export alternatives share state and recovery rules, so keeping the grammar branch local is
     // easier to audit than distributing it across helpers.
-    #[allow(clippy::too_many_lines)]
     fn parse_export_declaration(&mut self) -> Result<ParsedNode, ParseError> {
-        let start = self.expect(TokenKind::Export).start;
+        self.parse_export_declaration_with_decorators(None)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn parse_export_declaration_with_decorators(
+        &mut self,
+        mut decorators: Option<ParsedDecorators>,
+    ) -> Result<ParsedNode, ParseError> {
+        let export_start = self.expect(TokenKind::Export).start;
+        let start = decorators
+            .as_ref()
+            .map_or(export_start, |decorators| decorators.start);
         if self.function_depth > 0 {
             self.error(
-                Span::new(start, start.saturating_add(6)),
+                Span::new(export_start, export_start.saturating_add(6)),
                 "export declarations are only allowed at the top level",
+            );
+        }
+        let decorators_after_export =
+            self.options.syntax_extensions.decorators && self.current.kind == TokenKind::At;
+        if decorators_after_export {
+            let trailing = self.parse_decorator_list()?;
+            if decorators.is_some() && self.reports_decorator_placement_errors() {
+                self.error(
+                    Span::new(trailing.start, self.previous_end(trailing.start)),
+                    "decorators cannot appear both before and after `export`",
+                );
+            }
+            Self::append_decorators(&mut decorators, trailing);
+        }
+        if decorators_after_export
+            && self.current.kind == TokenKind::Default
+            && self.reports_decorator_placement_errors()
+        {
+            self.error(
+                self.current_span(),
+                "`default` must precede decorators after `export`",
+            );
+        }
+        let invalid_decorated_target = decorators.is_some()
+            && !matches!(self.current.kind, TokenKind::Default | TokenKind::Class)
+            && !(self.current.kind == TokenKind::Abstract
+                && self.starts_typescript_abstract_class_declaration());
+        if invalid_decorated_target {
+            if self.reports_decorator_placement_errors() {
+                self.error(
+                    self.current_span(),
+                    "export decorators are only valid on classes",
+                );
+            }
+            let decorators = decorators
+                .take()
+                .unwrap_or_else(|| unreachable!("decorators were checked above"));
+            let expression = self.decorator_recovery_expression(&decorators)?;
+            let declaration = self.node(
+                NodeTag::EXPRESSION_STATEMENT,
+                expression.span,
+                &[expression.value()],
+            )?;
+            let specifiers = self.tape.push_list(&[])?;
+            let source = self.tape.push_null()?;
+            let attributes = self.tape.push_list(&[])?;
+            let export_kind = self.tape.push_u32(0)?;
+            return self.node(
+                NodeTag::EXPORT_NAMED_DECLARATION,
+                Span::new(start, declaration.span.end),
+                &[
+                    declaration.value(),
+                    specifiers,
+                    source,
+                    attributes,
+                    export_kind,
+                ],
             );
         }
         // Babel emits both TypeScript-only forms as standalone statements rather than ES export wrappers.
@@ -3831,13 +4340,47 @@ impl<'s> Parser<'s> {
         if self.eat(TokenKind::Default).is_some() {
             if self.reports_internal_namespace_errors() {
                 self.error(
-                    Span::new(start, start.saturating_add(6)),
+                    Span::new(export_start, export_start.saturating_add(6)),
                     "default exports are not allowed in internal namespaces",
+                );
+            }
+            if self.options.syntax_extensions.decorators && self.current.kind == TokenKind::At {
+                let trailing = self.parse_decorator_list()?;
+                if decorators.is_some() && self.reports_decorator_placement_errors() {
+                    self.error(
+                        Span::new(trailing.start, self.previous_end(trailing.start)),
+                        "decorators cannot appear in more than one export position",
+                    );
+                }
+                Self::append_decorators(&mut decorators, trailing);
+            }
+            let invalid_decorated_target = decorators.is_some()
+                && self.current.kind != TokenKind::Class
+                && !(self.current.kind == TokenKind::Abstract
+                    && self.starts_typescript_abstract_class_declaration());
+            if invalid_decorated_target {
+                if self.reports_decorator_placement_errors() {
+                    self.error(
+                        self.current_span(),
+                        "default export decorators are only valid on classes",
+                    );
+                }
+                let decorators = decorators
+                    .take()
+                    .unwrap_or_else(|| unreachable!("decorators were checked above"));
+                let expression = self.decorator_recovery_expression(&decorators)?;
+                return self.node(
+                    NodeTag::EXPORT_DEFAULT_DECLARATION,
+                    Span::new(start, expression.span.end),
+                    &[expression.value()],
                 );
             }
             let (declaration, needs_semicolon) = match self.current.kind {
                 TokenKind::Abstract if self.starts_typescript_abstract_class_declaration() => (
-                    self.parse_typescript_abstract_class_declaration(true)?,
+                    self.parse_typescript_abstract_class_declaration_with_decorators(
+                        true,
+                        decorators.take(),
+                    )?,
                     false,
                 ),
                 TokenKind::Async
@@ -3846,7 +4389,7 @@ impl<'s> Parser<'s> {
                     (self.parse_default_export_function(true)?, false)
                 }
                 TokenKind::Function => (self.parse_default_export_function(false)?, false),
-                TokenKind::Class => (self.parse_default_export_class()?, false),
+                TokenKind::Class => (self.parse_class_impl(true, true, decorators.take())?, false),
                 _ => (self.parse_assignment_expression(true)?, true),
             };
             let _ = self
@@ -4027,9 +4570,11 @@ impl<'s> Parser<'s> {
             {
                 self.parse_module_declaration()?
             }
-            TokenKind::Abstract if self.starts_typescript_abstract_class_declaration() => {
-                self.parse_typescript_abstract_class_declaration(false)?
-            }
+            TokenKind::Abstract if self.starts_typescript_abstract_class_declaration() => self
+                .parse_typescript_abstract_class_declaration_with_decorators(
+                    false,
+                    decorators.take(),
+                )?,
             TokenKind::Async if self.followed_by_token_without_line_break(TokenKind::Function) => {
                 self.parse_exported_single_binding(|parser| parser.parse_function(true, true))?
             }
@@ -4037,7 +4582,10 @@ impl<'s> Parser<'s> {
                 self.parse_exported_single_binding(|parser| parser.parse_function(true, false))?
             }
             TokenKind::Class => {
-                self.parse_exported_single_binding(|parser| parser.parse_class(true))?
+                let decorators = decorators.take();
+                self.parse_exported_single_binding(|parser| {
+                    parser.parse_class_impl(true, false, decorators)
+                })?
             }
             _ => {
                 self.error(self.current_span(), "expected an export declaration");
@@ -5029,12 +5577,20 @@ impl<'s> Parser<'s> {
         self.parse_postfix_expression_with_policy(PostfixPolicy::Ordinary)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn parse_postfix_expression_with_policy(
         &mut self,
         policy: PostfixPolicy,
     ) -> Result<ParsedNode, ParseError> {
-        let mut expression = self.parse_primary_expression()?;
+        let expression = self.parse_primary_expression()?;
+        self.parse_postfix_continuations(expression, policy)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn parse_postfix_continuations(
+        &mut self,
+        mut expression: ParsedNode,
+        policy: PostfixPolicy,
+    ) -> Result<ParsedNode, ParseError> {
         let mut is_chain = false;
         loop {
             match self.current.kind {
@@ -5101,6 +5657,7 @@ impl<'s> Parser<'s> {
                         )?;
                     }
                 }
+                TokenKind::LeftBracket if policy == PostfixPolicy::Decorator => break,
                 TokenKind::LeftBracket => {
                     self.bump();
                     let property = self.parse_expression(true)?;
@@ -5153,7 +5710,8 @@ impl<'s> Parser<'s> {
                     )?;
                 }
                 TokenKind::PlusPlus | TokenKind::MinusMinus
-                    if !self.current.flags.line_break_before() =>
+                    if policy != PostfixPolicy::Decorator
+                        && !self.current.flags.line_break_before() =>
                 {
                     if self.options.language.is_typescript()
                         && self.last_node_tag == Some(NodeTag::UPDATE_EXPRESSION)
@@ -5383,6 +5941,9 @@ impl<'s> Parser<'s> {
             }
             TokenKind::Function => self.parse_function(false, false),
             TokenKind::Class => self.parse_class(false),
+            TokenKind::At if self.options.syntax_extensions.decorators => {
+                self.parse_decorated_class_expression()
+            }
             TokenKind::LeftParen => self.parse_parenthesized_expression(),
             TokenKind::LeftBracket => self.parse_array_expression(),
             TokenKind::LeftBrace => self.parse_object_expression(),
@@ -5595,6 +6156,11 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_parenthesized_expression(&mut self) -> Result<ParsedNode, ParseError> {
+        self.parse_parenthesized_expression_with_end()
+            .map(|(expression, _)| expression)
+    }
+
+    fn parse_parenthesized_expression_with_end(&mut self) -> Result<(ParsedNode, u32), ParseError> {
         let assignment_patterns = self.assignment_pattern_checkpoint();
         let start = self.take().start;
         let expression = self.parse_expression(true)?;
@@ -5611,10 +6177,10 @@ impl<'s> Parser<'s> {
             )?;
             self.last_node_tag = semantic_tag;
             self.last_assignment_target = assignment_target;
-            Ok(parenthesized)
+            Ok((parenthesized, end))
         } else {
             self.last_assignment_target = assignment_target;
-            Ok(expression)
+            Ok((expression, end))
         }
     }
 
@@ -8885,6 +9451,12 @@ impl<'s> Parser<'s> {
             lookahead.next_token().kind,
             TokenKind::LeftParen | TokenKind::Dot
         )
+    }
+
+    fn import_starts_meta_expression(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        lookahead.next_token().kind == TokenKind::Dot
     }
 
     fn import_starts_direct_call(&self) -> bool {

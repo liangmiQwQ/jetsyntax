@@ -58,10 +58,31 @@ pub struct ParseOptions {
     pub syntax_extensions: SyntaxExtensions,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct SyntaxExtensions {
     pub typescript_js_compatibility: bool,
     pub optional_chaining_assign: bool,
+    pub decorators: bool,
+    pub decorator_mode: DecoratorMode,
+}
+
+impl Default for SyntaxExtensions {
+    fn default() -> Self {
+        Self {
+            typescript_js_compatibility: false,
+            optional_chaining_assign: false,
+            decorators: true,
+            decorator_mode: DecoratorMode::Auto,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DecoratorMode {
+    #[default]
+    Auto,
+    Standard,
+    TypeScript,
 }
 
 impl Default for ParseOptions {

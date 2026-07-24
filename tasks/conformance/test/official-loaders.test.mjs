@@ -46,16 +46,23 @@ test("official loaders preserve suite outcomes and explicit exclusions", async (
     options: { plugins: [["optionalChainingAssign", { version: "2023-07" }]] },
     output: {},
   });
+  await babelFixture(babelRoot, "decorators/syntax/enabled", "@dec class C {}", {
+    options: { plugins: ["decorators"] },
+    output: {},
+  });
+  await babelFixture(babelRoot, "decorators/syntax/disabled", "export @dec class C {}", {
+    options: { sourceType: "module", throws: "Decorators are not enabled" },
+  });
   await write(join(babelRoot, "core/syntax/nested/child"), "input.js", "let value = 1;");
   const babel = await loadBabel(babelRoot);
   assert.deepEqual(babel.inventory, {
-    enabledFixtures: 7,
+    enabledFixtures: 9,
     upstreamDisabled: 1,
     upstreamUndiscovered: 1,
-    clean: 4,
-    fatal: 1,
+    clean: 5,
+    fatal: 2,
     recovery: 2,
-    executions: 7,
+    executions: 9,
   });
   assert.equal(babel.extensions.unsupportedReasons["plugin:flow"], 1);
   assert.equal(babel.cases.find((testCase) => testCase.id.includes("typescript/dts"))?.options.lang, "dts");
@@ -63,6 +70,12 @@ test("official loaders preserve suite outcomes and explicit exclusions", async (
   assert.equal(
     babel.cases.find((testCase) => testCase.id.includes("optional/syntax"))?.options.optionalChainingAssign,
     true,
+  );
+  assert.deepEqual(
+    babel.cases
+      .filter((testCase) => testCase.id.includes("decorators/syntax"))
+      .map((testCase) => [testCase.options.decorators, testCase.options.decoratorMode]),
+    [[false, "auto"], [true, "standard"]],
   );
 
   const typeScriptRoot = join(root, "typescript", "tests", "cases", "compiler");

@@ -173,6 +173,9 @@ impl NodeTag {
     pub const PARENTHESIZED_EXPRESSION: Self = Self(72);
     pub const IMPORT_ATTRIBUTE: Self = Self(73);
     pub const PHASE_IMPORT_EXPRESSION: Self = Self(74);
+    pub const DECORATOR: Self = Self(75);
+    pub const DECORATED_CLASS_DECLARATION: Self = Self(76);
+    pub const DECORATED_CLASS_EXPRESSION: Self = Self(77);
 
     pub const JSX_IDENTIFIER: Self = Self(256);
     pub const JSX_MEMBER_EXPRESSION: Self = Self(257);
@@ -271,6 +274,8 @@ impl NodeTag {
     pub const TS_EXPORT_SPECIFIER: Self = Self(589);
     pub const PHASE_IMPORT_DECLARATION: Self = Self(590);
     pub const TS_PARAMETER_PROPERTY: Self = Self(591);
+    pub const TS_DECORATED_CLASS_DECLARATION: Self = Self(592);
+    pub const TS_DECORATED_CLASS_EXPRESSION: Self = Self(593);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {
@@ -584,6 +589,27 @@ impl TapeBuilder {
         let value_ref = self.push_record(&[KIND_POOL_STRING << KIND_SHIFT, start, len])?;
         self.string_pool.extend_from_slice(value.as_bytes());
         Ok(value_ref)
+    }
+
+    pub(crate) fn parser_node_fields(&self, offset: u32) -> Option<(NodeTag, &[u32])> {
+        let offset = usize::try_from(offset).ok()?;
+        let header = *self.words.get(offset)?;
+        if (header & KIND_MASK) >> KIND_SHIFT != KIND_NODE {
+            return None;
+        }
+        let tag = NodeTag::new(u16::try_from(header & NODE_TAG_MASK).ok()?)?;
+        let field_count = usize::try_from(*self.words.get(offset + 4)?).ok()?;
+        let fields = self.words.get(offset + 5..offset + 5 + field_count)?;
+        Some((tag, fields))
+    }
+
+    pub(crate) fn parser_bool(&self, offset: u32) -> Option<bool> {
+        let offset = usize::try_from(offset).ok()?;
+        match *self.words.get(offset)? & !REFERENCE_MARKER {
+            value if value == (KIND_BOOL << KIND_SHIFT) => Some(false),
+            value if value == (KIND_BOOL << KIND_SHIFT) | 1 => Some(true),
+            _ => None,
+        }
     }
 
     /// Appends a list of previously completed values.

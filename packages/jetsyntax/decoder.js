@@ -120,6 +120,9 @@ for (
     [72, ["ParenthesizedExpression", ["expression"]]],
     [73, ["ImportAttribute", ["key", "value"]]],
     [74, ["ImportExpression", ["source", "options", "phase"]]],
+    [75, ["Decorator", ["expression"]]],
+    [76, ["ClassDeclaration", ["id", "superClass", "body", "decorators"]]],
+    [77, ["ClassExpression", ["id", "superClass", "body", "decorators"]]],
     [256, ["JSXIdentifier", ["name"]]],
     [259, ["JSXElement", ["openingElement", "closingElement", "children"]]],
     [261, ["JSXOpeningElement", ["name", "attributes", "selfClosing"]]],
@@ -209,6 +212,24 @@ for (
     [589, ["ExportSpecifier", ["local", "exported", "exportKind"]]],
     [590, ["ImportDeclaration", ["specifiers", "source", "attributes", "importKind", "phase"]]],
     [591, ["TSParameterProperty", ["parameter"]]],
+    [592, ["ClassDeclaration", [
+      "id",
+      "superClass",
+      "body",
+      "implements",
+      "typeParameters",
+      "superTypeArguments",
+      "decorators",
+    ]]],
+    [593, ["ClassExpression", [
+      "id",
+      "superClass",
+      "body",
+      "implements",
+      "typeParameters",
+      "superTypeArguments",
+      "decorators",
+    ]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -853,6 +874,19 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.superClass = fields[1];
         node.body = fields[2];
         return node;
+      case 75:
+        node.expression = fields[0];
+        return node;
+      case 76:
+      case 77:
+        if ((record & NODE_FLAGS_MASK) !== 0) {
+          throw new Error(`invalid decorated class flags for tag ${tag}`);
+        }
+        node.id = fields[0];
+        node.superClass = fields[1];
+        node.body = fields[2];
+        node.decorators = array(fields[3], tag);
+        return node;
       case 59:
         node.body = array(fields[0], tag);
         return node;
@@ -1103,6 +1137,17 @@ function decodeTapeInternal(source, tape, options, trusted) {
         if (fields[3] !== null) node.implements = array(fields[3], tag);
         if (fields[4] !== null) node.typeParameters = fields[4];
         node.superTypeArguments = fields[5];
+        return node;
+      case 592:
+      case 593:
+        if ((record & NODE_FLAGS_MASK) !== 0) decodeTypeScriptClassFlags(node, record, tag);
+        node.id = fields[0];
+        node.superClass = fields[1];
+        node.body = fields[2];
+        if (fields[3] !== null) node.implements = array(fields[3], tag);
+        if (fields[4] !== null) node.typeParameters = fields[4];
+        if (fields[5] !== null) node.superTypeArguments = fields[5];
+        node.decorators = array(fields[6], tag);
         return node;
       case 584:
         node.callee = fields[0];
@@ -1415,7 +1460,8 @@ function decodeTypeScriptClassFlags(node, record, tag) {
   const flags = (record & NODE_FLAGS_MASK) >>> 16;
   if (
     (flags & ~0x03) !== 0
-    || (flags !== 0 && (tag === 58 || tag === 568 || tag === 570 || tag === 583))
+    || (flags !== 0
+      && (tag === 58 || tag === 568 || tag === 570 || tag === 583 || tag === 593))
   ) {
     throw new Error(`invalid TypeScript class flags ${flags} for tag ${tag}`);
   }

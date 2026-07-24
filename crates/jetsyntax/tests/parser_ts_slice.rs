@@ -1,5 +1,5 @@
 use jetsyntax::{
-    Language, ParseOptions, ParseResult, SourceKind, SyntaxExtensions, parse,
+    DecoratorMode, Language, ParseOptions, ParseResult, SourceKind, SyntaxExtensions, parse,
     tape::{NodeTag, TapeValue},
 };
 
@@ -6151,6 +6151,223 @@ fn typescript_private_early_errors_follow_the_semantic_error_option() {
     .expect("semantic parse");
     assert_eq!(semantic.diagnostics.len(), 2, "{:#?}", semantic.diagnostics);
     semantic.tape.validate().expect("valid semantic tape");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parses_typescript_class_decorator_expressions_and_standard_mode() {
+    let typescript = parse(
+        "@value! @factory<T>() export default abstract class C<T> extends Base<U> implements I {}",
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            ..typescript_options()
+        },
+    )
+    .expect("TypeScript decorators");
+    assert!(
+        typescript.diagnostics.is_empty(),
+        "{:#?}",
+        typescript.diagnostics
+    );
+    typescript.tape.validate().expect("valid TypeScript tape");
+    assert_node_field_count(&typescript, NodeTag::TS_DECORATED_CLASS_DECLARATION, 7);
+    assert_eq!(node_fields(&typescript, NodeTag::DECORATOR).count(), 2,);
+
+    for source in [
+        "@value = replacement class C {}",
+        "@value => replacement class C {}",
+        "@value++ class C {}",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                ..typescript_options()
+            },
+        )
+        .expect(source);
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+        parsed.tape.validate().expect("valid recovery tape");
+    }
+
+    for placement_source in [
+        "export @first default class C1 {}",
+        "@first export @second class C2 {}",
+        "@first export default @second class C3 {}",
+    ] {
+        let syntax_only = parse(
+            placement_source,
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                ..typescript_options()
+            },
+        )
+        .expect("TypeScript decorator placement syntax");
+        assert!(
+            syntax_only.diagnostics.is_empty(),
+            "{placement_source}: {:#?}",
+            syntax_only.diagnostics
+        );
+        syntax_only.tape.validate().expect("valid syntax-only tape");
+
+        let semantic = parse(
+            placement_source,
+            ParseOptions {
+                source_kind: SourceKind::Module,
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("TypeScript decorator placement semantics");
+        assert_eq!(
+            semantic.diagnostics.len(),
+            1,
+            "{placement_source}: {:#?}",
+            semantic.diagnostics
+        );
+        semantic.tape.validate().expect("valid semantic tape");
+    }
+
+    for valid_source in [
+        "@identifier class C {}",
+        "@namespace.member class C {}",
+        "@factory() class C {}",
+        "@value! class C {}",
+        "@value!.member class C {}",
+        "@factory<T>() class C {}",
+        "@(factory().member) class C {}",
+    ] {
+        let parsed = parse(
+            valid_source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("valid TypeScript decorator expression");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{valid_source}: {:#?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect("valid decorator tape");
+    }
+
+    for invalid_source in [
+        "@factory().member class C {}",
+        "@new Factory class C {}",
+        "@value[member] class C {}",
+        "@value?.member class C {}",
+        "@value`template` class C {}",
+        "@factory().member() class C {}",
+        "@(factory)(value) class C {}",
+    ] {
+        let parsed = parse(
+            invalid_source,
+            ParseOptions {
+                semantic_errors: true,
+                ..typescript_options()
+            },
+        )
+        .expect("invalid TypeScript decorator recovery");
+        assert!(
+            !parsed.diagnostics.is_empty(),
+            "expected a diagnostic for {invalid_source}"
+        );
+        parsed.tape.validate().expect("valid recovery tape");
+    }
+
+    for syntax_only_source in [
+        "@decorator function f() {}",
+        "@decorator enum E {}",
+        "@decorator interface I {}",
+        "@decorator type T = string;",
+        "@decorator var value;",
+        "@decorator import value = require('value');",
+        "@decorator import('value');",
+        r"@(/\)/)(value) class C {}",
+        r"@(/[(]/)(value) class C {}",
+    ] {
+        let parsed = parse(syntax_only_source, typescript_options())
+            .expect("TypeScript syntax-only decorator recovery");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{syntax_only_source}: {:#?}",
+            parsed.diagnostics
+        );
+        parsed.tape.validate().expect("valid syntax-only tape");
+    }
+
+    for (await_source, source_kind) in [
+        (
+            "async function f() { @await class C {} }",
+            SourceKind::Script,
+        ),
+        ("export {}; @await class C {}", SourceKind::Module),
+    ] {
+        let parsed = parse(
+            await_source,
+            ParseOptions {
+                source_kind,
+                ..typescript_options()
+            },
+        )
+        .expect("contextual await decorator recovery");
+        assert!(
+            !parsed.diagnostics.is_empty(),
+            "expected a diagnostic for {await_source}"
+        );
+        parsed.tape.validate().expect("valid await recovery tape");
+    }
+
+    let mut deep_source = String::from("@root");
+    for _ in 0..10_000 {
+        deep_source.push_str(".member");
+    }
+    deep_source.push_str(" class C {}");
+    let deep = parse(
+        &deep_source,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("deep decorator member chain");
+    assert!(deep.diagnostics.is_empty(), "{:#?}", deep.diagnostics);
+    deep.tape.validate().expect("valid deep decorator tape");
+
+    let standard = parse(
+        "@decorator<T>() class C {}",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                decorator_mode: DecoratorMode::Standard,
+                ..SyntaxExtensions::default()
+            },
+            ..typescript_options()
+        },
+    )
+    .expect("standard decorators in TypeScript");
+    assert!(
+        standard.diagnostics.is_empty(),
+        "{:#?}",
+        standard.diagnostics
+    );
+    let standard_invalid = parse(
+        "@decorator<T> class C {}",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                decorator_mode: DecoratorMode::Standard,
+                ..SyntaxExtensions::default()
+            },
+            ..typescript_options()
+        },
+    )
+    .expect("standard decorator recovery");
+    assert!(!standard_invalid.diagnostics.is_empty());
+    standard_invalid
+        .tape
+        .validate()
+        .expect("valid standard recovery tape");
 }
 
 fn assert_clean_with_tags(name: &str, source: &str, expected_tags: &[NodeTag]) {

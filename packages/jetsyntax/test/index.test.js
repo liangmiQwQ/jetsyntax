@@ -4905,4 +4905,80 @@ describe("parse", () => {
     );
     expect(typescriptSemanticFree.diagnostics).toEqual([]);
   });
+
+  it("decodes class decorators with dialect-aware grammar and spans", () => {
+    const source = "@first export class C<T> extends Base<U> implements I {}";
+    const result = parse(source, {
+      lang: "ts",
+      sourceType: "module",
+      decoratorMode: "standard",
+      range: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[0]).toMatchObject({
+      type: "ExportNamedDeclaration",
+      start: 0,
+      declaration: {
+        type: "ClassDeclaration",
+        start: 0,
+        decorators: [{
+          type: "Decorator",
+          start: 0,
+          end: 6,
+          range: [0, 6],
+          expression: { type: "Identifier", name: "first", start: 1, end: 6 },
+        }],
+        implements: [{ type: "TSClassImplements" }],
+        typeParameters: { type: "TSTypeParameterDeclaration" },
+        superTypeArguments: { type: "TSTypeParameterInstantiation" },
+      },
+    });
+
+    const expression = parse("const C = @dec class {};");
+    expect(expression.diagnostics).toEqual([]);
+    expect(expression.program.body[0].declarations[0].init).toMatchObject({
+      type: "ClassExpression",
+      start: 10,
+      decorators: [{ type: "Decorator", start: 10, end: 14 }],
+    });
+
+    const parenthesized = parse("@(factory().member) class C {}", {
+      lang: "ts",
+      preserveParens: false,
+      range: true,
+      semanticErrors: true,
+    });
+    expect(parenthesized.diagnostics).toEqual([]);
+    expect(parenthesized.program.body[0].decorators[0]).toMatchObject({
+      start: 0,
+      end: 19,
+      range: [0, 19],
+      expression: {
+        type: "MemberExpression",
+        start: 2,
+        end: 18,
+      },
+    });
+
+    const continuedParentheses = parse("@(factory)(value) class C {}", {
+      lang: "ts",
+      preserveParens: false,
+      semanticErrors: true,
+    });
+    expect(continuedParentheses.diagnostics).not.toEqual([]);
+
+    for (
+      const [invalidSource, options] of [
+        ["@factory()() class C {}", {}],
+        ["@decorator<T> class C {}", { lang: "ts", decoratorMode: "standard" }],
+        ["export @decorator class C {}", { sourceType: "module", decorators: false }],
+      ]
+    ) {
+      const invalid = parse(invalidSource, options);
+      expect(invalid.diagnostics, invalidSource).not.toEqual([]);
+      expect(invalid.panicked, invalidSource).toBe(false);
+    }
+
+    expect(parse("class Plain {}").program.body[0]).not.toHaveProperty("decorators");
+  });
 });

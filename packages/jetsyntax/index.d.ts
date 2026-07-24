@@ -1,5 +1,6 @@
 export type Language = "js" | "jsx" | "ts" | "tsx" | "dts";
 export type SourceType = "script" | "module" | "unambiguous" | "commonjs";
+export type DecoratorMode = "auto" | "standard" | "typescript";
 
 export interface ParseOptions {
   lang?: Language;
@@ -10,6 +11,8 @@ export interface ParseOptions {
   semanticErrors?: boolean;
   typescriptJsCompatibility?: boolean;
   optionalChainingAssign?: boolean;
+  decorators?: boolean;
+  decoratorMode?: DecoratorMode;
 }
 
 export interface Program {

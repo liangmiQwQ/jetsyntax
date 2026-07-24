@@ -3607,6 +3607,135 @@ fn parser_should_report_javascript_early_errors() {
     assert_diagnostic_cases(&cases, true);
 }
 
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parser_should_parse_class_decorators_and_preserve_restricted_grammar() {
+    let clean = [
+        GrammarCase::script(
+            "decorated declaration",
+            "@first @factory(value) class C {}",
+            &[NodeTag::DECORATOR, NodeTag::DECORATED_CLASS_DECLARATION],
+        ),
+        GrammarCase::script(
+            "decorated expression",
+            "const C = @(factory().member) class {};",
+            &[NodeTag::DECORATOR, NodeTag::DECORATED_CLASS_EXPRESSION],
+        ),
+        GrammarCase::module(
+            "decorators around separate exports",
+            "@first export class C {} export @second class D {}",
+            &[
+                NodeTag::DECORATOR,
+                NodeTag::DECORATED_CLASS_DECLARATION,
+                NodeTag::EXPORT_NAMED_DECLARATION,
+            ],
+        ),
+    ];
+    assert_clean_cases(&clean);
+
+    let invalid = [
+        GrammarCase::script(
+            "repeated decorator call",
+            "@factory()() class C {}",
+            &[NodeTag::CALL_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "member after decorator call",
+            "@factory().member class C {}",
+            &[NodeTag::CALL_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "call after decorator parentheses",
+            "@(factory)(value) class C {}",
+            &[NodeTag::PARENTHESIZED_EXPRESSION],
+        ),
+        GrammarCase::module(
+            "decorators on both sides of export",
+            "@first export @second class C {}",
+            &[NodeTag::DECORATOR, NodeTag::DECORATED_CLASS_DECLARATION],
+        ),
+        GrammarCase::script(
+            "decorated declaration in if clause",
+            "if (ready) @decorator class C {}",
+            &[NodeTag::DECORATED_CLASS_DECLARATION],
+        ),
+        GrammarCase::script(
+            "decorated declaration in labelled position",
+            "label: @decorator class C {}",
+            &[NodeTag::DECORATED_CLASS_DECLARATION],
+        ),
+        GrammarCase::module(
+            "decorator before invalid exported abstract class",
+            "@decorator export abstract class C {}",
+            &[NodeTag::EXPORT_NAMED_DECLARATION],
+        ),
+        GrammarCase::module(
+            "decorator after default before invalid abstract class",
+            "export default @decorator abstract class C {}",
+            &[NodeTag::EXPORT_DEFAULT_DECLARATION],
+        ),
+        GrammarCase::script(
+            "strict-body yield function name",
+            "function yield() { 'use strict'; }",
+            &[NodeTag::FUNCTION_DECLARATION],
+        ),
+    ];
+    assert_diagnostic_cases(&invalid, true);
+
+    let private_reference = parse(
+        "class Outer { static #decorator() {} static { @Outer.#decorator class Inner {} } }",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("enclosing private decorator reference");
+    assert!(
+        private_reference.diagnostics.is_empty(),
+        "{:#?}",
+        private_reference.diagnostics
+    );
+    private_reference
+        .tape
+        .validate()
+        .expect("valid private decorator tape");
+
+    let contextual_yield = parse(
+        "function yield() {} const named = function yield() {}; @yield class C {} const D = @(yield) class {};",
+        ParseOptions {
+            source_kind: SourceKind::Script,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("sloppy yield decorator");
+    assert!(
+        contextual_yield.diagnostics.is_empty(),
+        "{:#?}",
+        contextual_yield.diagnostics
+    );
+    contextual_yield
+        .tape
+        .validate()
+        .expect("valid contextual-yield tape");
+
+    let disabled = parse(
+        "@decorator class C {}",
+        ParseOptions {
+            semantic_errors: true,
+            syntax_extensions: SyntaxExtensions {
+                decorators: false,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("disabled decorator recovery");
+    assert!(!disabled.diagnostics.is_empty());
+    disabled.tape.validate().expect("valid recovery tape");
+}
+
 fn assert_clean_cases(cases: &[GrammarCase]) {
     let mut failures = Vec::new();
     for &case in cases {
