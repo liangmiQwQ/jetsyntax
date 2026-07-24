@@ -6370,6 +6370,112 @@ fn parses_typescript_class_decorator_expressions_and_standard_mode() {
         .expect("valid standard recovery tape");
 }
 
+#[test]
+fn parses_typescript_class_element_decorators_and_modifier_variants() {
+    let source = concat!(
+        "abstract class C {",
+        "@dec public method(): void {}",
+        "@dec protected abstract abstractMethod(): void;",
+        "@dec readonly field: string;",
+        "@dec abstract abstractField: string;",
+        "}"
+    );
+    let parsed = parse(source, typescript_options()).expect("TypeScript decorated elements");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid TypeScript decorated element tape");
+    assert_eq!(
+        node_fields(&parsed, NodeTag::DECORATED_CLASS_ELEMENT).count(),
+        4
+    );
+    for tag in [
+        NodeTag::TS_MODIFIED_METHOD_DEFINITION,
+        NodeTag::TS_ABSTRACT_METHOD_DEFINITION,
+        NodeTag::TS_MODIFIED_PROPERTY_DEFINITION,
+        NodeTag::TS_ABSTRACT_PROPERTY_DEFINITION,
+    ] {
+        assert_eq!(node_fields(&parsed, tag).count(), 1, "{tag:?}");
+    }
+
+    let syntax_only_constructor = parse("class C { @dec constructor() {} }", typescript_options())
+        .expect("syntax-only decorated constructor");
+    assert!(
+        syntax_only_constructor.diagnostics.is_empty(),
+        "{:#?}",
+        syntax_only_constructor.diagnostics
+    );
+
+    let semantic_constructor = parse(
+        "class C { @dec constructor() {} }",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("semantic decorated constructor");
+    assert_eq!(
+        semantic_constructor.diagnostics.len(),
+        1,
+        "{:#?}",
+        semantic_constructor.diagnostics
+    );
+    semantic_constructor
+        .tape
+        .validate()
+        .expect("valid constructor recovery tape");
+
+    let standard_abstract = parse(
+        "abstract class C { @dec abstract method(): void; @dec abstract field: string; }",
+        ParseOptions {
+            semantic_errors: true,
+            syntax_extensions: SyntaxExtensions {
+                decorator_mode: DecoratorMode::Standard,
+                ..SyntaxExtensions::default()
+            },
+            ..typescript_options()
+        },
+    )
+    .expect("standard decorators on abstract elements");
+    assert_eq!(
+        standard_abstract.diagnostics.len(),
+        2,
+        "{:#?}",
+        standard_abstract.diagnostics
+    );
+    standard_abstract
+        .tape
+        .validate()
+        .expect("valid abstract recovery tape");
+
+    let standard_declare = parse(
+        "class C { @dec declare field: string; }",
+        ParseOptions {
+            semantic_errors: true,
+            syntax_extensions: SyntaxExtensions {
+                decorator_mode: DecoratorMode::Standard,
+                ..SyntaxExtensions::default()
+            },
+            ..typescript_options()
+        },
+    )
+    .expect("standard decorator on a declare field");
+    assert!(!standard_declare.diagnostics.is_empty());
+    standard_declare
+        .tape
+        .validate()
+        .expect("valid declare-field recovery tape");
+
+    let misplaced = parse("class C { public @dec method() {} }", typescript_options())
+        .expect("misplaced element decorator");
+    assert!(!misplaced.diagnostics.is_empty());
+    misplaced
+        .tape
+        .validate()
+        .expect("valid misplaced decorator tape");
+}
+
 fn assert_clean_with_tags(name: &str, source: &str, expected_tags: &[NodeTag]) {
     let parsed = parse(source, typescript_options()).expect("parse");
     assert!(

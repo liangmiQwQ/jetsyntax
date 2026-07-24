@@ -176,6 +176,7 @@ impl NodeTag {
     pub const DECORATOR: Self = Self(75);
     pub const DECORATED_CLASS_DECLARATION: Self = Self(76);
     pub const DECORATED_CLASS_EXPRESSION: Self = Self(77);
+    pub const DECORATED_CLASS_ELEMENT: Self = Self(78);
 
     pub const JSX_IDENTIFIER: Self = Self(256);
     pub const JSX_MEMBER_EXPRESSION: Self = Self(257);
@@ -608,6 +609,16 @@ impl TapeBuilder {
         match *self.words.get(offset)? & !REFERENCE_MARKER {
             value if value == (KIND_BOOL << KIND_SHIFT) => Some(false),
             value if value == (KIND_BOOL << KIND_SHIFT) | 1 => Some(true),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn parser_u32(&self, offset: u32) -> Option<u32> {
+        let offset = usize::try_from(offset).ok()?;
+        let record = *self.words.get(offset)? & !REFERENCE_MARKER;
+        match (record & KIND_MASK) >> KIND_SHIFT {
+            KIND_INLINE_U32 => Some(record & MARKED_INLINE_U32_MASK),
+            KIND_U32 if record == KIND_U32 << KIND_SHIFT => self.words.get(offset + 1).copied(),
             _ => None,
         }
     }

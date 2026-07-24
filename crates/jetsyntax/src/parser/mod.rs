@@ -2368,6 +2368,75 @@ impl<'s> Parser<'s> {
         Ok(self.tape.push_list(&values)?)
     }
 
+    #[cold]
+    #[inline(never)]
+    fn parse_class_element_decorators(&mut self) -> Result<ParsedDecorators, ParseError> {
+        // Element decorators are evaluated outside the class body grammar even though private
+        // names and `super` still resolve in the surrounding class scope.
+        let previous_grammar = self.context.grammar();
+        self.context.set_grammar(previous_grammar.with_class(false));
+        let decorators = self.parse_decorator_list();
+        self.context.set_grammar(previous_grammar);
+        decorators
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn finish_decorated_class_element(
+        &mut self,
+        element: ParsedNode,
+        decorators: &ParsedDecorators,
+    ) -> Result<ParsedNode, ParseError> {
+        if self.reports_decorator_placement_errors()
+            && self.decorated_class_element_target_is_invalid(element.node)
+        {
+            self.error(
+                Span::new(decorators.start, element.span.end),
+                "decorators are not valid on this class element",
+            );
+        }
+        let decorator_list = self.push_decorator_list(decorators)?;
+        self.node(
+            NodeTag::DECORATED_CLASS_ELEMENT,
+            Span::new(decorators.start, element.span.end),
+            &[element.value(), decorator_list],
+        )
+    }
+
+    fn decorated_class_element_target_is_invalid(&self, element: NodeRef) -> bool {
+        let Some((tag, fields)) = self.tape.parser_node_fields(element.offset()) else {
+            return true;
+        };
+        let typescript_decorators = self.parses_typescript_decorator_expressions();
+        match tag {
+            NodeTag::METHOD_DEFINITION | NodeTag::TS_MODIFIED_METHOD_DEFINITION => {
+                let constructor =
+                    fields.get(2).and_then(|&kind| self.tape.parser_u32(kind)) == Some(3);
+                let bodyless = fields.get(1).is_some_and(|&function| {
+                    self.tape
+                        .parser_node_fields(function)
+                        .is_some_and(|(tag, _)| tag == NodeTag::TS_EMPTY_BODY_FUNCTION_EXPRESSION)
+                });
+                let private = fields.first().is_some_and(|&key| {
+                    self.tape
+                        .parser_node_fields(key)
+                        .is_some_and(|(tag, _)| tag == NodeTag::PRIVATE_IDENTIFIER)
+                });
+                constructor || bodyless || typescript_decorators && private
+            }
+            NodeTag::PROPERTY_DEFINITION | NodeTag::TS_MODIFIED_PROPERTY_DEFINITION => {
+                typescript_decorators
+                    && fields.first().is_some_and(|&key| {
+                        self.tape
+                            .parser_node_fields(key)
+                            .is_some_and(|(tag, _)| tag == NodeTag::PRIVATE_IDENTIFIER)
+                    })
+            }
+            NodeTag::TS_ABSTRACT_PROPERTY_DEFINITION => !typescript_decorators,
+            _ => true,
+        }
+    }
+
     fn append_decorators(
         decorators: &mut Option<ParsedDecorators>,
         mut trailing: ParsedDecorators,
@@ -2457,7 +2526,16 @@ impl<'s> Parser<'s> {
             if self.eat(TokenKind::Semicolon).is_some() {
                 continue;
             }
-            elements.push(self.parse_class_element()?.value());
+            let element = if self.current.kind == TokenKind::At
+                && self.options.syntax_extensions.decorators
+            {
+                let decorators = self.parse_class_element_decorators()?;
+                let element = self.parse_class_element()?;
+                self.finish_decorated_class_element(element, &decorators)?
+            } else {
+                self.parse_class_element()?
+            };
+            elements.push(element.value());
         }
         let end = self.expect(TokenKind::RightBrace).end;
         self.context.set_grammar(previous_grammar);
@@ -2679,10 +2757,17 @@ impl<'s> Parser<'s> {
             if self.eat(TokenKind::Semicolon).is_some() {
                 continue;
             }
-            elements.push(
+            let element = if self.current.kind == TokenKind::At
+                && self.options.syntax_extensions.decorators
+            {
+                let decorators = self.parse_class_element_decorators()?;
+                let element =
+                    self.parse_typescript_class_element(saw_extends, modifiers.abstract_class)?;
+                self.finish_decorated_class_element(element, &decorators)?
+            } else {
                 self.parse_typescript_class_element(saw_extends, modifiers.abstract_class)?
-                    .value(),
-            );
+            };
+            elements.push(element.value());
         }
         let end = self.expect(TokenKind::RightBrace).end;
         self.context.set_grammar(previous_grammar);

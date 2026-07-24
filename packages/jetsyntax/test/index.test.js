@@ -4981,4 +4981,39 @@ describe("parse", () => {
 
     expect(parse("class Plain {}").program.body[0]).not.toHaveProperty("decorators");
   });
+
+  it("attaches class element decorators directly to ESTree definitions", () => {
+    const source = "class C { @first @second public static method() {} @field value = 1; plain() {} }";
+    const result = parse(source, {
+      lang: "ts",
+      range: true,
+      semanticErrors: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body[0].body.body).toMatchObject([
+      {
+        type: "MethodDefinition",
+        start: 10,
+        range: [10, 50],
+        key: { type: "Identifier", name: "method", start: 39 },
+        accessibility: "public",
+        static: true,
+        decorators: [
+          { type: "Decorator", start: 10, end: 16, expression: { name: "first" } },
+          { type: "Decorator", start: 17, end: 24, expression: { name: "second" } },
+        ],
+      },
+      {
+        type: "PropertyDefinition",
+        start: 51,
+        key: { type: "Identifier", name: "value" },
+        decorators: [{ type: "Decorator", start: 51, end: 57, expression: { name: "field" } }],
+      },
+      {
+        type: "MethodDefinition",
+        key: { type: "Identifier", name: "plain" },
+      },
+    ]);
+    expect(result.program.body[0].body.body[2]).not.toHaveProperty("decorators");
+  });
 });

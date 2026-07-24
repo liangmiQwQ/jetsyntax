@@ -26,6 +26,17 @@ const KIND_F64 = 7;
 const KIND_SOURCE_SLICE = 8;
 const KIND_POOL_STRING = 9;
 
+const CLASS_ELEMENT_TYPES = new Set([
+  "AccessorProperty",
+  "MethodDefinition",
+  "PropertyDefinition",
+  "StaticBlock",
+  "TSAbstractAccessorProperty",
+  "TSAbstractMethodDefinition",
+  "TSAbstractPropertyDefinition",
+  "TSIndexSignature",
+]);
+
 const HOST_LITTLE_ENDIAN = new Uint8Array(Uint32Array.of(0x0102_0304).buffer)[0] === 4;
 
 const HEADER_TOTAL_WORDS = 4;
@@ -123,6 +134,7 @@ for (
     [75, ["Decorator", ["expression"]]],
     [76, ["ClassDeclaration", ["id", "superClass", "body", "decorators"]]],
     [77, ["ClassExpression", ["id", "superClass", "body", "decorators"]]],
+    [78, ["DecoratedClassElement", ["element", "decorators"]]],
     [256, ["JSXIdentifier", ["name"]]],
     [259, ["JSXElement", ["openingElement", "closingElement", "children"]]],
     [261, ["JSXOpeningElement", ["name", "attributes", "selfClosing"]]],
@@ -887,6 +899,25 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.body = fields[2];
         node.decorators = array(fields[3], tag);
         return node;
+      case 78: {
+        if ((record & NODE_FLAGS_MASK) !== 0) {
+          throw new Error("invalid decorated class element flags");
+        }
+        const element = fields[0];
+        if (
+          element === null
+          || typeof element !== "object"
+          || Array.isArray(element)
+          || !CLASS_ELEMENT_TYPES.has(element.type)
+        ) {
+          throw new Error("JetSyntax decorated class element expected a class element field");
+        }
+        element.start = start;
+        element.end = end;
+        if (options.range) element.range = [start, end];
+        element.decorators = array(fields[1], tag);
+        return element;
+      }
       case 59:
         node.body = array(fields[0], tag);
         return node;

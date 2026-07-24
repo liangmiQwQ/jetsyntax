@@ -961,6 +961,70 @@ describe("decodeTape", () => {
     expect(decoded.body[0].body.body[0].value).not.toHaveProperty("returnType");
   });
 
+  it("unwraps decorated class elements onto their ESTree definitions", () => {
+    const source = "@first @second method() {}";
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      const tape = new HandcraftedTape();
+      const key = tape.node(2, 15, 21, [tape.string("method")]);
+      const method = tape.node(573, 15, source.length, [
+        key,
+        tape.null(),
+        tape.integer(0),
+        tape.boolean(false),
+        tape.boolean(false),
+      ], 0x09);
+      const firstExpression = tape.node(2, 1, 6, [tape.string("first")]);
+      const first = tape.node(75, 0, 6, [firstExpression]);
+      const secondExpression = tape.node(2, 8, 14, [tape.string("second")]);
+      const second = tape.node(75, 7, 14, [secondExpression]);
+      const decorated = tape.node(78, 0, source.length, [
+        method,
+        tape.list([first, second]),
+      ]);
+
+      expect(decode(source, tape.finish(decorated), { range: true })).toMatchObject({
+        type: "MethodDefinition",
+        start: 0,
+        end: source.length,
+        range: [0, source.length],
+        key: { name: "method", start: 15 },
+        accessibility: "public",
+        override: true,
+        decorators: [
+          { type: "Decorator", start: 0, end: 6, expression: { name: "first" } },
+          { type: "Decorator", start: 7, end: 14, expression: { name: "second" } },
+        ],
+      });
+    }
+  });
+
+  it("rejects malformed decorated class element records", () => {
+    for (
+      const [element, flags, message] of [
+        ["null", 0, "JetSyntax decorated class element expected a class element field"],
+        ["identifier", 0, "JetSyntax decorated class element expected a class element field"],
+        ["node", 1, "invalid decorated class element flags"],
+      ]
+    ) {
+      const tape = new HandcraftedTape();
+      const value = element === "null"
+        ? tape.null()
+        : element === "identifier"
+        ? tape.node(2, 0, 0, [tape.string("value")])
+        : tape.node(61, 0, 0, [
+          tape.node(2, 0, 0, [tape.string("field")]),
+          tape.null(),
+          tape.boolean(false),
+          tape.boolean(false),
+          tape.null(),
+        ]);
+      const encoded = tape.finish(tape.node(78, 0, 0, [value, tape.list([])], flags));
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(message);
+      }
+    }
+  });
+
   it("rejects malformed bodyless function field counts", () => {
     for (const count of [4, 6]) {
       const tape = new HandcraftedTape();

@@ -3736,6 +3736,101 @@ fn parser_should_parse_class_decorators_and_preserve_restricted_grammar() {
     disabled.tape.validate().expect("valid recovery tape");
 }
 
+#[test]
+fn parser_should_parse_class_element_decorators_without_touching_plain_tapes() {
+    let source = concat!(
+        "class C {",
+        "@first @second static method() {}",
+        "@dec *generator() {}",
+        "@dec get value() {}",
+        "@dec set value(next) {}",
+        "@dec field = 1;",
+        "@dec #private;",
+        "@dec [computed]() {}",
+        "nested() { return class { @dec member() {} }; }",
+        "}"
+    );
+    let parsed = parse(
+        source,
+        ParseOptions {
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("decorated class elements");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid decorated element tape");
+    let tags = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node { tag, .. } => Some(tag),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tags.iter()
+            .filter(|&&tag| tag == NodeTag::DECORATED_CLASS_ELEMENT)
+            .count(),
+        8
+    );
+    assert_eq!(
+        tags.iter()
+            .filter(|&&tag| tag == NodeTag::DECORATOR)
+            .count(),
+        9
+    );
+
+    let contextual_await = parse(
+        "class C { @await method() {} @await() field; @(await) another; }",
+        ParseOptions {
+            semantic_errors: true,
+            source_kind: SourceKind::Script,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("contextual await element decorators");
+    assert!(
+        contextual_await.diagnostics.is_empty(),
+        "{:#?}",
+        contextual_await.diagnostics
+    );
+    contextual_await
+        .tape
+        .validate()
+        .expect("valid contextual-await tape");
+
+    let invalid = parse(
+        "class C { @dec constructor() {} @dec static {} }",
+        ParseOptions {
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("invalid decorated targets");
+    assert_eq!(invalid.diagnostics.len(), 2, "{:#?}", invalid.diagnostics);
+    invalid.tape.validate().expect("valid invalid-target tape");
+
+    let plain_source = "class C { static method() {} get value() {} field = 1; #private; }";
+    let enabled = parse(plain_source, ParseOptions::default()).expect("enabled decorators");
+    let disabled = parse(
+        plain_source,
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                decorators: false,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("disabled decorators");
+    assert_eq!(enabled.tape.words(), disabled.tape.words());
+}
+
 fn assert_clean_cases(cases: &[GrammarCase]) {
     let mut failures = Vec::new();
     for &case in cases {
