@@ -190,6 +190,13 @@ enum PostfixPolicy {
     ClassHeritage,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TypeScriptBindingMetadata {
+    None,
+    TypeAnnotation,
+    Parameter,
+}
+
 impl MethodBodyPolicy {
     fn permits_bodyless(
         self,
@@ -332,6 +339,7 @@ struct ParsedParameterList {
     has_trailing_comma: bool,
     simple: bool,
     parameter_property_spans: Option<Vec<Span>>,
+    optional_pattern_spans: Option<Vec<Span>>,
 }
 
 struct ParsedParameters {
@@ -340,6 +348,7 @@ struct ParsedParameters {
     has_trailing_comma: bool,
     simple: bool,
     parameter_property_spans: Option<Vec<Span>>,
+    optional_pattern_spans: Option<Vec<Span>>,
 }
 
 #[derive(Clone, Copy)]
@@ -893,6 +902,14 @@ impl<'s> Parser<'s> {
             {
                 self.error(id.span, "using declarations require an initializer");
             }
+            if !binding_is_identifier
+                && consume_semicolon
+                && self.reports_ecmascript_early_errors()
+                && !self.in_ambient_declaration()
+                && !explicit_typescript_declare
+            {
+                self.error(id.span, "missing initializer in destructuring declaration");
+            }
             self.tape.push_null()?
         };
         let end = self.previous_end(fallback_end);
@@ -1260,6 +1277,7 @@ impl<'s> Parser<'s> {
                 None,
             );
         }
+        self.diagnose_optional_binding_patterns(params.optional_pattern_spans.as_deref());
         let return_type = return_type.map(ParsedNode::value);
         if !self.context.grammar().ambient()
             && let Some(span) = rest_trailing_comma_span
@@ -1505,6 +1523,18 @@ impl<'s> Parser<'s> {
         }
     }
 
+    fn diagnose_optional_binding_patterns(&mut self, spans: Option<&[Span]>) {
+        if !self.options.semantic_errors {
+            return;
+        }
+        for &span in spans.unwrap_or_default() {
+            self.error(
+                span,
+                "a binding pattern parameter cannot be optional in an implementation signature",
+            );
+        }
+    }
+
     fn diagnose_strict_function_parameters(
         &mut self,
         params: &ParsedParameterList,
@@ -1538,6 +1568,7 @@ impl<'s> Parser<'s> {
             has_trailing_comma: params.has_trailing_comma,
             simple: params.simple,
             parameter_property_spans: params.parameter_property_spans,
+            optional_pattern_spans: params.optional_pattern_spans,
         })
     }
 
@@ -1550,18 +1581,27 @@ impl<'s> Parser<'s> {
         let mut has_trailing_comma = false;
         let mut simple = true;
         let mut parameter_property_spans = None;
+        let mut optional_pattern_spans = None;
         while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
             let parameter_property = self.parse_typescript_parameter_property_modifiers();
             let rest = self.eat(TokenKind::Ellipsis);
             let binding_span =
                 Self::is_identifier_name(self.current.kind).then(|| Self::token_span(self.current));
-            let parameter = if rest.is_some() {
+            let mut optional_pattern_span = None;
+            let parameter = if let Some(rest) = rest {
                 has_rest = true;
                 simple = false;
-                let argument = self.parse_binding_pattern(BindingKind::Parameter)?;
-                self.parse_binding_rest_element(argument)?
+                let argument =
+                    self.parse_binding_pattern_without_metadata(BindingKind::Parameter)?;
+                self.parse_binding_rest_element(
+                    rest.start,
+                    argument,
+                    TypeScriptBindingMetadata::Parameter,
+                    &mut optional_pattern_span,
+                )?
             } else {
-                let pattern = self.parse_parameter_binding()?;
+                let (pattern, pattern_optional_span) = self.parse_parameter_binding()?;
+                optional_pattern_span = pattern_optional_span;
                 let binding_pattern = self.last_node_tag != Some(NodeTag::IDENTIFIER);
                 if self.current.kind == TokenKind::Eq {
                     simple = false;
@@ -1605,6 +1645,11 @@ impl<'s> Parser<'s> {
             } else {
                 parameter
             };
+            if let Some(span) = optional_pattern_span {
+                optional_pattern_spans
+                    .get_or_insert_with(Vec::new)
+                    .push(span);
+            }
             values.push(parameter.value());
             if self.eat(TokenKind::Comma).is_none() {
                 break;
@@ -1621,6 +1666,7 @@ impl<'s> Parser<'s> {
             has_trailing_comma,
             simple,
             parameter_property_spans,
+            optional_pattern_spans,
         })
     }
 
@@ -1821,11 +1867,20 @@ impl<'s> Parser<'s> {
         }
     }
 
-    fn parse_parameter_binding(&mut self) -> Result<ParsedNode, ParseError> {
+    fn parse_parameter_binding(&mut self) -> Result<(ParsedNode, Option<Span>), ParseError> {
         if Self::is_identifier_name(self.current.kind) {
-            self.parse_binding_identifier_with_optional(BindingKind::Parameter)
+            Ok((
+                self.parse_binding_identifier_with_optional(BindingKind::Parameter)?,
+                None,
+            ))
         } else {
-            self.parse_binding_pattern(BindingKind::Parameter)
+            let mut optional_pattern_span = None;
+            let pattern = self.parse_binding_pattern_with_metadata(
+                BindingKind::Parameter,
+                TypeScriptBindingMetadata::Parameter,
+                &mut optional_pattern_span,
+            )?;
+            Ok((pattern, optional_pattern_span))
         }
     }
 
@@ -1952,6 +2007,7 @@ impl<'s> Parser<'s> {
                 return_type.map(ParsedNode::value),
             );
         }
+        self.diagnose_optional_binding_patterns(params.optional_pattern_spans.as_deref());
         if !previous_grammar.grammar.ambient()
             && let Some(span) = rest_trailing_comma_span
         {
@@ -5620,6 +5676,7 @@ impl<'s> Parser<'s> {
                 "an arrow function with non-simple parameters cannot contain a use strict directive",
             );
         }
+        self.diagnose_optional_binding_patterns(parameters.optional_pattern_spans.as_deref());
         let arrow = self.parse_arrow_function(
             start,
             &parameters.values,
@@ -5640,22 +5697,30 @@ impl<'s> Parser<'s> {
         self.context
             .set_grammar(self.context.grammar().with_parameters(true));
         let parenthesized = self.eat(TokenKind::LeftParen).is_some();
-        let (parameters, simple_parameters, invalid_rest_trailing_comma) = if parenthesized {
-            let parameters = self.parse_parameters(false)?;
-            let invalid_rest_trailing_comma = parameters.has_rest && parameters.has_trailing_comma;
-            let simple = parameters.simple;
-            let values = parameters.values;
-            (values, simple, invalid_rest_trailing_comma)
-        } else {
-            (
-                vec![
-                    self.parse_binding_identifier(BindingKind::Parameter)?
-                        .value(),
-                ],
-                true,
-                false,
-            )
-        };
+        let (parameters, simple_parameters, invalid_rest_trailing_comma, optional_pattern_spans) =
+            if parenthesized {
+                let parameters = self.parse_parameters(false)?;
+                let invalid_rest_trailing_comma =
+                    parameters.has_rest && parameters.has_trailing_comma;
+                let simple = parameters.simple;
+                let values = parameters.values;
+                (
+                    values,
+                    simple,
+                    invalid_rest_trailing_comma,
+                    parameters.optional_pattern_spans,
+                )
+            } else {
+                (
+                    vec![
+                        self.parse_binding_identifier(BindingKind::Parameter)?
+                            .value(),
+                    ],
+                    true,
+                    false,
+                    None,
+                )
+            };
         if parenthesized {
             self.expect(TokenKind::RightParen);
         }
@@ -5683,6 +5748,7 @@ impl<'s> Parser<'s> {
                 "an arrow function with non-simple parameters cannot contain a use strict directive",
             );
         }
+        self.diagnose_optional_binding_patterns(optional_pattern_spans.as_deref());
         let arrow = self.parse_arrow_function(
             start,
             &parameters,
@@ -7618,7 +7684,7 @@ impl<'s> Parser<'s> {
         &mut self,
         binding_kind: BindingKind,
     ) -> Result<ParsedNode, ParseError> {
-        self.parse_binding_identifier_impl(binding_kind, false)
+        self.parse_binding_identifier_impl(binding_kind, TypeScriptBindingMetadata::None)
     }
 
     fn parse_import_binding_identifier(
@@ -7679,13 +7745,13 @@ impl<'s> Parser<'s> {
         &mut self,
         binding_kind: BindingKind,
     ) -> Result<ParsedNode, ParseError> {
-        self.parse_binding_identifier_impl(binding_kind, true)
+        self.parse_binding_identifier_impl(binding_kind, TypeScriptBindingMetadata::Parameter)
     }
 
     fn parse_binding_identifier_impl(
         &mut self,
         binding_kind: BindingKind,
-        allow_optional: bool,
+        metadata: TypeScriptBindingMetadata,
     ) -> Result<ParsedNode, ParseError> {
         let token = self.take();
         let span = Self::token_span(token);
@@ -7700,17 +7766,21 @@ impl<'s> Parser<'s> {
             .unwrap_or_default();
         let _ = self.declare_binding(name_text, binding_kind, span);
         let name = self.tape.push_source_slice(span)?;
-        let optional_marker = if self.options.language.is_typescript() && allow_optional {
+        let optional_marker = if self.options.language.is_typescript()
+            && metadata == TypeScriptBindingMetadata::Parameter
+        {
             self.eat(TokenKind::Question)
         } else {
             None
         };
-        let annotation =
-            if self.options.language.is_typescript() && self.eat(TokenKind::Colon).is_some() {
-                Some(self.parse_type_annotation()?)
-            } else {
-                None
-            };
+        let annotation = if self.options.language.is_typescript()
+            && metadata != TypeScriptBindingMetadata::None
+            && let Some(colon) = self.eat(TokenKind::Colon)
+        {
+            Some(self.parse_type_annotation_with_delimiter(colon)?)
+        } else {
+            None
+        };
         if optional_marker.is_some() || annotation.is_some() {
             let end = annotation.as_ref().map_or_else(
                 || {
@@ -7781,6 +7851,33 @@ impl<'s> Parser<'s> {
         &mut self,
         binding_kind: BindingKind,
     ) -> Result<ParsedNode, ParseError> {
+        let mut optional_pattern_span = None;
+        self.parse_binding_pattern_with_metadata(
+            binding_kind,
+            TypeScriptBindingMetadata::TypeAnnotation,
+            &mut optional_pattern_span,
+        )
+    }
+
+    fn parse_binding_pattern_without_metadata(
+        &mut self,
+        binding_kind: BindingKind,
+    ) -> Result<ParsedNode, ParseError> {
+        let mut optional_pattern_span = None;
+        self.parse_binding_pattern_with_metadata(
+            binding_kind,
+            TypeScriptBindingMetadata::None,
+            &mut optional_pattern_span,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn parse_binding_pattern_with_metadata(
+        &mut self,
+        binding_kind: BindingKind,
+        metadata: TypeScriptBindingMetadata,
+        optional_pattern_span: &mut Option<Span>,
+    ) -> Result<ParsedNode, ParseError> {
         match self.current.kind {
             TokenKind::LeftBracket => {
                 let start = self.take().start;
@@ -7790,10 +7887,16 @@ impl<'s> Parser<'s> {
                         elements.push(self.tape.push_null()?);
                         continue;
                     }
-                    let rest = self.eat(TokenKind::Ellipsis).is_some();
-                    let element = if rest {
-                        let argument = self.parse_binding_pattern(binding_kind)?;
-                        self.parse_binding_rest_element(argument)?
+                    let rest = self.eat(TokenKind::Ellipsis);
+                    let element = if let Some(rest) = rest {
+                        let argument = self.parse_binding_pattern_without_metadata(binding_kind)?;
+                        let mut ignored_optional_pattern_span = None;
+                        self.parse_binding_rest_element(
+                            rest.start,
+                            argument,
+                            TypeScriptBindingMetadata::None,
+                            &mut ignored_optional_pattern_span,
+                        )?
                     } else {
                         self.parse_binding_element(binding_kind)?
                     };
@@ -7801,22 +7904,43 @@ impl<'s> Parser<'s> {
                     let Some(comma) = self.eat(TokenKind::Comma) else {
                         break;
                     };
-                    if rest {
+                    if rest.is_some() {
                         self.error(Self::token_span(comma), "rest element must be last");
                     }
                 }
                 let end = self.expect(TokenKind::RightBracket).end;
                 let elements = self.tape.push_list(&elements)?;
-                self.node(NodeTag::ARRAY_PATTERN, Span::new(start, end), &[elements])
+                self.finish_binding_pattern(
+                    NodeTag::ARRAY_PATTERN,
+                    start,
+                    end,
+                    elements,
+                    metadata,
+                    optional_pattern_span,
+                )
             }
             TokenKind::LeftBrace => {
                 let start = self.take().start;
                 let mut properties = Vec::new();
                 while !matches!(self.current.kind, TokenKind::RightBrace | TokenKind::Eof) {
-                    let rest = self.eat(TokenKind::Ellipsis).is_some();
-                    if rest {
-                        let argument = self.parse_binding_identifier(binding_kind)?;
-                        properties.push(self.parse_binding_rest_element(argument)?.value());
+                    let rest = self.eat(TokenKind::Ellipsis);
+                    if let Some(rest) = rest {
+                        // TypeScript's syntax parser accepts a type annotation on an object-rest
+                        // binding even though later phases reject the property shape.
+                        let argument = self.parse_binding_identifier_impl(
+                            binding_kind,
+                            TypeScriptBindingMetadata::TypeAnnotation,
+                        )?;
+                        let mut ignored_optional_pattern_span = None;
+                        properties.push(
+                            self.parse_binding_rest_element(
+                                rest.start,
+                                argument,
+                                TypeScriptBindingMetadata::None,
+                                &mut ignored_optional_pattern_span,
+                            )?
+                            .value(),
+                        );
                     } else {
                         let property_start = self.current.start;
                         let capture = self.export_binding_capture;
@@ -7860,27 +7984,82 @@ impl<'s> Parser<'s> {
                     let Some(comma) = self.eat(TokenKind::Comma) else {
                         break;
                     };
-                    if rest {
+                    if rest.is_some() {
                         self.error(Self::token_span(comma), "rest property must be last");
                     }
                 }
                 let end = self.expect(TokenKind::RightBrace).end;
                 let properties = self.tape.push_list(&properties)?;
-                self.node(
+                self.finish_binding_pattern(
                     NodeTag::OBJECT_PATTERN,
-                    Span::new(start, end),
-                    &[properties],
+                    start,
+                    end,
+                    properties,
+                    metadata,
+                    optional_pattern_span,
                 )
             }
-            _ => self.parse_binding_identifier(binding_kind),
+            _ => self.parse_binding_identifier_impl(binding_kind, metadata),
         }
+    }
+
+    fn finish_binding_pattern(
+        &mut self,
+        tag: NodeTag,
+        start: u32,
+        pattern_end: u32,
+        items: ValueRef,
+        metadata: TypeScriptBindingMetadata,
+        optional_pattern_span: &mut Option<Span>,
+    ) -> Result<ParsedNode, ParseError> {
+        let (annotation, optional, end) =
+            self.parse_typescript_binding_metadata(metadata, pattern_end)?;
+        if let Some(marker) = optional {
+            *optional_pattern_span = Some(Self::token_span(marker));
+        }
+        if annotation.is_some() || optional.is_some() {
+            let annotation = if let Some(annotation) = annotation {
+                annotation.value()
+            } else {
+                self.tape.push_null()?
+            };
+            let optional = self.tape.push_bool(optional.is_some())?;
+            self.node(tag, Span::new(start, end), &[items, annotation, optional])
+        } else {
+            self.node(tag, Span::new(start, pattern_end), &[items])
+        }
+    }
+
+    fn parse_typescript_binding_metadata(
+        &mut self,
+        metadata: TypeScriptBindingMetadata,
+        fallback_end: u32,
+    ) -> Result<(Option<ParsedNode>, Option<Token>, u32), ParseError> {
+        if !self.options.language.is_typescript() || metadata == TypeScriptBindingMetadata::None {
+            return Ok((None, None, fallback_end));
+        }
+        let optional = if metadata == TypeScriptBindingMetadata::Parameter {
+            self.eat(TokenKind::Question)
+        } else {
+            None
+        };
+        let annotation = if let Some(colon) = self.eat(TokenKind::Colon) {
+            Some(self.parse_type_annotation_with_delimiter(colon)?)
+        } else {
+            None
+        };
+        let end = annotation.as_ref().map_or_else(
+            || optional.map_or(fallback_end, |marker| marker.end),
+            ParsedNode::end,
+        );
+        Ok((annotation, optional, end))
     }
 
     fn parse_binding_element(
         &mut self,
         binding_kind: BindingKind,
     ) -> Result<ParsedNode, ParseError> {
-        let pattern = self.parse_binding_pattern(binding_kind)?;
+        let pattern = self.parse_binding_pattern_without_metadata(binding_kind)?;
         self.parse_binding_default(pattern)
     }
 
@@ -7911,8 +8090,16 @@ impl<'s> Parser<'s> {
 
     fn parse_binding_rest_element(
         &mut self,
+        start: u32,
         mut argument: ParsedNode,
+        metadata: TypeScriptBindingMetadata,
+        optional_pattern_span: &mut Option<Span>,
     ) -> Result<ParsedNode, ParseError> {
+        let (annotation, optional, metadata_end) =
+            self.parse_typescript_binding_metadata(metadata, argument.span.end)?;
+        if let Some(marker) = optional {
+            *optional_pattern_span = Some(Self::token_span(marker));
+        }
         if let Some(equals) = self.eat(TokenKind::Eq) {
             self.error(
                 Self::token_span(equals),
@@ -7929,7 +8116,26 @@ impl<'s> Parser<'s> {
                 &[argument.value(), right.value()],
             )?;
         }
-        self.node(NodeTag::REST_ELEMENT, argument.span, &[argument.value()])
+        let end = argument.span.end.max(metadata_end);
+        if annotation.is_some() || optional.is_some() {
+            let annotation = if let Some(annotation) = annotation {
+                annotation.value()
+            } else {
+                self.tape.push_null()?
+            };
+            let optional = self.tape.push_bool(optional.is_some())?;
+            self.node(
+                NodeTag::REST_ELEMENT,
+                Span::new(start, end),
+                &[argument.value(), annotation, optional],
+            )
+        } else {
+            self.node(
+                NodeTag::REST_ELEMENT,
+                Span::new(start, end),
+                &[argument.value()],
+            )
+        }
     }
 
     fn binding_identifier_from_span(
@@ -7967,6 +8173,18 @@ impl<'s> Parser<'s> {
         self.node(
             NodeTag::TS_TYPE_ANNOTATION,
             annotation.span,
+            &[annotation.value()],
+        )
+    }
+
+    fn parse_type_annotation_with_delimiter(
+        &mut self,
+        delimiter: Token,
+    ) -> Result<ParsedNode, ParseError> {
+        let annotation = self.parse_type()?;
+        self.node(
+            NodeTag::TS_TYPE_ANNOTATION,
+            Span::new(delimiter.start, annotation.span.end),
             &[annotation.value()],
         )
     }
@@ -8433,68 +8651,56 @@ impl<'s> Parser<'s> {
 
     fn parse_type_signature_parameters(&mut self) -> Result<(ValueRef, u32), ParseError> {
         self.expect(TokenKind::LeftParen);
+        self.context.enter_scope(ScopeKind::Function);
         let mut parameters = Vec::new();
         while !matches!(self.current.kind, TokenKind::RightParen | TokenKind::Eof) {
             let parameter_property = self.parse_typescript_parameter_property_modifiers();
             let rest = self.eat(TokenKind::Ellipsis);
             let inner_start = rest.map_or(self.current.start, |token| token.start);
             let parameter_start = parameter_property.map_or(inner_start, |(start, _)| start);
-            let name_token = self.take();
-            if !Self::is_identifier_name(name_token.kind) && name_token.kind != TokenKind::This {
-                self.error(Self::token_span(name_token), "expected a parameter name");
-            }
-            let name = self.tape.push_source_slice(Self::token_span(name_token))?;
-            let optional = self.eat(TokenKind::Question);
-            if name_token.kind == TokenKind::This {
-                if let Some(token) = rest {
+            let binding_pattern = matches!(
+                self.current.kind,
+                TokenKind::LeftBracket | TokenKind::LeftBrace
+            );
+            let binding_span = (!binding_pattern && Self::is_identifier_name(self.current.kind))
+                .then(|| Self::token_span(self.current));
+            let mut optional_pattern_span = None;
+            let argument = if binding_pattern {
+                self.parse_binding_pattern_with_metadata(
+                    BindingKind::Parameter,
+                    if rest.is_some() {
+                        TypeScriptBindingMetadata::None
+                    } else {
+                        TypeScriptBindingMetadata::Parameter
+                    },
+                    &mut optional_pattern_span,
+                )?
+            } else if self.current.kind == TokenKind::This {
+                self.parse_type_signature_this_parameter(rest.is_none())?
+            } else if rest.is_some() {
+                self.parse_binding_identifier(BindingKind::Parameter)?
+            } else {
+                self.parse_binding_identifier_with_optional(BindingKind::Parameter)?
+            };
+            let mut parameter = if let Some(rest) = rest {
+                if self.last_node_tag == Some(NodeTag::IDENTIFIER)
+                    && self.static_property_name_matches(argument.span, "this")
+                {
                     self.error(
-                        Self::token_span(token),
+                        Self::token_span(rest),
                         "a this parameter cannot be a rest parameter",
                     );
                 }
-                if let Some(token) = optional {
-                    self.error(
-                        Self::token_span(token),
-                        "a this parameter cannot be optional",
-                    );
-                }
-            }
-            let annotation = if self.eat(TokenKind::Colon).is_some() {
-                Some(self.parse_type_annotation()?)
-            } else {
-                None
-            };
-            let identifier = if annotation.is_some() || optional.is_some() {
-                let end = annotation.map_or_else(
-                    || optional.map_or(name_token.end, |token| token.end),
-                    |node| node.span.end,
-                );
-                let annotation = match annotation {
-                    Some(node) => node.value(),
-                    None => self.tape.push_null()?,
-                };
-                let optional = self.tape.push_bool(optional.is_some())?;
-                self.node(
-                    NodeTag::IDENTIFIER,
-                    Span::new(name_token.start, end),
-                    &[name, annotation, optional],
+                self.parse_binding_rest_element(
+                    rest.start,
+                    argument,
+                    TypeScriptBindingMetadata::Parameter,
+                    &mut optional_pattern_span,
                 )?
             } else {
-                self.node(NodeTag::IDENTIFIER, Self::token_span(name_token), &[name])?
-            };
-            let mut parameter = if rest.is_some() {
-                self.node(
-                    NodeTag::REST_ELEMENT,
-                    Span::new(inner_start, identifier.span.end),
-                    &[identifier.value()],
-                )?
-            } else {
-                identifier
+                argument
             };
             if let Some((_, modifiers)) = parameter_property {
-                let binding_pattern = !Self::is_identifier_name(name_token.kind)
-                    && name_token.kind != TokenKind::This;
-                let binding_span = (!binding_pattern).then(|| Self::token_span(name_token));
                 self.diagnose_typescript_parameter_property_parameter(
                     parameter.span,
                     binding_span,
@@ -8516,7 +8722,49 @@ impl<'s> Parser<'s> {
             }
         }
         let end = self.expect(TokenKind::RightParen).end;
+        let _ = self.context.leave_scope();
         Ok((self.tape.push_list(&parameters)?, end))
+    }
+
+    fn parse_type_signature_this_parameter(
+        &mut self,
+        metadata: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let token = self.take();
+        let name = self.tape.push_source_slice(Self::token_span(token))?;
+        if !metadata {
+            return self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name]);
+        }
+        let optional = self.eat(TokenKind::Question);
+        if let Some(optional) = optional {
+            self.error(
+                Self::token_span(optional),
+                "a this parameter cannot be optional",
+            );
+        }
+        let annotation = if let Some(colon) = self.eat(TokenKind::Colon) {
+            Some(self.parse_type_annotation_with_delimiter(colon)?)
+        } else {
+            None
+        };
+        if annotation.is_none() && optional.is_none() {
+            return self.node(NodeTag::IDENTIFIER, Self::token_span(token), &[name]);
+        }
+        let end = annotation.as_ref().map_or_else(
+            || optional.map_or(token.end, |marker| marker.end),
+            ParsedNode::end,
+        );
+        let annotation = if let Some(annotation) = annotation {
+            annotation.value()
+        } else {
+            self.tape.push_null()?
+        };
+        let optional = self.tape.push_bool(optional.is_some())?;
+        self.node(
+            NodeTag::IDENTIFIER,
+            Span::new(token.start, end),
+            &[name, annotation, optional],
+        )
     }
 
     fn parse_tuple_type(&mut self) -> Result<ParsedNode, ParseError> {

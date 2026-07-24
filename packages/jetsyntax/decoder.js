@@ -625,23 +625,21 @@ function decodeTapeInternal(source, tape, options, trusted) {
     }
 
     const fieldCount = tape[offset + 4];
-    // TypeScript annotations extend the compact JavaScript function and arrow shapes.
-    const functionNode = tag === 25 || tag === 26;
-    const arrowNode = tag === 27;
-    const validFieldCount = tag === 2
-      ? fieldCount === 1 || fieldCount === 3
-      : functionNode
-      ? fieldCount === 5 || fieldCount === 6 || fieldCount === 7
-      : arrowNode
-      ? fieldCount === 4 || fieldCount === 5
-      : fieldCount === schema[1].length;
+    // TypeScript annotations extend compact JavaScript function, arrow, and binding shapes.
+    const validFieldCount = fieldCount === schema[1].length
+      || (tag === 2 && fieldCount === 3)
+      || ((tag === 25 || tag === 26) && (fieldCount === 5 || fieldCount === 6))
+      || (tag === 27 && fieldCount === 4)
+      || ((tag === 52 || tag === 53 || tag === 54) && fieldCount === 3);
     if (!validFieldCount) {
       const expected = tag === 2
         ? "1 or 3"
-        : functionNode
+        : tag === 25 || tag === 26
         ? "5, 6, or 7"
-        : arrowNode
+        : tag === 27
         ? "4 or 5"
+        : tag === 52 || tag === 53 || tag === 54
+        ? "1 or 3"
         : schema[1].length;
       throw new Error(
         `invalid ${schema[0]} field count ${fieldCount}; expected ${expected}`,
@@ -875,14 +873,19 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.quasi = fields[1];
         return node;
       case 51:
+        node.argument = fields[0];
+        return node;
       case 52:
         node.argument = fields[0];
+        decodeTypeScriptBindingMetadata(node, fields, fieldCount, tag);
         return node;
       case 53:
         node.elements = patternItems(fields[0], "elements", tag);
+        decodeTypeScriptBindingMetadata(node, fields, fieldCount, tag);
         return node;
       case 54:
         node.properties = patternItems(fields[0], "properties", tag);
+        decodeTypeScriptBindingMetadata(node, fields, fieldCount, tag);
         return node;
       case 55:
         node.meta = fields[0];
@@ -1525,6 +1528,12 @@ function decodeTypeScriptClassFlags(node, record, tag) {
   }
   if ((flags & 0x01) !== 0) node.abstract = true;
   if ((flags & 0x02) !== 0) node.declare = true;
+}
+
+function decodeTypeScriptBindingMetadata(node, fields, fieldCount, tag) {
+  if (fieldCount === 1) return;
+  if (fields[1] !== null) node.typeAnnotation = fields[1];
+  if (boolean(fields[2], tag)) node.optional = true;
 }
 
 function decodeTypeScriptClassMemberModifiers(node, record, tag, allowEmpty = false) {

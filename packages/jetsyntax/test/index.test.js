@@ -2409,6 +2409,139 @@ describe("parse", () => {
     });
   });
 
+  it("materializes TypeScript metadata on destructuring bindings", () => {
+    const source = [
+      "declare const { value }: { value: string };",
+      "function consume([head, ...tail]?: Pair, ...{ length }: Values) {}",
+      "const arrow = ({ item }: Input = fallback) => item;",
+      "try {} catch ({ message }: unknown) {}",
+      "type Handler = ({ value }: Input, [flag]?: Pair) => void;",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const [declaration, consume, arrowDeclaration, tryStatement, handler] = result.program.body;
+    const declaredPattern = declaration.declarations[0].id;
+    const [optionalPattern, restPattern] = consume.params;
+    const assignedPattern = arrowDeclaration.declarations[0].init.params[0];
+    const catchPattern = tryStatement.handler.param;
+
+    expect(declaredPattern).toMatchObject({
+      type: "ObjectPattern",
+      typeAnnotation: { type: "TSTypeAnnotation" },
+    });
+    expect(declaredPattern).not.toHaveProperty("optional");
+    expect(source.slice(declaredPattern.start, declaredPattern.end)).toBe(
+      "{ value }: { value: string }",
+    );
+
+    expect(optionalPattern).toMatchObject({
+      type: "ArrayPattern",
+      optional: true,
+      typeAnnotation: { type: "TSTypeAnnotation" },
+    });
+    expect(source.slice(optionalPattern.start, optionalPattern.end)).toBe(
+      "[head, ...tail]?: Pair",
+    );
+
+    expect(restPattern).toMatchObject({
+      type: "RestElement",
+      argument: { type: "ObjectPattern" },
+      typeAnnotation: { type: "TSTypeAnnotation" },
+    });
+    expect(restPattern).not.toHaveProperty("optional");
+    expect(restPattern.argument).not.toHaveProperty("typeAnnotation");
+    expect(source.slice(restPattern.start, restPattern.end)).toBe(
+      "...{ length }: Values",
+    );
+
+    expect(assignedPattern).toMatchObject({
+      type: "AssignmentPattern",
+      left: {
+        type: "ObjectPattern",
+        typeAnnotation: { type: "TSTypeAnnotation" },
+      },
+    });
+    expect(source.slice(assignedPattern.left.start, assignedPattern.left.end)).toBe(
+      "{ item }: Input",
+    );
+
+    expect(catchPattern).toMatchObject({
+      type: "ObjectPattern",
+      typeAnnotation: { type: "TSTypeAnnotation" },
+    });
+    expect(source.slice(catchPattern.start, catchPattern.end)).toBe(
+      "{ message }: unknown",
+    );
+
+    const [signatureObject, signatureArray] = handler.typeAnnotation.params;
+    expect(signatureObject).toMatchObject({
+      type: "ObjectPattern",
+      typeAnnotation: { type: "TSTypeAnnotation" },
+    });
+    expect(signatureArray).toMatchObject({
+      type: "ArrayPattern",
+      optional: true,
+      typeAnnotation: { type: "TSTypeAnnotation" },
+    });
+
+    for (
+      const pattern of [
+        declaredPattern,
+        optionalPattern,
+        restPattern,
+        assignedPattern.left,
+        catchPattern,
+        signatureObject,
+        signatureArray,
+      ]
+    ) {
+      expect(pattern.range).toEqual([pattern.start, pattern.end]);
+    }
+  });
+
+  it("preserves TypeScript destructuring metadata recovery boundaries", () => {
+    const implementation = parse(
+      "function implementation([]?) {} const arrow = ({}?) => 0; const asyncArrow = async (...args?: any[]) => 0;",
+      { lang: "ts", semanticErrors: true },
+    );
+    expect(
+      implementation.diagnostics.filter(message => (
+        message.includes(
+          "binding pattern parameter cannot be optional in an implementation signature",
+        )
+      )),
+    ).toHaveLength(3);
+
+    for (
+      const source of [
+        "declare function ambient([]?): void;",
+        "type Signature = ({}?, ...args?: any[]) => void;",
+        "declare const { value }: Input;",
+      ]
+    ) {
+      expect(parse(source, { lang: "ts", semanticErrors: true }).diagnostics, source)
+        .toEqual([]);
+    }
+
+    const missing = parse("declare\nconst { value }: Input;", {
+      lang: "ts",
+      semanticErrors: true,
+    });
+    expect(missing.diagnostics).toContain(
+      "missing initializer in destructuring declaration",
+    );
+
+    for (
+      const source of [
+        "function nested([value: number]) {}",
+        "function nested({ value? }: Input) {}",
+      ]
+    ) {
+      expect(parse(source, { lang: "ts" }).diagnostics, source).not.toEqual([]);
+    }
+  });
+
   it("materializes TypeScript parameter properties", () => {
     const source = [
       "class Service extends Base {",

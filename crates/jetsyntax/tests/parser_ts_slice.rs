@@ -3069,6 +3069,161 @@ fn parses_optional_typed_value_parameters() {
 }
 
 #[test]
+fn parses_typescript_metadata_on_destructuring_bindings() {
+    let source = [
+        "declare const { value }: { value: string };",
+        "function consume([head, ...tail]?: Pair, ...{ length }: Values) {}",
+        "const arrow = ({ item }: Input = fallback) => item;",
+        "try {} catch ({ message }: unknown) {}",
+        "type Handler = ({ value }: Input, [flag]?: Pair) => void;",
+    ]
+    .join("\n");
+    let parsed = parse(&source, typescript_options()).expect("parse destructuring metadata");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid destructuring-metadata tape");
+
+    let typed_objects = node_fields(&parsed, NodeTag::OBJECT_PATTERN)
+        .filter(|fields| fields.len() == 3)
+        .collect::<Vec<_>>();
+    assert_eq!(typed_objects.len(), 4);
+    assert!(typed_objects.iter().all(|fields| {
+        matches!(
+            parsed.tape.value_at(fields[1]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::TS_TYPE_ANNOTATION,
+                ..
+            })
+        ) && matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(false)))
+    }));
+
+    let typed_arrays = node_fields(&parsed, NodeTag::ARRAY_PATTERN)
+        .filter(|fields| fields.len() == 3)
+        .collect::<Vec<_>>();
+    assert_eq!(typed_arrays.len(), 2);
+    assert!(typed_arrays.iter().all(|fields| {
+        matches!(
+            parsed.tape.value_at(fields[1]),
+            Ok(TapeValue::Node {
+                tag: NodeTag::TS_TYPE_ANNOTATION,
+                ..
+            })
+        ) && matches!(parsed.tape.value_at(fields[2]), Ok(TapeValue::Bool(true)))
+    }));
+
+    let typed_rest = node_fields(&parsed, NodeTag::REST_ELEMENT)
+        .find(|fields| fields.len() == 3)
+        .expect("typed rest parameter");
+    assert!(matches!(
+        parsed.tape.value_at(typed_rest[1]),
+        Ok(TapeValue::Node {
+            tag: NodeTag::TS_TYPE_ANNOTATION,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parsed.tape.value_at(typed_rest[2]),
+        Ok(TapeValue::Bool(false))
+    ));
+}
+
+#[test]
+fn preserves_destructuring_metadata_recovery_boundaries() {
+    let implementation = parse(
+        "function implementation([]?) {} const arrow = ({}?) => 0; const asyncArrow = async (...args?: any[]) => 0;",
+        ParseOptions {
+            language: Language::TypeScript,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("recover optional implementation patterns");
+    assert_eq!(
+        implementation
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains(
+                "binding pattern parameter cannot be optional in an implementation signature"
+            ))
+            .count(),
+        3
+    );
+    implementation
+        .tape
+        .validate()
+        .expect("valid optional-pattern recovery tape");
+
+    for source in [
+        "declare function ambient([]?): void;",
+        "type Signature = ({}?, ...args?: any[]) => void;",
+    ] {
+        let parsed = parse(
+            source,
+            ParseOptions {
+                language: Language::TypeScript,
+                semantic_errors: true,
+                ..ParseOptions::default()
+            },
+        )
+        .expect("parse optional bodyless signature");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:#?}",
+            parsed.diagnostics
+        );
+    }
+
+    let missing = parse(
+        "declare\nconst { value }: Input;",
+        ParseOptions {
+            language: Language::TypeScript,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("recover missing destructuring initializer");
+    assert!(missing.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("missing initializer in destructuring declaration")
+    }));
+
+    let declared = parse(
+        "declare const { value }: Input;",
+        ParseOptions {
+            language: Language::TypeScript,
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("parse declared destructuring binding");
+    assert!(
+        declared.diagnostics.is_empty(),
+        "{:#?}",
+        declared.diagnostics
+    );
+
+    let object_rest = parse("const { ...value: Input } = source;", typescript_options())
+        .expect("parse TypeScript object-rest annotation recovery");
+    assert!(
+        object_rest.diagnostics.is_empty(),
+        "{:#?}",
+        object_rest.diagnostics
+    );
+
+    for source in [
+        "function nested([value: number]) {}",
+        "function nested({ value? }: Input) {}",
+    ] {
+        let parsed = parse(source, typescript_options()).expect("recover nested metadata");
+        assert!(!parsed.diagnostics.is_empty(), "{source}");
+    }
+}
+
+#[test]
 fn keeps_optional_parameter_syntax_out_of_javascript() {
     let parsed = parse(
         "function invalid(value?: Input) {}",
@@ -3097,7 +3252,6 @@ fn does_not_apply_parameter_optionality_to_other_typescript_bindings() {
         "import { value? } from 'package';",
         "type value? = Input;",
         "function destructured({ value? }: Input) {}",
-        "function rest(...values?: Input[]) {}",
     ] {
         let parsed = parse(source, typescript_options()).expect("recover invalid optional binding");
 

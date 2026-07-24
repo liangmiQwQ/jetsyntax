@@ -2250,6 +2250,102 @@ describe("decodeTape", () => {
     ]);
   });
 
+  it("decodes TypeScript metadata on destructuring patterns", () => {
+    const typedSource = "{ value }: Input";
+    const typedTape = new HandcraftedTape();
+    const key = typedTape.node(2, 2, 7, [typedTape.source(2, 7)]);
+    const value = typedTape.node(2, 2, 7, [typedTape.source(2, 7)]);
+    const property = typedTape.node(33, 2, 7, [
+      key,
+      value,
+      typedTape.integer(0),
+      typedTape.boolean(false),
+      typedTape.boolean(true),
+      typedTape.boolean(false),
+    ]);
+    const typeName = typedTape.node(2, 11, 16, [typedTape.source(11, 16)]);
+    const reference = typedTape.node(513, 11, 16, [typeName, typedTape.null()]);
+    const annotation = typedTape.node(512, 9, 16, [reference]);
+    const typed = typedTape.node(54, 0, 16, [
+      typedTape.list([property]),
+      annotation,
+      typedTape.boolean(false),
+    ]);
+    const typedEncoded = typedTape.finish(typed);
+    expect(decodeTape(typedSource, typedEncoded, { range: true })).toMatchObject({
+      type: "ObjectPattern",
+      start: 0,
+      end: 16,
+      range: [0, 16],
+      typeAnnotation: { type: "TSTypeAnnotation", start: 9, end: 16 },
+    });
+    expect(decodeTrustedTape(typedSource, typedEncoded)).not.toHaveProperty("optional");
+
+    const optionalSource = "[]?";
+    const optionalTape = new HandcraftedTape();
+    const optional = optionalTape.node(53, 0, 3, [
+      optionalTape.list([]),
+      optionalTape.null(),
+      optionalTape.boolean(true),
+    ]);
+    expect(decodeTape(optionalSource, optionalTape.finish(optional))).toEqual({
+      type: "ArrayPattern",
+      start: 0,
+      end: 3,
+      elements: [],
+      optional: true,
+    });
+
+    const restSource = "...{}: Values";
+    const restTape = new HandcraftedTape();
+    const argument = restTape.node(54, 3, 5, [restTape.list([])]);
+    const restName = restTape.node(2, 7, 13, [restTape.source(7, 13)]);
+    const restReference = restTape.node(513, 7, 13, [restName, restTape.null()]);
+    const restAnnotation = restTape.node(512, 5, 13, [restReference]);
+    const rest = restTape.node(52, 0, 13, [
+      argument,
+      restAnnotation,
+      restTape.boolean(false),
+    ]);
+    const restEncoded = restTape.finish(rest);
+    expect(decodeTrustedTape(restSource, restEncoded)).toMatchObject({
+      type: "RestElement",
+      argument: { type: "ObjectPattern" },
+      typeAnnotation: { type: "TSTypeAnnotation", start: 5, end: 13 },
+    });
+    expect(decodeTape(restSource, restEncoded)).not.toHaveProperty("optional");
+  });
+
+  it("rejects malformed TypeScript destructuring metadata", () => {
+    for (const tag of [52, 53, 54]) {
+      for (const count of [0, 2, 4]) {
+        const tape = new HandcraftedTape();
+        const fields = Array.from({ length: count }, () => tape.null());
+        const root = tape.node(tag, 0, 0, fields);
+        const encoded = tape.finish(root);
+        for (const decode of [decodeTape, decodeTrustedTape]) {
+          expect(() => decode("", encoded)).toThrow(
+            `field count ${count}; expected 1 or 3`,
+          );
+        }
+      }
+
+      const tape = new HandcraftedTape();
+      const base = tag === 52 ? tape.null() : tape.list([]);
+      const root = tape.node(tag, 0, 0, [
+        base,
+        tape.null(),
+        tape.integer(1),
+      ]);
+      const encoded = tape.finish(root);
+      for (const decode of [decodeTape, decodeTrustedTape]) {
+        expect(() => decode("", encoded)).toThrow(
+          `JetSyntax node tag ${tag} expected a Boolean field`,
+        );
+      }
+    }
+  });
+
   it("decodes TypeScript type predicates and assertion signatures", () => {
     const source = "value is string";
     const predicateTape = new HandcraftedTape();
