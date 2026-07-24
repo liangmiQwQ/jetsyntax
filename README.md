@@ -9,13 +9,13 @@ JetSyntax is an experimental, independently implemented JavaScript, TypeScript, 
 
 The repository has the required language modes, native API, NAPI transfer layer, ESTree decoder, conformance harnesses, and native/NAPI benchmark harnesses. Full grammar conformance and the performance target are still in progress.
 
-The latest complete, correctly wired official-suite baseline was captured at [`9c41f4d`](https://github.com/liangmiQwQ/jetsyntax/commit/9c41f4d) in [GitHub Actions run 30058511120](https://github.com/liangmiQwQ/jetsyntax/actions/runs/30058511120):
+The latest complete, correctly wired official-suite baseline was captured at [`99b56c5`](https://github.com/liangmiQwQ/jetsyntax/commit/99b56c5) in [GitHub Actions run 30060449789](https://github.com/liangmiQwQ/jetsyntax/actions/runs/30060449789):
 
 | Suite                 |  Passed | Failed | Unsupported | Executed | Skipped |
 | --------------------- | ------: | -----: | ----------: | -------: | ------: |
-| Test262               | 101,124 |  1,473 |           0 |  102,597 |       0 |
-| TypeScript            |  17,234 |  3,508 |           0 |   20,742 |       0 |
-| Babel parser fixtures |   3,921 |    971 |       1,044 |    5,936 |       0 |
+| Test262               | 101,240 |  1,357 |           0 |  102,597 |       0 |
+| TypeScript            |  17,316 |  3,426 |           0 |   20,742 |       0 |
+| Babel parser fixtures |   3,927 |    965 |       1,044 |    5,936 |       0 |
 
 These are development numbers, not a conformance claim. The table remains pinned to a reproducible full run until it is replaced by a newer complete run. CI enumerates every pinned case and rejects missing or skipped fixtures.
 
