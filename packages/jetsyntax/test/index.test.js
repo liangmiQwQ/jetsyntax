@@ -5016,4 +5016,55 @@ describe("parse", () => {
     ]);
     expect(result.program.body[0].body.body[2]).not.toHaveProperty("decorators");
   });
+
+  it("decodes auto-accessors with independent feature gating", () => {
+    const source = "class C { @dec public static accessor value!: number = 1; accessor #private; }";
+    const result = parse(source, {
+      lang: "ts",
+      range: true,
+      semanticErrors: true,
+      decoratorMode: "standard",
+      decoratorAutoAccessors: true,
+    });
+    expect(result.diagnostics).not.toEqual([]);
+    expect(result.program.body[0].body.body).toMatchObject([
+      {
+        type: "AccessorProperty",
+        start: 10,
+        end: 57,
+        range: [10, 57],
+        accessibility: "public",
+        static: true,
+        definite: true,
+        key: { type: "Identifier", name: "value", start: 38, end: 43 },
+        value: { type: "Literal", value: 1 },
+        typeAnnotation: {
+          type: "TSTypeAnnotation",
+          typeAnnotation: { type: "TSNumberKeyword" },
+        },
+        decorators: [{ type: "Decorator", expression: { name: "dec" } }],
+      },
+      {
+        type: "AccessorProperty",
+        key: { type: "PrivateIdentifier", name: "private" },
+        value: null,
+        computed: false,
+        static: false,
+      },
+    ]);
+
+    const disabled = parse("class C { accessor value; }", {
+      decoratorAutoAccessors: false,
+    });
+    expect(disabled.diagnostics).not.toEqual([]);
+    expect(disabled.program.body[0].body.body).not.toContainEqual(
+      expect.objectContaining({ type: "AccessorProperty" }),
+    );
+
+    const decoratorsDisabled = parse("class C { @dec accessor value; }", {
+      decorators: false,
+      decoratorAutoAccessors: true,
+    });
+    expect(decoratorsDisabled.diagnostics).not.toEqual([]);
+  });
 });

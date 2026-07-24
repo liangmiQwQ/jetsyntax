@@ -53,16 +53,23 @@ test("official loaders preserve suite outcomes and explicit exclusions", async (
   await babelFixture(babelRoot, "decorators/syntax/disabled", "export @dec class C {}", {
     options: { sourceType: "module", throws: "Decorators are not enabled" },
   });
+  await babelFixture(babelRoot, "auto-accessors/syntax/enabled", "class C { accessor value; }", {
+    options: { plugins: ["decoratorAutoAccessors"] },
+    output: {},
+  });
+  await babelFixture(babelRoot, "auto-accessors/syntax/disabled", "class C { accessor value; }", {
+    options: { throws: "Auto-accessors are not enabled" },
+  });
   await write(join(babelRoot, "core/syntax/nested/child"), "input.js", "let value = 1;");
   const babel = await loadBabel(babelRoot);
   assert.deepEqual(babel.inventory, {
-    enabledFixtures: 9,
+    enabledFixtures: 11,
     upstreamDisabled: 1,
     upstreamUndiscovered: 1,
-    clean: 5,
-    fatal: 2,
+    clean: 6,
+    fatal: 3,
     recovery: 2,
-    executions: 9,
+    executions: 11,
   });
   assert.equal(babel.extensions.unsupportedReasons["plugin:flow"], 1);
   assert.equal(babel.cases.find((testCase) => testCase.id.includes("typescript/dts"))?.options.lang, "dts");
@@ -76,6 +83,12 @@ test("official loaders preserve suite outcomes and explicit exclusions", async (
       .filter((testCase) => testCase.id.includes("decorators/syntax"))
       .map((testCase) => [testCase.options.decorators, testCase.options.decoratorMode]),
     [[false, "auto"], [true, "standard"]],
+  );
+  assert.deepEqual(
+    babel.cases
+      .filter((testCase) => testCase.id.includes("auto-accessors/syntax"))
+      .map((testCase) => testCase.options.decoratorAutoAccessors),
+    [false, true],
   );
 
   const typeScriptRoot = join(root, "typescript", "tests", "cases", "compiler");

@@ -59,10 +59,12 @@ pub struct ParseOptions {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SyntaxExtensions {
     pub typescript_js_compatibility: bool,
     pub optional_chaining_assign: bool,
     pub decorators: bool,
+    pub decorator_auto_accessors: bool,
     pub decorator_mode: DecoratorMode,
 }
 
@@ -72,6 +74,7 @@ impl Default for SyntaxExtensions {
             typescript_js_compatibility: false,
             optional_chaining_assign: false,
             decorators: true,
+            decorator_auto_accessors: true,
             decorator_mode: DecoratorMode::Auto,
         }
     }

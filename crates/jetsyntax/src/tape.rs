@@ -177,6 +177,7 @@ impl NodeTag {
     pub const DECORATED_CLASS_DECLARATION: Self = Self(76);
     pub const DECORATED_CLASS_EXPRESSION: Self = Self(77);
     pub const DECORATED_CLASS_ELEMENT: Self = Self(78);
+    pub const ACCESSOR_PROPERTY: Self = Self(79);
 
     pub const JSX_IDENTIFIER: Self = Self(256);
     pub const JSX_MEMBER_EXPRESSION: Self = Self(257);
@@ -277,6 +278,7 @@ impl NodeTag {
     pub const TS_PARAMETER_PROPERTY: Self = Self(591);
     pub const TS_DECORATED_CLASS_DECLARATION: Self = Self(592);
     pub const TS_DECORATED_CLASS_EXPRESSION: Self = Self(593);
+    pub const TS_ABSTRACT_ACCESSOR_PROPERTY: Self = Self(594);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {

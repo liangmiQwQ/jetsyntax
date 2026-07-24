@@ -20,6 +20,7 @@ pub struct BindingOptions {
     pub typescript_js_compatibility: Option<bool>,
     pub optional_chaining_assign: Option<bool>,
     pub decorators: Option<bool>,
+    pub decorator_auto_accessors: Option<bool>,
     pub decorator_mode: Option<String>,
 }
 
@@ -52,6 +53,7 @@ pub fn parse_to_tape(
             typescript_js_compatibility: options.typescript_js_compatibility.unwrap_or(false),
             optional_chaining_assign: options.optional_chaining_assign.unwrap_or(false),
             decorators: options.decorators.unwrap_or(true),
+            decorator_auto_accessors: options.decorator_auto_accessors.unwrap_or(true),
             decorator_mode: parse_decorator_mode(options.decorator_mode.as_deref())?,
         },
     };

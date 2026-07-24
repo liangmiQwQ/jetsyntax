@@ -3831,6 +3831,92 @@ fn parser_should_parse_class_element_decorators_without_touching_plain_tapes() {
     assert_eq!(enabled.tape.words(), disabled.tape.words());
 }
 
+#[test]
+fn parser_should_parse_auto_accessors_without_widening_contextual_syntax() {
+    let source = concat!(
+        "class C {",
+        "accessor value;",
+        "static accessor #secret = 1;",
+        "accessor [computed] = 2;",
+        "accessor 'named';",
+        "accessor 3;",
+        "@first @second accessor decorated;",
+        "}"
+    );
+    let parsed = parse(
+        source,
+        ParseOptions {
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("auto-accessors");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid auto-accessor tape");
+    let tags = inspect_tape("auto-accessors", &parsed).expect("tags");
+    assert_eq!(
+        tags.iter()
+            .filter(|&&tag| tag == NodeTag::ACCESSOR_PROPERTY)
+            .count(),
+        6
+    );
+    assert_eq!(
+        tags.iter()
+            .filter(|&&tag| tag == NodeTag::DECORATED_CLASS_ELEMENT)
+            .count(),
+        1
+    );
+
+    let ambiguous =
+        "class C { accessor\nvalue; static accessor\nnext; accessor = 1; accessor() {} }";
+    let enabled = parse(ambiguous, ParseOptions::default()).expect("enabled auto-accessors");
+    let disabled = parse(
+        ambiguous,
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                decorator_auto_accessors: false,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("disabled auto-accessors");
+    assert!(enabled.diagnostics.is_empty(), "{:#?}", enabled.diagnostics);
+    assert_eq!(enabled.tape.words(), disabled.tape.words());
+
+    let gated = parse(
+        "class C { accessor value; }",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                decorator_auto_accessors: false,
+                ..SyntaxExtensions::default()
+            },
+            ..ParseOptions::default()
+        },
+    )
+    .expect("gated auto-accessor recovery");
+    assert!(!gated.diagnostics.is_empty());
+    assert!(
+        !inspect_tape("gated auto-accessor", &gated)
+            .expect("tags")
+            .contains(&NodeTag::ACCESSOR_PROPERTY)
+    );
+
+    let invalid = parse(
+        "class C { accessor constructor; static accessor prototype; accessor #value; get #value() {} }",
+        ParseOptions {
+            semantic_errors: true,
+            ..ParseOptions::default()
+        },
+    )
+    .expect("invalid auto-accessors");
+    assert_eq!(invalid.diagnostics.len(), 3, "{:#?}", invalid.diagnostics);
+    invalid
+        .tape
+        .validate()
+        .expect("valid invalid-auto-accessor tape");
+}
+
 fn assert_clean_cases(cases: &[GrammarCase]) {
     let mut failures = Vec::new();
     for &case in cases {

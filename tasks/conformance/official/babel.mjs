@@ -82,6 +82,7 @@ export async function loadBabel(root) {
             sourceType: options.sourceType ?? "script",
             optionalChainingAssign: pluginNames.includes("optionalChainingAssign"),
             decorators: pluginNames.includes("decorators"),
+            decoratorAutoAccessors: pluginNames.includes("decoratorAutoAccessors"),
             decoratorMode: pluginNames.includes("decorators") ? "standard" : "auto",
           },
           expectation,

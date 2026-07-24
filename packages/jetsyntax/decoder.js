@@ -135,6 +135,7 @@ for (
     [76, ["ClassDeclaration", ["id", "superClass", "body", "decorators"]]],
     [77, ["ClassExpression", ["id", "superClass", "body", "decorators"]]],
     [78, ["DecoratedClassElement", ["element", "decorators"]]],
+    [79, ["AccessorProperty", ["key", "value", "computed", "static", "typeAnnotation"]]],
     [256, ["JSXIdentifier", ["name"]]],
     [259, ["JSXElement", ["openingElement", "closingElement", "children"]]],
     [261, ["JSXOpeningElement", ["name", "attributes", "selfClosing"]]],
@@ -242,6 +243,7 @@ for (
       "superTypeArguments",
       "decorators",
     ]]],
+    [594, ["TSAbstractAccessorProperty", ["key", "value", "computed", "static", "typeAnnotation"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -945,6 +947,15 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.static = boolean(fields[3], tag);
         node.typeAnnotation = fields[4];
         return node;
+      case 79:
+      case 594:
+        decodeTypeScriptAutoAccessorModifiers(node, record, tag);
+        node.key = fields[0];
+        node.value = fields[1];
+        node.computed = boolean(fields[2], tag);
+        node.static = boolean(fields[3], tag);
+        if (fields[4] !== null) node.typeAnnotation = fields[4];
+        return node;
       case 62: {
         const block = fields[0];
         if (block?.type !== "BlockStatement") {
@@ -1509,6 +1520,20 @@ function decodeTypeScriptClassMemberModifiers(node, record, tag, allowEmpty = fa
   if (accessibility !== 0) node.accessibility = TS_CLASS_MEMBER_ACCESSIBILITIES[accessibility];
   if ((flags & 0x04) !== 0) node.readonly = true;
   if ((flags & 0x08) !== 0) node.override = true;
+}
+
+function decodeTypeScriptAutoAccessorModifiers(node, record, tag) {
+  const flags = (record & NODE_FLAGS_MASK) >>> 16;
+  if ((flags & ~0x7F) !== 0) {
+    throw new Error(`invalid TypeScript auto-accessor modifier flags ${flags} for tag ${tag}`);
+  }
+  const accessibility = flags & 0x03;
+  if (accessibility !== 0) node.accessibility = TS_CLASS_MEMBER_ACCESSIBILITIES[accessibility];
+  if ((flags & 0x04) !== 0) node.readonly = true;
+  if ((flags & 0x08) !== 0) node.override = true;
+  if ((flags & 0x10) !== 0) node.declare = true;
+  if ((flags & 0x20) !== 0) node.optional = true;
+  if ((flags & 0x40) !== 0) node.definite = true;
 }
 
 function decodeTypeScriptParameterPropertyModifiers(node, record, tag) {

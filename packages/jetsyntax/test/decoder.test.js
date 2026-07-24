@@ -1025,6 +1025,93 @@ describe("decodeTape", () => {
     }
   });
 
+  it("decodes auto-accessor properties and TypeScript modifier flags", () => {
+    for (const decode of [decodeTape, decodeTrustedTape]) {
+      const tape = new HandcraftedTape();
+      const key = tape.node(2, 9, 14, [tape.string("value")]);
+      const accessor = tape.node(79, 0, 15, [
+        key,
+        tape.null(),
+        tape.boolean(false),
+        tape.boolean(true),
+        tape.null(),
+      ], 0x7D);
+      expect(decode("accessor value;", tape.finish(accessor), { range: true })).toEqual({
+        type: "AccessorProperty",
+        start: 0,
+        end: 15,
+        range: [0, 15],
+        accessibility: "public",
+        readonly: true,
+        override: true,
+        declare: true,
+        optional: true,
+        definite: true,
+        key: {
+          type: "Identifier",
+          start: 9,
+          end: 14,
+          range: [9, 14],
+          name: "value",
+        },
+        value: null,
+        computed: false,
+        static: true,
+      });
+
+      const abstractTape = new HandcraftedTape();
+      const abstractKey = abstractTape.node(2, 18, 23, [abstractTape.string("value")]);
+      const typeAnnotation = abstractTape.node(512, 23, 31, [
+        abstractTape.node(548, 25, 31, []),
+      ]);
+      const abstractAccessor = abstractTape.node(594, 0, 32, [
+        abstractKey,
+        abstractTape.null(),
+        abstractTape.boolean(false),
+        abstractTape.boolean(false),
+        typeAnnotation,
+      ], 0x02);
+      const decoded = decode(
+        "abstract accessor value: number;",
+        abstractTape.finish(abstractAccessor),
+      );
+      expect(decoded).toMatchObject({
+        type: "TSAbstractAccessorProperty",
+        accessibility: "protected",
+        key: { name: "value" },
+        value: null,
+        computed: false,
+        static: false,
+        typeAnnotation: {
+          type: "TSTypeAnnotation",
+          typeAnnotation: { type: "TSNumberKeyword" },
+        },
+      });
+      expect(decoded).not.toHaveProperty("abstract");
+    }
+  });
+
+  it("rejects unknown auto-accessor modifier flags", () => {
+    for (const tag of [79, 594]) {
+      for (const flags of [0x80, 0xFF]) {
+        const tape = new HandcraftedTape();
+        const accessor = tape.node(tag, 0, 0, [
+          tape.node(2, 0, 0, [tape.string("value")]),
+          tape.null(),
+          tape.boolean(false),
+          tape.boolean(false),
+          tape.null(),
+        ], flags);
+        const encoded = tape.finish(accessor);
+        for (const decode of [decodeTape, decodeTrustedTape]) {
+          expect(() => decode("", encoded)).toThrow(
+            `invalid TypeScript auto-accessor modifier flags ${flags} for tag ${tag}`,
+          );
+        }
+      }
+    }
+  });
+
   it("rejects malformed bodyless function field counts", () => {
     for (const count of [4, 6]) {
       const tape = new HandcraftedTape();

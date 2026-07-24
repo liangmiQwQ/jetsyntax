@@ -6476,6 +6476,265 @@ fn parses_typescript_class_element_decorators_and_modifier_variants() {
         .expect("valid misplaced decorator tape");
 }
 
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parses_typescript_auto_accessors_with_modifiers_and_recovery() {
+    assert_eq!(NodeTag::ACCESSOR_PROPERTY.get(), 79);
+    assert_eq!(NodeTag::TS_ABSTRACT_ACCESSOR_PROPERTY.get(), 594);
+
+    let source = concat!(
+        "abstract class Base {",
+        "public accessor definite!: number;",
+        "protected static accessor shared = 1;",
+        "abstract accessor required: string;",
+        "accessor #private: boolean;",
+        "}",
+        "class Derived extends Base { override accessor required = 'ready'; }"
+    );
+    let parsed = parse(
+        source,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("TypeScript auto-accessors");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed
+        .tape
+        .validate()
+        .expect("valid TypeScript auto-accessor tape");
+    assert_eq!(node_fields(&parsed, NodeTag::ACCESSOR_PROPERTY).count(), 4);
+    assert_eq!(
+        node_fields(&parsed, NodeTag::TS_ABSTRACT_ACCESSOR_PROPERTY).count(),
+        1
+    );
+    let flags = parsed
+        .tape
+        .validation()
+        .map(|record| record.expect("valid record").value)
+        .filter_map(|value| match value {
+            TapeValue::Node {
+                tag: NodeTag::ACCESSOR_PROPERTY,
+                flags,
+                ..
+            } => Some(flags),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(flags.contains(&0x41), "{flags:?}");
+    assert!(flags.contains(&0x02), "{flags:?}");
+    assert!(flags.contains(&0x08), "{flags:?}");
+
+    let syntax_only = parse(
+        concat!(
+            "abstract class C {",
+            "accessor accessor a: any;",
+            "accessor public b: any;",
+            "accessor static c: any;",
+            "accessor readonly d: any;",
+            "accessor declare e: any;",
+            "declare public accessor declared: any;",
+            "accessor optional?: any;",
+            "accessor method() {}",
+            "accessor *generator() {}",
+            "accessor get value() { return 1; }",
+            "}"
+        ),
+        typescript_options(),
+    )
+    .expect("syntax-only auto-accessor recovery");
+    assert!(
+        syntax_only.diagnostics.is_empty(),
+        "{:#?}",
+        syntax_only.diagnostics
+    );
+    syntax_only
+        .tape
+        .validate()
+        .expect("valid syntax-only recovery tape");
+
+    let semantic = parse(
+        concat!(
+            "abstract class C {",
+            "readonly accessor a;",
+            "declare accessor b;",
+            "accessor c?;",
+            "accessor d!;",
+            "accessor e!: number = 1;",
+            "abstract accessor #private;",
+            "abstract static accessor shared;",
+            "static accessor staticDefinite!: number;",
+            "accessor static {}",
+            "accessor method() {}",
+            "}",
+            "declare class Ambient { accessor ambientDefinite!: number; }"
+        ),
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("semantic auto-accessor recovery");
+    assert!(
+        semantic.diagnostics.len() >= 8,
+        "{:#?}",
+        semantic.diagnostics
+    );
+    semantic
+        .tape
+        .validate()
+        .expect("valid semantic recovery tape");
+
+    let mutually_exclusive = parse(
+        "class C { accessor invalid?!: number; }",
+        typescript_options(),
+    )
+    .expect("optional-definite recovery");
+    assert!(
+        !mutually_exclusive.diagnostics.is_empty(),
+        "optional and definite markers are a syntax error"
+    );
+    let line_break_definite = parse(
+        "class C { accessor invalid\n!: number; }",
+        typescript_options(),
+    )
+    .expect("line-break definite recovery");
+    assert!(
+        !line_break_definite.diagnostics.is_empty(),
+        "a definite marker cannot cross a line break"
+    );
+
+    let plain = "class C { public field: string; static method() {} }";
+    let enabled = parse(plain, typescript_options()).expect("enabled auto-accessors");
+    let disabled = parse(
+        plain,
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                decorator_auto_accessors: false,
+                ..SyntaxExtensions::default()
+            },
+            ..typescript_options()
+        },
+    )
+    .expect("disabled auto-accessors");
+    assert_eq!(enabled.tape.words(), disabled.tape.words());
+
+    let disabled_declare = parse(
+        "class C { declare accessor value; }",
+        ParseOptions {
+            syntax_extensions: SyntaxExtensions {
+                decorator_auto_accessors: false,
+                ..SyntaxExtensions::default()
+            },
+            ..typescript_options()
+        },
+    )
+    .expect("disabled declare-accessor recovery");
+    assert_eq!(
+        node_fields(&disabled_declare, NodeTag::PROPERTY_DEFINITION).count(),
+        3
+    );
+    assert_eq!(
+        node_fields(&disabled_declare, NodeTag::ACCESSOR_PROPERTY).count(),
+        0
+    );
+}
+
+#[test]
+fn validates_decorated_typescript_auto_accessor_targets_by_mode() {
+    let standard = parse(
+        "abstract class C { @dec accessor #private; @dec abstract accessor required: string; }",
+        ParseOptions {
+            semantic_errors: true,
+            syntax_extensions: SyntaxExtensions {
+                decorator_mode: DecoratorMode::Standard,
+                ..SyntaxExtensions::default()
+            },
+            ..typescript_options()
+        },
+    )
+    .expect("standard decorated auto-accessors");
+    assert_eq!(standard.diagnostics.len(), 1, "{:#?}", standard.diagnostics);
+    assert_eq!(
+        node_fields(&standard, NodeTag::DECORATED_CLASS_ELEMENT).count(),
+        2
+    );
+
+    let legacy = parse(
+        "abstract class C { @dec accessor #private; @dec abstract accessor required: string; }",
+        ParseOptions {
+            semantic_errors: true,
+            syntax_extensions: SyntaxExtensions {
+                decorator_mode: DecoratorMode::TypeScript,
+                ..SyntaxExtensions::default()
+            },
+            ..typescript_options()
+        },
+    )
+    .expect("legacy decorated auto-accessors");
+    assert_eq!(legacy.diagnostics.len(), 1, "{:#?}", legacy.diagnostics);
+    legacy
+        .tape
+        .validate()
+        .expect("valid decorated auto-accessor tape");
+}
+
+#[test]
+fn recovers_invalid_typescript_auto_accessor_modifiers_outside_classes() {
+    let source = concat!(
+        "interface I { accessor value: number; }",
+        "accessor class C {}",
+        "accessor interface J {}",
+        "accessor namespace N {}",
+        "accessor enum E {}",
+        "accessor var value: any;",
+        "accessor type T = never;",
+        "accessor function f() {}",
+        "accessor import 'module';",
+        "accessor import {} from 'module';",
+        "accessor export { value };",
+        "accessor export default value;",
+        "accessor import Alias = N;",
+    );
+    let parsed = parse(source, typescript_options()).expect("invalid accessor modifier recovery");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid recovery tape");
+    for tag in [
+        NodeTag::TS_INTERFACE_DECLARATION,
+        NodeTag::TS_PROPERTY_SIGNATURE,
+        NodeTag::CLASS_DECLARATION,
+        NodeTag::TS_MODULE_DECLARATION,
+        NodeTag::TS_ENUM_DECLARATION,
+        NodeTag::VARIABLE_DECLARATION,
+        NodeTag::TS_TYPE_ALIAS_DECLARATION,
+        NodeTag::FUNCTION_DECLARATION,
+        NodeTag::IMPORT_DECLARATION,
+        NodeTag::EXPORT_NAMED_DECLARATION,
+        NodeTag::EXPORT_DEFAULT_DECLARATION,
+        NodeTag::TS_IMPORT_EQUALS_DECLARATION,
+    ] {
+        assert!(
+            node_fields(&parsed, tag).next().is_some(),
+            "missing {tag:?}"
+        );
+    }
+
+    let semantic = parse(
+        source,
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("semantic invalid accessor modifiers");
+    assert!(!semantic.diagnostics.is_empty());
+    semantic
+        .tape
+        .validate()
+        .expect("valid semantic recovery tape");
+}
+
 fn assert_clean_with_tags(name: &str, source: &str, expected_tags: &[NodeTag]) {
     let parsed = parse(source, typescript_options()).expect("parse");
     assert!(

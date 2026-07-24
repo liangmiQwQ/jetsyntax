@@ -384,6 +384,13 @@ impl TypeScriptModifiers {
         accessibility | ((self.readonly as u8) << 2) | ((self.r#override as u8) << 3)
     }
 
+    const fn accessor_wire_flags(self, declare: bool, optional: bool, definite: bool) -> u8 {
+        self.wire_flags()
+            | ((declare as u8) << 4)
+            | ((optional as u8) << 5)
+            | ((definite as u8) << 6)
+    }
+
     const fn index_signature_flags(self, declare: bool, export: bool) -> u8 {
         let accessibility = match self.accessibility {
             Some(accessibility) => accessibility.wire_value(),
@@ -640,6 +647,9 @@ impl<'s> Parser<'s> {
             TokenKind::At if self.options.syntax_extensions.decorators => {
                 self.parse_decorated_statement(position)
             }
+            TokenKind::Accessor if self.starts_typescript_accessor_prefixed_declaration() => {
+                self.parse_typescript_accessor_prefixed_statement(position)
+            }
             TokenKind::Import if self.import_starts_expression() => {
                 self.parse_expression_or_labeled_statement(position)
             }
@@ -653,6 +663,22 @@ impl<'s> Parser<'s> {
         };
         self.rollback_assignment_patterns(assignment_patterns);
         statement
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_accessor_prefixed_statement(
+        &mut self,
+        position: StatementPosition,
+    ) -> Result<ParsedNode, ParseError> {
+        let accessor = self.take();
+        if self.options.semantic_errors {
+            self.error(
+                Self::token_span(accessor),
+                "accessor modifier is not valid on this declaration",
+            );
+        }
+        self.parse_statement_at(position)
     }
 
     #[cold]
@@ -2432,7 +2458,17 @@ impl<'s> Parser<'s> {
                             .is_some_and(|(tag, _)| tag == NodeTag::PRIVATE_IDENTIFIER)
                     })
             }
-            NodeTag::TS_ABSTRACT_PROPERTY_DEFINITION => !typescript_decorators,
+            NodeTag::ACCESSOR_PROPERTY => {
+                typescript_decorators
+                    && fields.first().is_some_and(|&key| {
+                        self.tape
+                            .parser_node_fields(key)
+                            .is_some_and(|(tag, _)| tag == NodeTag::PRIVATE_IDENTIFIER)
+                    })
+            }
+            NodeTag::TS_ABSTRACT_PROPERTY_DEFINITION | NodeTag::TS_ABSTRACT_ACCESSOR_PROPERTY => {
+                !typescript_decorators
+            }
             _ => true,
         }
     }
@@ -3018,6 +3054,12 @@ impl<'s> Parser<'s> {
             false
         };
         if leading_key.is_none()
+            && self.current.kind == TokenKind::Accessor
+            && self.current_starts_auto_accessor()
+        {
+            return self.parse_class_auto_accessor(start, is_static);
+        }
+        if leading_key.is_none()
             && let Some(accessor) = self.current_accessor_kind(true)
         {
             return self.parse_class_accessor(start, is_static, accessor);
@@ -3130,6 +3172,8 @@ impl<'s> Parser<'s> {
         let mut is_static = false;
         let mut index_declare = false;
         let mut index_export = false;
+        let mut auto_accessor = false;
+        let mut accessor_declare = false;
 
         // Parse the contextual TypeScript prelude without stealing modifier-shaped member names.
         loop {
@@ -3157,7 +3201,9 @@ impl<'s> Parser<'s> {
                             "static block implementations are not allowed in ambient contexts",
                         );
                     }
-                    if modifiers.any() && self.options.semantic_errors {
+                    if (modifiers.any() || auto_accessor || accessor_declare)
+                        && self.options.semantic_errors
+                    {
                         self.error(
                             Span::new(start, token.end),
                             "static blocks cannot have TypeScript modifiers",
@@ -3229,6 +3275,32 @@ impl<'s> Parser<'s> {
                 modifiers.readonly = true;
                 continue;
             }
+            if self.options.syntax_extensions.decorator_auto_accessors
+                && self.current_typescript_modifier_matches(TokenKind::Declare, "declare")
+                && (auto_accessor && self.typescript_modifier_has_class_member_follower(false)
+                    || self.current_declare_precedes_typescript_auto_accessor())
+            {
+                let token = self.take();
+                self.diagnose_typescript_modifier_order(
+                    3,
+                    &mut last_modifier_rank,
+                    accessor_declare,
+                    Self::token_span(token),
+                );
+                accessor_declare = true;
+                continue;
+            }
+            if self.current_starts_typescript_auto_accessor_modifier() {
+                let token = self.take();
+                self.diagnose_typescript_modifier_order(
+                    4,
+                    &mut last_modifier_rank,
+                    auto_accessor,
+                    Self::token_span(token),
+                );
+                auto_accessor = true;
+                continue;
+            }
             if self.current_typescript_modifier_matches(TokenKind::Declare, "declare")
                 && self.typescript_modifier_precedes_class_index_signature(false, is_static)
             {
@@ -3289,12 +3361,15 @@ impl<'s> Parser<'s> {
         if leading_key.is_none()
             && let Some(accessor) = self.current_accessor_kind(true)
         {
-            return self.parse_typescript_class_accessor(
-                start,
-                is_static,
-                accessor,
-                member_context,
-            );
+            let element =
+                self.parse_typescript_class_accessor(start, is_static, accessor, member_context)?;
+            if auto_accessor && self.options.semantic_errors {
+                self.error(
+                    element.span,
+                    "accessor modifier is only valid on class properties",
+                );
+            }
+            return Ok(element);
         }
 
         let async_token = if leading_key.is_none() && self.current.kind == TokenKind::Async {
@@ -3327,6 +3402,8 @@ impl<'s> Parser<'s> {
                 computed: false,
                 shorthand: true,
             }
+        } else if auto_accessor {
+            self.parse_auto_accessor_property_name(is_static)?
         } else {
             self.parse_property_name(true)?
         };
@@ -3334,13 +3411,30 @@ impl<'s> Parser<'s> {
         let computed = property_name.computed;
 
         if generator || asynchronous || self.current.kind == TokenKind::LeftParen {
-            return self.parse_typescript_class_method_definition(
+            let element = self.parse_typescript_class_method_definition(
                 start,
                 &property_name,
                 is_static,
                 generator,
                 asynchronous,
                 member_context,
+            )?;
+            if auto_accessor && self.options.semantic_errors {
+                self.error(
+                    element.span,
+                    "accessor modifier is only valid on class properties",
+                );
+            }
+            return Ok(element);
+        }
+
+        if auto_accessor {
+            return self.parse_typescript_auto_accessor_tail(
+                start,
+                &property_name,
+                is_static,
+                member_context,
+                accessor_declare,
             );
         }
 
@@ -3618,6 +3712,200 @@ impl<'s> Parser<'s> {
         self.last_node_tag = Some(tag);
         self.last_assignment_target = AssignmentTargetType::Invalid;
         Ok(ParsedNode { node, span })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_class_auto_accessor(
+        &mut self,
+        start: u32,
+        is_static: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        self.bump();
+        let property_name = self.parse_auto_accessor_property_name(is_static)?;
+        let key = property_name.key;
+        let value = if self.eat(TokenKind::Eq).is_some() {
+            self.parse_class_field_initializer()?.value()
+        } else {
+            self.tape.push_null()?
+        };
+        let end = self.consume_semicolon();
+        self.diagnose_auto_accessor_name(&property_name, is_static);
+        let computed = self.tape.push_bool(property_name.computed)?;
+        let is_static = self.tape.push_bool(is_static)?;
+        let type_annotation = self.tape.push_null()?;
+        self.node(
+            NodeTag::ACCESSOR_PROPERTY,
+            Span::new(start, end),
+            &[key.value(), value, computed, is_static, type_annotation],
+        )
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_auto_accessor_tail(
+        &mut self,
+        start: u32,
+        property_name: &ParsedPropertyName,
+        is_static: bool,
+        member_context: TypeScriptClassMemberContext,
+        declare: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let modifiers = member_context.modifiers;
+        let key = property_name.key;
+        let optional = self.eat(TokenKind::Question).is_some();
+        let definite = !optional
+            && !self.current.flags.line_break_before()
+            && self.eat(TokenKind::Bang).is_some();
+        let (type_annotation, has_type_annotation) = if self.eat(TokenKind::Colon).is_some() {
+            (self.parse_type_annotation()?.value(), true)
+        } else {
+            (self.tape.push_null()?, false)
+        };
+        let initializer = self.eat(TokenKind::Eq);
+        let has_initializer = initializer.is_some();
+        if (has_type_annotation || !modifiers.readonly)
+            && self.reports_ambient_declaration_errors()
+            && let Some(equals) = initializer
+        {
+            self.error(
+                Self::token_span(equals),
+                "class property initializers are not allowed in ambient contexts",
+            );
+        }
+        let value = if has_initializer && modifiers.r#abstract {
+            let tape = self.tape.checkpoint();
+            let assignment_patterns = self.assignment_pattern_checkpoint();
+            let last_node_tag = self.last_node_tag;
+            let last_assignment_target = self.last_assignment_target;
+            self.parse_class_field_initializer()?;
+            self.tape.rollback(tape)?;
+            self.rollback_assignment_patterns(assignment_patterns);
+            self.last_node_tag = last_node_tag;
+            self.last_assignment_target = last_assignment_target;
+            self.tape.push_null()?
+        } else if has_initializer {
+            self.parse_class_field_initializer()?.value()
+        } else {
+            self.tape.push_null()?
+        };
+        let end = self.consume_semicolon();
+        self.diagnose_auto_accessor_name(property_name, is_static);
+        self.diagnose_typescript_class_member_modifiers(
+            modifiers,
+            key.span,
+            false,
+            false,
+            member_context.class_has_super,
+        );
+        if self.options.semantic_errors {
+            if modifiers.readonly {
+                self.error(key.span, "auto-accessors cannot have the readonly modifier");
+            }
+            if declare {
+                self.error(key.span, "auto-accessors cannot have the declare modifier");
+            }
+            if optional {
+                self.error(key.span, "auto-accessors cannot be optional");
+            }
+            if definite && !has_type_annotation {
+                self.error(
+                    key.span,
+                    "auto-accessor definite assertions require a type annotation",
+                );
+            }
+            if definite && has_initializer {
+                self.error(
+                    key.span,
+                    "auto-accessor definite assertions cannot have an initializer",
+                );
+            }
+            if definite && (is_static || modifiers.r#abstract || self.in_ambient_declaration()) {
+                self.error(
+                    key.span,
+                    "auto-accessor definite assertions are not permitted in this context",
+                );
+            }
+        }
+        self.diagnose_typescript_abstract_class_member(
+            member_context,
+            key.span,
+            is_static,
+            TypeScriptAbstractMemberKind::Property { has_initializer },
+        );
+        let computed = self.tape.push_bool(property_name.computed)?;
+        let is_static = self.tape.push_bool(is_static)?;
+        let fields = [key.value(), value, computed, is_static, type_annotation];
+        let tag = if modifiers.r#abstract {
+            NodeTag::TS_ABSTRACT_ACCESSOR_PROPERTY
+        } else {
+            NodeTag::ACCESSOR_PROPERTY
+        };
+        let flags = modifiers.accessor_wire_flags(declare, optional, definite);
+        let node = self
+            .tape
+            .push_node(tag, Span::new(start, end), flags, &fields)?;
+        self.last_node_tag = Some(tag);
+        self.last_assignment_target = AssignmentTargetType::Invalid;
+        Ok(ParsedNode {
+            node,
+            span: Span::new(start, end),
+        })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_auto_accessor_property_name(
+        &mut self,
+        is_static: bool,
+    ) -> Result<ParsedPropertyName, ParseError> {
+        if self.current.kind != TokenKind::PrivateIdentifier {
+            return self.parse_property_name(true);
+        }
+        let (key, name) = self.parse_private_identifier()?;
+        let name_span = Span::new(key.span.start.saturating_add(1), key.span.end);
+        if name == "constructor" && self.reports_private_early_errors() {
+            self.error(key.span, "private name `#constructor` is not allowed");
+        }
+        let declared = self.context.declare_private_accessor(
+            name.clone(),
+            name_span,
+            PrivateAccessorKind::Get,
+            is_static,
+        );
+        if declared {
+            let _ = self.context.declare_private_accessor(
+                name,
+                name_span,
+                PrivateAccessorKind::Set,
+                is_static,
+            );
+        }
+        Ok(ParsedPropertyName {
+            key,
+            computed: false,
+            shorthand: false,
+        })
+    }
+
+    fn diagnose_auto_accessor_name(&mut self, property_name: &ParsedPropertyName, is_static: bool) {
+        if !property_name.computed
+            && self.static_property_name_matches(property_name.key.span, "constructor")
+        {
+            self.error(
+                property_name.key.span,
+                "classes cannot have an auto-accessor named constructor",
+            );
+        }
+        if is_static
+            && !property_name.computed
+            && self.static_property_name_matches(property_name.key.span, "prototype")
+        {
+            self.error(
+                property_name.key.span,
+                "static class auto-accessor cannot be named `prototype`",
+            );
+        }
     }
 
     fn parse_class_accessor(
@@ -8172,6 +8460,19 @@ impl<'s> Parser<'s> {
 
     fn parse_type_member(&mut self, in_interface: bool) -> Result<ParsedNode, ParseError> {
         let start = self.current.start;
+        let accessor = if self.current_starts_typescript_auto_accessor_modifier() {
+            Some(self.take())
+        } else {
+            None
+        };
+        if let Some(accessor) = accessor
+            && self.options.semantic_errors
+        {
+            self.error(
+                Self::token_span(accessor),
+                "accessor modifier is not valid on a type member",
+            );
+        }
         if matches!(self.current.kind, TokenKind::Lt | TokenKind::LeftParen) {
             return self.parse_type_signature_member(start, NodeTag::TS_CALL_SIGNATURE_DECLARATION);
         }
@@ -9969,6 +10270,86 @@ impl<'s> Parser<'s> {
             )
             || Self::is_member_identifier_name(next))
         .then_some(accessor)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn current_starts_auto_accessor(&self) -> bool {
+        if !self.options.syntax_extensions.decorator_auto_accessors
+            || self.current.kind != TokenKind::Accessor
+            || self.current.flags.escaped()
+        {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let next = lookahead.next_token();
+        !next.flags.line_break_before() && Self::is_property_name_start(next.kind, true)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn current_starts_typescript_auto_accessor_modifier(&self) -> bool {
+        self.options.syntax_extensions.decorator_auto_accessors
+            && self.current.kind == TokenKind::Accessor
+            && !self.current.flags.escaped()
+            && self.typescript_modifier_has_class_member_follower(false)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn current_declare_precedes_typescript_auto_accessor(&self) -> bool {
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        loop {
+            let follower = lookahead.next_token();
+            if follower.flags.line_break_before() {
+                return false;
+            }
+            if follower.kind == TokenKind::Accessor && !follower.flags.escaped() {
+                return true;
+            }
+            if !matches!(
+                follower.kind,
+                TokenKind::Public
+                    | TokenKind::Protected
+                    | TokenKind::Private
+                    | TokenKind::Static
+                    | TokenKind::Abstract
+                    | TokenKind::Override
+                    | TokenKind::Readonly
+            ) {
+                return false;
+            }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn starts_typescript_accessor_prefixed_declaration(&self) -> bool {
+        if !self.options.language.is_typescript()
+            || !self.options.syntax_extensions.decorator_auto_accessors
+            || self.current.flags.escaped()
+        {
+            return false;
+        }
+        let mut lookahead = Lexer::new(self.source);
+        lookahead.set_position(self.current.end as usize);
+        let next = lookahead.next_token();
+        !next.flags.line_break_before()
+            && matches!(
+                next.kind,
+                TokenKind::Class
+                    | TokenKind::Interface
+                    | TokenKind::Namespace
+                    | TokenKind::Module
+                    | TokenKind::Enum
+                    | TokenKind::Var
+                    | TokenKind::Type
+                    | TokenKind::Function
+                    | TokenKind::Import
+                    | TokenKind::Export
+            )
     }
 
     fn current_accessibility_modifier(&self) -> Option<AccessibilityModifier> {

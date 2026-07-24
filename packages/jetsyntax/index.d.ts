@@ -12,6 +12,7 @@ export interface ParseOptions {
   typescriptJsCompatibility?: boolean;
   optionalChainingAssign?: boolean;
   decorators?: boolean;
+  decoratorAutoAccessors?: boolean;
   decoratorMode?: DecoratorMode;
 }
 
