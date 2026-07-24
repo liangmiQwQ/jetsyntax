@@ -6642,6 +6642,78 @@ fn parses_typescript_auto_accessors_with_modifiers_and_recovery() {
 }
 
 #[test]
+fn parses_typescript_private_brand_checks_for_auto_accessors() {
+    let parsed = parse(
+        "class C { accessor #field: number; has(value: object): boolean { return #field in value; } }",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("TypeScript private brand check");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid private-brand tape");
+    assert_eq!(node_fields(&parsed, NodeTag::BINARY_EXPRESSION).count(), 1);
+    assert_eq!(node_fields(&parsed, NodeTag::PRIVATE_IDENTIFIER).count(), 2);
+
+    let syntax_only = parse(
+        concat!(
+            "class Recovery {",
+            "#field;",
+            "check(value: object) {",
+            "#field in value;",
+            "(#field) in value;",
+            "1 + #field in value;",
+            "#field in #field in value;",
+            "#missing in value;",
+            "}",
+            "}",
+            "#outside in value;"
+        ),
+        typescript_options(),
+    )
+    .expect("TypeScript syntax-only private recovery");
+    assert!(
+        syntax_only.diagnostics.is_empty(),
+        "{:#?}",
+        syntax_only.diagnostics
+    );
+    syntax_only
+        .tape
+        .validate()
+        .expect("valid syntax-only private recovery tape");
+    assert_eq!(
+        node_fields(&syntax_only, NodeTag::BINARY_EXPRESSION).count(),
+        8
+    );
+
+    let semantic = parse(
+        "class C { #field; has(value: object) { return (#field) in value; } }",
+        ParseOptions {
+            semantic_errors: true,
+            ..typescript_options()
+        },
+    )
+    .expect("TypeScript semantic private recovery");
+    assert!(!semantic.diagnostics.is_empty());
+    semantic
+        .tape
+        .validate()
+        .expect("valid semantic private recovery tape");
+
+    let invalid_assignment = parse(
+        "class C { #field; has(value: object) { #field in value = true; } }",
+        typescript_options(),
+    )
+    .expect("TypeScript private-brand assignment recovery");
+    assert!(!invalid_assignment.diagnostics.is_empty());
+    invalid_assignment
+        .tape
+        .validate()
+        .expect("valid private-brand assignment recovery tape");
+}
+
+#[test]
 fn validates_decorated_typescript_auto_accessor_targets_by_mode() {
     let standard = parse(
         "abstract class C { @dec accessor #private; @dec abstract accessor required: string; }",

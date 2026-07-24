@@ -5534,8 +5534,10 @@ impl<'s> Parser<'s> {
                 | AssignmentOperator::Nullish => AssignmentTargetPolicy::LogicalAssignment,
                 _ => AssignmentTargetPolicy::CompoundAssignment,
             };
+            // TypeScript's syntax-only parser still rejects binary and logical expressions on
+            // the left of an assignment; other invalid targets are deferred to semantic checks.
             if !self.reports_ecmascript_early_errors()
-                && self.last_node_tag == Some(NodeTag::AWAIT_EXPRESSION)
+                && self.syntax_only_assignment_target_is_invalid()
             {
                 self.error(left.span, policy.diagnostic());
             }
@@ -5732,7 +5734,13 @@ impl<'s> Parser<'s> {
         // TypeScript gives `as` and `satisfies` the same binding threshold as relational `in`.
         const TS_ASSERTION_BINDING: u8 = 14;
 
-        let mut left = self.parse_unary_expression()?;
+        let mut left = if self.current.kind == TokenKind::PrivateIdentifier
+            && self.reports_private_early_errors()
+        {
+            self.parse_private_in_expression(minimum, allow_in)?
+        } else {
+            self.parse_unary_expression()?
+        };
         loop {
             if self.options.language.is_typescript()
                 && minimum <= TS_ASSERTION_BINDING
@@ -5781,6 +5789,37 @@ impl<'s> Parser<'s> {
             )?;
         }
         Ok(left)
+    }
+
+    fn parse_private_in_expression(
+        &mut self,
+        minimum: u8,
+        allow_in: bool,
+    ) -> Result<ParsedNode, ParseError> {
+        let left = self.parse_private_reference()?;
+        let Some(binding) = binary_binding(TokenKind::In, allow_in) else {
+            self.error(
+                left.span,
+                "private identifiers are only valid in member access or as the left operand of `in`",
+            );
+            return Ok(left);
+        };
+        if self.current.kind != TokenKind::In || binding.left < minimum {
+            self.error(
+                left.span,
+                "private identifiers are only valid in member access or as the left operand of `in`",
+            );
+            return Ok(left);
+        }
+
+        self.bump();
+        let right = self.parse_binary_expression(binding.right, allow_in)?;
+        let operator = self.tape.push_u32(binding.operator as u32)?;
+        self.node(
+            NodeTag::BINARY_EXPRESSION,
+            Span::new(left.span.start, right.span.end),
+            &[operator, left.value(), right.value()],
+        )
     }
 
     fn parse_unary_expression(&mut self) -> Result<ParsedNode, ParseError> {
@@ -6323,6 +6362,16 @@ impl<'s> Parser<'s> {
             TokenKind::New => self.parse_new_expression(),
             TokenKind::Import => self.parse_import_expression_or_meta(),
             TokenKind::Lt if self.options.language.is_jsx() => self.parse_jsx_element(false),
+            TokenKind::PrivateIdentifier => {
+                let reference = self.parse_private_reference()?;
+                if self.reports_private_early_errors() {
+                    self.error(
+                        reference.span,
+                        "private identifiers are only valid in member access or as the left operand of `in`",
+                    );
+                }
+                Ok(reference)
+            }
             _ => self.invalid_expression(),
         }
     }
@@ -7399,13 +7448,19 @@ impl<'s> Parser<'s> {
 
     fn parse_member_property(&mut self) -> Result<ParsedNode, ParseError> {
         if self.current.kind == TokenKind::PrivateIdentifier {
-            let (node, name) = self.parse_private_identifier()?;
-            let name_span = Span::new(node.span.start.saturating_add(1), node.span.end);
-            let _ = self.context.use_private(name, name_span);
-            return Ok(node);
+            return self.parse_private_reference();
         }
         let token = self.take();
         self.parse_identifier_name_from(token)
+    }
+
+    fn parse_private_reference(&mut self) -> Result<ParsedNode, ParseError> {
+        let (node, name) = self.parse_private_identifier()?;
+        if self.reports_private_early_errors() {
+            let name_span = Span::new(node.span.start.saturating_add(1), node.span.end);
+            let _ = self.context.use_private(name, name_span);
+        }
+        Ok(node)
     }
 
     fn parse_identifier_name(&mut self) -> Result<ParsedNode, ParseError> {
@@ -9572,6 +9627,15 @@ impl<'s> Parser<'s> {
         if !valid {
             self.error(span, policy.diagnostic());
         }
+    }
+
+    fn syntax_only_assignment_target_is_invalid(&self) -> bool {
+        self.last_node_tag == Some(NodeTag::AWAIT_EXPRESSION)
+            || self.options.language.is_typescript()
+                && matches!(
+                    self.last_node_tag,
+                    Some(NodeTag::BINARY_EXPRESSION | NodeTag::LOGICAL_EXPRESSION)
+                )
     }
 
     const fn assignment_pattern_checkpoint(&self) -> AssignmentPatternCheckpoint {

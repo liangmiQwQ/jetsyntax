@@ -2326,6 +2326,74 @@ fn parser_should_diagnose_invalid_private_member_scope() {
     }
 }
 
+/// A private identifier is an expression operand only in the dedicated `#name in value` grammar.
+#[test]
+fn parser_should_parse_private_brand_checks() {
+    let cases = [
+        GrammarCase::script(
+            "private field brand check",
+            "class C { #field; has(value) { return #field in value; } }",
+            &[NodeTag::BINARY_EXPRESSION, NodeTag::PRIVATE_IDENTIFIER],
+        ),
+        GrammarCase::script(
+            "escaped private brand check",
+            "class C { #\\u{66}ield; has(value) { return #\\u{66}ield in value; } }",
+            &[NodeTag::BINARY_EXPRESSION, NodeTag::PRIVATE_IDENTIFIER],
+        ),
+        GrammarCase::script(
+            "outer private name in a nested class",
+            "class Outer { #field; make(value) { return class Inner { has() { return #field in value; } }; } }",
+            &[NodeTag::BINARY_EXPRESSION, NodeTag::CLASS_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "private brand check precedence",
+            "class C { #field; has(value) { return #field in value << 0 || false; } }",
+            &[NodeTag::BINARY_EXPRESSION, NodeTag::LOGICAL_EXPRESSION],
+        ),
+    ];
+
+    assert_clean_cases(&cases);
+}
+
+/// Private identifiers in ordinary operand positions recover without becoming valid expressions.
+#[test]
+fn parser_should_diagnose_invalid_private_brand_operands() {
+    let cases = [
+        GrammarCase::script(
+            "private brand check outside a class",
+            "#field in value;",
+            &[NodeTag::BINARY_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "undeclared private brand",
+            "class C { has(value) { return #missing in value; } }",
+            &[NodeTag::BINARY_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "bare private identifier",
+            "class C { #field; read() { return #field; } }",
+            &[NodeTag::PRIVATE_IDENTIFIER],
+        ),
+        GrammarCase::script(
+            "parenthesized private identifier",
+            "class C { #field; has(value) { return (#field) in value; } }",
+            &[NodeTag::BINARY_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "private identifier as an additive operand",
+            "class C { #field; read() { return #field + 1; } }",
+            &[NodeTag::BINARY_EXPRESSION],
+        ),
+        GrammarCase::script(
+            "private identifier under await",
+            "class C { #field; async has(value) { return await #field in value; } }",
+            &[NodeTag::AWAIT_EXPRESSION, NodeTag::BINARY_EXPRESSION],
+        ),
+    ];
+
+    assert_diagnostic_cases(&cases, true);
+}
+
 /// Async and generator context controls whether `await` and `yield` are expressions or identifiers.
 #[test]
 fn parser_should_accept_async_functions_and_generators() {

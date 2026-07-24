@@ -4052,6 +4052,45 @@ describe("parse", () => {
     });
   });
 
+  it("materializes private brand checks with relational precedence", () => {
+    const source = String.raw`class C {
+  #\u{66}ield;
+  has(value) {
+    return #\u{66}ield in value << 0;
+  }
+}`;
+    const result = parse(source, { range: true, semanticErrors: true });
+
+    expect(result.diagnostics).toEqual([]);
+    const expression = result.program.body[0].body.body[1].value.body.body[0].argument;
+    expect(expression).toMatchObject({
+      type: "BinaryExpression",
+      operator: "in",
+      left: {
+        type: "PrivateIdentifier",
+        name: "field",
+      },
+      right: {
+        type: "BinaryExpression",
+        operator: "<<",
+        left: { type: "Identifier", name: "value" },
+        right: { type: "Literal", value: 0 },
+      },
+    });
+    expect(source.slice(expression.left.start, expression.left.end)).toBe(String.raw`#\u{66}ield`);
+
+    for (
+      const invalid of [
+        "#field in value;",
+        "class C { #field; read() { return #field; } }",
+        "class C { #field; has(value) { return (#field) in value; } }",
+        "class C { #field; async has(value) { return await #field in value; } }",
+      ]
+    ) {
+      expect(parse(invalid, { semanticErrors: true }).diagnostics).not.toEqual([]);
+    }
+  });
+
   it("materializes object and class generator methods", () => {
     const source = [
       "const methods = { *plain(value) { yield value; }, *[key]() {}, async *stream() { await load(); } };",
