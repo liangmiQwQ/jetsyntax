@@ -252,6 +252,7 @@ enum TypeScriptDeclareDeclarationKind {
     Variable,
     Function { asynchronous: bool },
     Class { abstract_class: bool },
+    TypeAlias,
     Enum { is_const: bool },
     Namespace,
     ExternalModule,
@@ -1077,6 +1078,9 @@ impl<'s> Parser<'s> {
             }
             TypeScriptDeclareDeclarationKind::Class { abstract_class } => {
                 self.parse_typescript_declare_class(abstract_class)
+            }
+            TypeScriptDeclareDeclarationKind::TypeAlias => {
+                self.parse_typescript_declare_type_alias()
             }
             TypeScriptDeclareDeclarationKind::Enum { is_const } => {
                 self.parse_typescript_declare_enum(is_const)
@@ -9293,14 +9297,39 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_type_alias_declaration(&mut self) -> Result<ParsedNode, ParseError> {
-        let start = self.expect(TokenKind::Type).start;
+        self.parse_type_alias_declaration_impl::<false>(0)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn parse_typescript_declare_type_alias(&mut self) -> Result<ParsedNode, ParseError> {
+        let start = self.expect(TokenKind::Declare).start;
+        self.parse_type_alias_declaration_impl::<true>(start)
+    }
+
+    fn parse_type_alias_declaration_impl<const EXPLICIT_TYPESCRIPT_DECLARE: bool>(
+        &mut self,
+        declaration_start: u32,
+    ) -> Result<ParsedNode, ParseError> {
+        let type_start = self.expect(TokenKind::Type).start;
+        let start = if EXPLICIT_TYPESCRIPT_DECLARE {
+            declaration_start
+        } else {
+            type_start
+        };
         let id = self.parse_binding_identifier(BindingKind::Type)?;
         let type_parameters = self.parse_type_parameters()?;
         self.expect(TokenKind::Eq);
         let annotation = self.parse_type()?;
         let end = self.consume_semicolon();
+        // A cold tag carries declared metadata without widening every ordinary alias record.
+        let tag = if EXPLICIT_TYPESCRIPT_DECLARE {
+            NodeTag::TS_DECLARE_TYPE_ALIAS_DECLARATION
+        } else {
+            NodeTag::TS_TYPE_ALIAS_DECLARATION
+        };
         self.node(
-            NodeTag::TS_TYPE_ALIAS_DECLARATION,
+            tag,
             Span::new(start, end),
             &[id.value(), type_parameters, annotation.value()],
         )
@@ -10543,6 +10572,12 @@ impl<'s> Parser<'s> {
                 } else {
                     Some(TypeScriptDeclareDeclarationKind::Variable)
                 }
+            }
+            TokenKind::Type => {
+                let name = lookahead.next_token();
+                (!name.flags.line_break_before()
+                    && self.is_typescript_declaration_binding_identifier(name))
+                .then_some(TypeScriptDeclareDeclarationKind::TypeAlias)
             }
             TokenKind::Enum => Some(TypeScriptDeclareDeclarationKind::Enum { is_const: false }),
             TokenKind::Function => Some(TypeScriptDeclareDeclarationKind::Function {

@@ -3540,6 +3540,48 @@ describe("parse", () => {
     });
   });
 
+  it("materializes declared TypeScript type aliases", () => {
+    const source = [
+      "declare type Box<T> = { value: T };",
+      "export declare type Result = string | number;",
+      "type Plain = string;",
+    ].join("\n");
+    const result = parse(source, { lang: "ts", sourceType: "module", range: true });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.program.body).toMatchObject([
+      {
+        type: "TSTypeAliasDeclaration",
+        declare: true,
+        id: { name: "Box" },
+        typeParameters: { type: "TSTypeParameterDeclaration" },
+      },
+      {
+        type: "ExportNamedDeclaration",
+        exportKind: "type",
+        declaration: {
+          type: "TSTypeAliasDeclaration",
+          declare: true,
+          id: { name: "Result" },
+        },
+      },
+      {
+        type: "TSTypeAliasDeclaration",
+        declare: false,
+        id: { name: "Plain" },
+      },
+    ]);
+    const declared = [result.program.body[0], result.program.body[1].declaration];
+    for (const declaration of declared) {
+      expect(source.slice(declaration.start, declaration.start + 7)).toBe("declare");
+      expect(declaration.range).toEqual([declaration.start, declaration.end]);
+    }
+
+    const separated = parse("declare type\nT = number;", { lang: "ts" });
+    expect(separated.diagnostics).not.toEqual([]);
+    expect(JSON.stringify(separated.program)).not.toContain("TSTypeAliasDeclaration");
+  });
+
   it("materializes explicit TypeScript declared enums and type-only exports", () => {
     const source = [
       "declare enum Direction { Up, Down = 2 }",

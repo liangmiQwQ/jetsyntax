@@ -245,6 +245,7 @@ for (
     ]]],
     [594, ["TSAbstractAccessorProperty", ["key", "value", "computed", "static", "typeAnnotation"]]],
     [595, ["TSTypePredicate", ["parameterName", "typeAnnotation", "asserts"]]],
+    [596, ["TSTypeAliasDeclaration", ["id", "typeParameters", "typeAnnotation"]]],
   ]
 ) NODE_SCHEMAS[tag] = schema;
 
@@ -1120,10 +1121,11 @@ function decodeTapeInternal(source, tape, options, trusted) {
         node.declare = false;
         return node;
       case 525:
+      case 596:
         node.id = fields[0];
         node.typeParameters = fields[1];
         node.typeAnnotation = fields[2];
-        node.declare = false;
+        node.declare = tag === 596;
         return node;
       case 526:
         node.id = fields[0];

@@ -280,6 +280,7 @@ impl NodeTag {
     pub const TS_DECORATED_CLASS_EXPRESSION: Self = Self(593);
     pub const TS_ABSTRACT_ACCESSOR_PROPERTY: Self = Self(594);
     pub const TS_TYPE_PREDICATE: Self = Self(595);
+    pub const TS_DECLARE_TYPE_ALIAS_DECLARATION: Self = Self(596);
 
     #[must_use]
     pub const fn new(value: u16) -> Option<Self> {

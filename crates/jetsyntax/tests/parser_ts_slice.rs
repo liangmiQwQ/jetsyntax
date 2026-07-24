@@ -1350,6 +1350,61 @@ fn validates_contextual_typescript_declaration_contexts() {
 }
 
 #[test]
+fn parses_declared_typescript_type_aliases() {
+    let source =
+        "declare type Box<T> = { value: T }; export declare type Result = string | number;";
+    let parsed = parse(
+        source,
+        ParseOptions {
+            source_kind: SourceKind::Module,
+            ..typescript_options()
+        },
+    )
+    .expect("parse declared type aliases");
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    parsed.tape.validate().expect("valid declared-alias tape");
+
+    let declared_tag = NodeTag::TS_DECLARE_TYPE_ALIAS_DECLARATION;
+    assert_eq!(node_fields(&parsed, declared_tag).count(), 2);
+    assert!(node_fields(&parsed, declared_tag).all(|fields| fields.len() == 3));
+    let spans = parsed
+        .tape
+        .validation()
+        .filter_map(|record| match record.expect("valid record").value {
+            TapeValue::Node { tag, span, .. } if tag == declared_tag => {
+                Some(&source[span.start as usize..span.end as usize])
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spans,
+        [
+            "declare type Box<T> = { value: T };",
+            "declare type Result = string | number;",
+        ]
+    );
+
+    let ordinary =
+        parse("type Plain = string;", typescript_options()).expect("parse ordinary type alias");
+    assert!(ordinary.diagnostics.is_empty());
+    assert_eq!(
+        node_fields(&ordinary, NodeTag::TS_TYPE_ALIAS_DECLARATION).count(),
+        1
+    );
+    assert_eq!(node_fields(&ordinary, declared_tag).count(), 0);
+
+    let separated = parse("declare type\nT = number;", typescript_options())
+        .expect("recover separated declared alias");
+    assert!(!separated.diagnostics.is_empty());
+    assert_eq!(node_fields(&separated, declared_tag).count(), 0);
+    assert_eq!(
+        node_fields(&separated, NodeTag::TS_TYPE_ALIAS_DECLARATION).count(),
+        0
+    );
+}
+
+#[test]
 fn keeps_type_bindings_separate_from_parent_value_scopes() {
     let source = "function convert(value) { type value = number; } try {} catch (error) { type error = unknown; }";
     let parsed = parse(
